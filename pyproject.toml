@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "resin-slicer"
+version = "0.1.0"
+description = "A dependency-light MSLA resin slicer with native GOO and CTB export."
+requires-python = ">=3.10"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Codex" }]
+
+[project.scripts]
+resin-slicer = "resin_slicer.cli:main"
+resin-slicer-gui = "resin_slicer.gui:main"
+resin-slicer-electron-bridge = "resin_slicer.electron_bridge:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["resin_slicer*"]

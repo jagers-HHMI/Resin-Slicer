@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Resin Slicer</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="app">
+      <section class="viewer-shell">
+        <canvas id="viewer"></canvas>
+        <div class="viewer-status">
+          <span id="meshStatus">No STL loaded</span>
+          <span id="supportStatus">Supports not generated</span>
+        </div>
+      </section>
+
+      <aside class="panel">
+        <header>
+          <h1>Resin Slicer</h1>
+          <p>Orient, preview supports, then export GOO or CTB.</p>
+        </header>
+
+        <section class="group workflow">
+          <h2>Job</h2>
+          <button id="openButton">Open STL</button>
+          <label>Input <input id="inputPath" placeholder="Choose an STL or paste a full path and press Enter"></label>
+          <div class="row">
+            <label>Format
+              <select id="format">
+                <option value="goo">GOO</option>
+                <option value="ctb">CTB</option>
+              </select>
+            </label>
+            <button id="saveButton">Choose Output</button>
+          </div>
+          <label>Output <input id="outputPath"></label>
+          <label class="check"><input id="supportsEnabled" type="checkbox" checked> Generate supports</label>
+        </section>
+
+        <section class="actions">
+          <button id="previewButton">Generate Support Preview</button>
+          <button id="sliceButton" class="primary">Slice</button>
+        </section>
+        <pre id="log"></pre>
+
+        <div class="settings-stack">
+          <details class="group">
+            <summary>
+              <span>Placement</span>
+              <small>Orientation, position, scale</small>
+            </summary>
+            <div class="grid three">
+              <label>Rot X <input id="rotateX" type="number" step="1" value="0"></label>
+              <label>Rot Y <input id="rotateY" type="number" step="1" value="0"></label>
+              <label>Rot Z <input id="rotateZ" type="number" step="1" value="0"></label>
+              <label>Move X <input id="translateX" type="number" step="0.1" value="0"></label>
+              <label>Move Y <input id="translateY" type="number" step="0.1" value="0"></label>
+              <label>Move Z <input id="translateZ" type="number" step="0.1" value="0"></label>
+            </div>
+            <label>Scale <input id="scale" type="number" step="0.01" value="1"></label>
+            <label class="check"><input id="centerModel" type="checkbox" checked> Center on build plate</label>
+          </details>
+
+          <details class="group">
+            <summary>
+              <span>Printer</span>
+              <small>Build volume and resolution</small>
+            </summary>
+            <div class="preset-row">
+              <button id="importMachineButton">Import Machine</button>
+              <button id="exportMachineButton">Export Machine</button>
+            </div>
+            <label>Profile <select id="profile"></select></label>
+            <label>Machine name <input id="machineName" value="Generic MSLA"></label>
+            <div class="grid two">
+              <label>X pixels <input id="resolutionX" type="number"></label>
+              <label>Y pixels <input id="resolutionY" type="number"></label>
+              <label>X mm <input id="sizeX" type="number" step="0.01"></label>
+              <label>Y mm <input id="sizeY" type="number" step="0.01"></label>
+              <label>Z mm <input id="sizeZ" type="number" step="0.01"></label>
+              <label>Layer mm <input id="layerHeight" type="number" step="0.01"></label>
+            </div>
+          </details>
+
+          <details class="group">
+            <summary>
+              <span>Resin</span>
+              <small>Exposure, lift, retract</small>
+            </summary>
+            <div class="preset-row">
+              <button id="importResinButton">Import Resin</button>
+              <button id="exportResinButton">Export Resin</button>
+            </div>
+            <label>Resin name <input id="resinName" value="Standard"></label>
+            <div class="grid two">
+              <label>Normal exposure <input id="exposure" type="number" step="0.01" value="2.5"></label>
+              <label>Bottom exposure <input id="bottomExposure" type="number" step="0.1" value="35"></label>
+              <label>Bottom layers <input id="bottomLayers" type="number" step="1" value="6"></label>
+              <label>Transition layers <input id="transitionLayers" type="number" step="1" value="6"></label>
+              <label>Lift distance <input id="liftDistance" type="number" step="0.1" value="5"></label>
+              <label>Lift speed <input id="liftSpeed" type="number" step="1" value="65"></label>
+              <label>Retract distance <input id="retractDistance" type="number" step="0.1" value="5"></label>
+              <label>Retract speed <input id="retractSpeed" type="number" step="1" value="150"></label>
+              <label>Wait after retract <input id="waitAfterRetract" type="number" step="0.1" value="0.2"></label>
+              <label>Density g/ml <input id="resinDensity" type="number" step="0.01" value="1.1"></label>
+              <label>Light PWM <input id="lightPwm" type="number" step="1" value="255"></label>
+              <label>Bottom PWM <input id="bottomLightPwm" type="number" step="1" value="255"></label>
+            </div>
+          </details>
+
+          <details class="group">
+            <summary>
+              <span>Support Basics</span>
+              <small>Lift, overhang, spacing</small>
+            </summary>
+            <div class="preset-row">
+              <button id="importSupportButton">Import Supports</button>
+              <button id="exportSupportButton">Export Supports</button>
+            </div>
+            <div class="grid two">
+            <label>Lift mm <input id="modelLift" type="number" step="0.1" value="5"></label>
+            <label>Overhang deg <input id="overhangAngle" type="number" step="1" value="45"></label>
+            <label>Spacing mm <input id="supportSpacing" type="number" step="0.1" value="3"></label>
+            <label class="check"><input id="primarySupportsEnabled" type="checkbox"> Primary extras</label>
+            <label>Primary density <input id="primaryDensityMultiplier" type="number" step="0.1" value="2"></label>
+            <label>Primary radius <input id="primaryAreaRadius" type="number" step="0.1" value="4"></label>
+            <label>Max primary extra <input id="primaryMaxExtra" type="number" step="1" value="8"></label>
+            <label>Post radius <input id="postRadius" type="number" step="0.01" value="0.28"></label>
+            <label>Tip radius <input id="tipRadius" type="number" step="0.01" value="0.18"></label>
+            <label>Tip type
+              <select id="tipType">
+                <option value="cone">Cone</option>
+                <option value="sphere">Sphere</option>
+                <option value="cylinder">Cylinder</option>
+              </select>
+            </label>
+            </div>
+          </details>
+
+          <details class="group">
+            <summary>
+              <span>Tip And Bed</span>
+              <small>Contact shape and base interface</small>
+            </summary>
+            <div class="grid two">
+            <label>Tip length <input id="tipLength" type="number" step="0.1" value="0.8"></label>
+            <label>Tip angle <input id="tipAngle" type="number" step="1" value="25"></label>
+            <label>Foot radius <input id="footRadius" type="number" step="0.01" value="0.8"></label>
+            <label>Bed interface
+              <select id="bedInterface">
+                <option value="raft">Raft</option>
+                <option value="feet">Feet</option>
+                <option value="skate">Skate</option>
+                <option value="none">None</option>
+              </select>
+            </label>
+            <label>Raft margin <input id="raftMargin" type="number" step="0.1" value="0.6"></label>
+            </div>
+          </details>
+
+          <details class="group">
+            <summary>
+              <span>Support Access</span>
+              <small>Clearance, reach, enforcers</small>
+            </summary>
+            <div class="grid two">
+            <label>Path clearance <input id="collisionClearance" type="number" step="0.01" value="0.08"></label>
+            <label>Base reach <input id="maxBaseReach" type="number" step="1" value="45"></label>
+            <label>Max shaft angle <input id="maxSupportAngle" type="number" step="1" value="35"></label>
+            <label class="check"><input id="enforcersEnabled" type="checkbox"> Enforcers</label>
+            <label>Enforcer reach <input id="enforcerReach" type="number" step="0.5" value="10"></label>
+            <label>Enforcer drop <input id="enforcerMinDrop" type="number" step="0.1" value="1"></label>
+            </div>
+          </details>
+
+          <details class="group">
+            <summary>
+              <span>Bracing</span>
+              <small>Cross-support structure</small>
+            </summary>
+            <div class="grid two">
+            <label class="check"><input id="braceEnabled" type="checkbox" checked> Cross braces</label>
+            <label>Brace radius <input id="braceRadius" type="number" step="0.01" value="0.18"></label>
+            <label>Brace height <input id="braceHeight" type="number" step="0.1" value="3"></label>
+            <label>Brace distance <input id="braceDistance" type="number" step="0.5" value="8"></label>
+            </div>
+          </details>
+        </div>
+      </aside>
+    </main>
+    <script src="./renderer.js"></script>
+  </body>
+</html>

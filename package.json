@@ -1,0 +1,14 @@
+{
+  "name": "resin-slicer-electron",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Electron front end for the Python resin slicer backend.",
+  "main": "electron/main.js",
+  "scripts": {
+    "start": "electron .",
+    "check": "node --check electron/main.js && node --check electron/preload.js && node --check electron/renderer.js"
+  },
+  "devDependencies": {
+    "electron": "^33.3.0"
+  }
+}

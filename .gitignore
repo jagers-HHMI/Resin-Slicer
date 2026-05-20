@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+node_modules/
+dist/
+.electron-cache/
+*.goo
+*.ctb
+*.stl
+*.exe
+*.zip
