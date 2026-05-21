@@ -35,6 +35,7 @@ Copy-Item -Path (Join-Path $runtimeDir "*") -Destination $nextDist -Recurse -For
 
 Write-Host "Copying app files..."
 $items = @(
+    "assets",
     "electron",
     "resin_slicer",
     "package.json",

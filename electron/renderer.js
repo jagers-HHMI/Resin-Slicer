@@ -757,13 +757,22 @@ class Viewer {
     this.distance = 180;
     this.target = [60, 34, 20];
     this.drag = null;
+    this.resizeTimer = null;
+    this.resizeFrame = null;
     this.initEvents();
-    this.resize();
+    this.resize({ recenter: true });
     requestAnimationFrame(() => this.draw());
   }
 
   initEvents() {
-    window.addEventListener("resize", () => this.resize());
+    window.addEventListener("resize", () => this.scheduleResize({ recenter: true }));
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", () => this.scheduleResize({ recenter: true }));
+    }
+    if (window.ResizeObserver) {
+      this.resizeObserver = new ResizeObserver(() => this.scheduleResize({ recenter: true }));
+      this.resizeObserver.observe(this.canvas);
+    }
     this.canvas.addEventListener("contextmenu", (event) => event.preventDefault());
     this.canvas.addEventListener("pointerdown", (event) => {
       event.preventDefault();
@@ -797,6 +806,20 @@ class Viewer {
     }, { passive: false });
   }
 
+  scheduleResize({ recenter = false } = {}) {
+    this.resize({ recenter });
+    if (this.resizeFrame !== null) cancelAnimationFrame(this.resizeFrame);
+    this.resizeFrame = requestAnimationFrame(() => {
+      this.resizeFrame = null;
+      this.resize({ recenter });
+    });
+    if (this.resizeTimer !== null) clearTimeout(this.resizeTimer);
+    this.resizeTimer = setTimeout(() => {
+      this.resizeTimer = null;
+      this.resize({ recenter });
+    }, 250);
+  }
+
   pan(dx, dy) {
     const zAxis = normalize([
       Math.cos(this.pitch) * Math.sin(this.yaw),
@@ -811,20 +834,28 @@ class Viewer {
     }
   }
 
-  resize() {
+  resize({ recenter = false } = {}) {
     const rect = this.canvas.getBoundingClientRect();
     const dpr = window.devicePixelRatio || 1;
-    this.canvas.width = Math.max(1, Math.floor(rect.width * dpr));
-    this.canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    const width = Math.max(1, Math.floor(rect.width * dpr));
+    const height = Math.max(1, Math.floor(rect.height * dpr));
+    this.canvas.width = width;
+    this.canvas.height = height;
     this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    if (recenter) this.recenter();
   }
 
   setBed(x, y, z) {
     this.bed = { x: x || 120, y: y || 67.5, z: z || 160 };
-    this.target = [this.bed.x / 2, this.bed.y / 2, Math.min(35, this.bed.z / 3)];
+    this.recenter();
     this.distance = Math.max(this.bed.x, this.bed.y, this.bed.z) * 1.25;
     this.meshes.bed = makeMesh(this.gl, makeBedGeometry(this.bed), [0.35, 0.39, 0.43, 1], this.gl.TRIANGLES);
     this.meshes.grid = makeMesh(this.gl, makeGridGeometry(this.bed), [0.46, 0.52, 0.57, 1], this.gl.LINES);
+  }
+
+  recenter() {
+    this.target = [this.bed.x / 2, this.bed.y / 2, Math.min(35, this.bed.z / 3)];
+    this.drag = null;
   }
 
   setPart(part) {

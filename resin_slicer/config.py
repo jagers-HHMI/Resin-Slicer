@@ -31,7 +31,7 @@ class PrintConfig:
     resin_name: str = "Standard"
     resin_density_g_ml: float = 1.1
     center_model: bool = True
-    max_pixels_per_layer: int = 8_500_000
+    max_pixels_per_layer: int = 100_000_000
 
     @property
     def pixel_size_x_mm(self) -> float:
@@ -205,6 +205,15 @@ PROFILES: dict[str, PrintConfig] = {
         size_z_mm=260.0,
         machine_name="ELEGOO Saturn 3 Ultra",
         max_pixels_per_layer=70_000_000,
+    ),
+    "elegoo-jupiter-2-16k": PrintConfig(
+        resolution_x=15120,
+        resolution_y=6230,
+        size_x_mm=302.40,
+        size_y_mm=161.98,
+        size_z_mm=300.0,
+        machine_name="ELEGOO Jupiter 2 16K",
+        max_pixels_per_layer=100_000_000,
     ),
     "small-test": PrintConfig(
         resolution_x=160,

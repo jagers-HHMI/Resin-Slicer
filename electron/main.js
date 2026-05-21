@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
 const { spawn } = require("child_process");
 const fsSync = require("fs");
 const fs = require("fs/promises");
@@ -12,6 +12,8 @@ function createWindow() {
     height: 820,
     minWidth: 1040,
     minHeight: 700,
+    autoHideMenuBar: true,
+    icon: path.join(repoRoot, "assets", "resin-slicer.ico"),
     backgroundColor: "#111418",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -24,6 +26,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(null);
   createWindow();
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

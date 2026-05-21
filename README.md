@@ -82,6 +82,7 @@ Basic slicing:
 ```powershell
 python -m resin_slicer.cli model.stl --format goo --output model.goo --profile generic-2k
 python -m resin_slicer.cli model.stl --format ctb --output model.ctb --profile generic-2k
+python -m resin_slicer.cli model.stl --format goo --output model.goo --profile elegoo-jupiter-2-16k
 ```
 
 Orientation and printer overrides:
