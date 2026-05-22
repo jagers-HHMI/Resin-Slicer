@@ -4,8 +4,8 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Resin Slicer</title>
-    <link rel="icon" type="image/x-icon" href="../assets/resin-slicer.ico">
-    <link rel="stylesheet" href="./styles.css">
+    <link rel="icon" type="image/x-icon" href="./assets/resin-slicer.ico">
+    <link rel="stylesheet" href="./electron/styles.css">
   </head>
   <body>
     <main class="app">
@@ -46,6 +46,39 @@
         </section>
         <pre id="log"></pre>
 
+        <section class="group sound-panel">
+          <h2>Sound</h2>
+          <div class="row">
+            <label class="check"><input id="soundEnabled" type="checkbox" checked> Audio feedback</label>
+            <label>Volume <input id="soundVolume" type="range" min="0" max="1" step="0.05" value="0.55"></label>
+          </div>
+        </section>
+
+        <section class="group workspace-panel">
+          <h2>Build Plates</h2>
+          <div class="row">
+            <button id="addBuildPlateButton">Add Build Plate</button>
+            <button id="fitViewButton">Fit View</button>
+          </div>
+          <div id="buildPlateList" class="list-panel"></div>
+          <label>Height
+            <input id="clipHeight" type="range" min="0" max="160" step="0.05" value="160">
+          </label>
+          <div class="row">
+            <label>Plane mm <input id="clipHeightValue" type="number" step="0.05" value="160"></label>
+            <label class="check"><input id="clipEnabled" type="checkbox"> Clip view</label>
+          </div>
+        </section>
+
+        <section class="group workspace-panel">
+          <h2>Objects</h2>
+          <div id="objectList" class="list-panel"></div>
+          <div class="row">
+            <button id="selectAllButton">Select All</button>
+            <button id="moveToActivePlateButton">Move To Active</button>
+          </div>
+        </section>
+
         <div class="settings-stack">
           <details class="group">
             <summary>
@@ -71,6 +104,7 @@
             </summary>
             <div class="preset-row">
               <button id="importMachineButton">Import Machine</button>
+              <button id="importUvtoolsMachineButton">UVTools GitHub</button>
               <button id="exportMachineButton">Export Machine</button>
             </div>
             <label>Profile <select id="profile"></select></label>
@@ -204,6 +238,18 @@
         </div>
       </section>
     </div>
-    <script src="./renderer.js"></script>
+    <div id="uvtoolsOverlay" class="prompt-overlay" hidden>
+      <section class="uvtools-dialog" role="dialog" aria-modal="true" aria-labelledby="uvtoolsTitle">
+        <h2 id="uvtoolsTitle">Import UVTools Machine</h2>
+        <input id="uvtoolsSearch" placeholder="Search printers">
+        <select id="uvtoolsPrinterList" size="12"></select>
+        <p id="uvtoolsStatus">Loading UVTools printer profiles...</p>
+        <div class="prompt-actions">
+          <button id="uvtoolsCancel" type="button">Cancel</button>
+          <button id="uvtoolsImport" class="primary" type="button">Import</button>
+        </div>
+      </section>
+    </div>
+    <script type="module" src="./electron/renderer.js"></script>
   </body>
 </html>

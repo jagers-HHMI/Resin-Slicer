@@ -25,6 +25,7 @@ class SliceJob:
     print_config: PrintConfig
     support_config: SupportConfig = SupportConfig()
     transform: MeshTransform = MeshTransform()
+    preserve_coordinates: bool = False
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ def slice_to_file(
         config,
         z_offset_mm=model_lift + job.transform.translate_z_mm,
         xy_offset_mm=(job.transform.translate_x_mm, job.transform.translate_y_mm),
+        preserve_coordinates=job.preserve_coordinates,
     )
     output = Path(output_path)
     fmt = fmt.lower().lstrip(".")

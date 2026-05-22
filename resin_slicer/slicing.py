@@ -24,33 +24,51 @@ def prepare_mesh(
     config: PrintConfig,
     z_offset_mm: float = 0.0,
     xy_offset_mm: tuple[float, float] = (0.0, 0.0),
+    preserve_coordinates: bool = False,
 ) -> PreparedMesh:
     bounds = mesh.bounds()
     if bounds.width <= 0 or bounds.depth <= 0 or bounds.height <= 0:
         raise MeshError("mesh bounds are degenerate")
-    if bounds.width > config.size_x_mm or bounds.depth > config.size_y_mm:
+    if preserve_coordinates:
+        min_x = bounds.min_x + xy_offset_mm[0]
+        max_x = bounds.max_x + xy_offset_mm[0]
+        min_y = bounds.min_y + xy_offset_mm[1]
+        max_y = bounds.max_y + xy_offset_mm[1]
+        if min_x < 0 or min_y < 0 or max_x > config.size_x_mm or max_y > config.size_y_mm:
+            raise ConfigError(
+                f"mesh footprint spans {min_x:.2f},{min_y:.2f} to {max_x:.2f},{max_y:.2f}mm, "
+                f"outside build area {config.size_x_mm:.2f}x{config.size_y_mm:.2f}mm"
+            )
+    elif bounds.width > config.size_x_mm or bounds.depth > config.size_y_mm:
         raise ConfigError(
             f"mesh footprint {bounds.width:.2f}x{bounds.depth:.2f}mm exceeds "
             f"build area {config.size_x_mm:.2f}x{config.size_y_mm:.2f}mm"
         )
     if z_offset_mm < 0:
         raise ConfigError("Z offset cannot be negative")
-    if bounds.height + z_offset_mm > config.size_z_mm:
+    final_min_z = bounds.min_z + z_offset_mm if preserve_coordinates else z_offset_mm
+    final_max_z = bounds.max_z + z_offset_mm if preserve_coordinates else bounds.height + z_offset_mm
+    if final_min_z < 0:
+        raise ConfigError("mesh cannot extend below the build plate")
+    if final_max_z > config.size_z_mm:
         raise ConfigError(
             f"mesh height {bounds.height:.2f}mm plus {z_offset_mm:.2f}mm lift exceeds "
             f"build height {config.size_z_mm:.2f}mm"
         )
 
-    if config.center_model:
+    if preserve_coordinates:
+        ox = xy_offset_mm[0]
+        oy = xy_offset_mm[1]
+    elif config.center_model:
         ox = (config.size_x_mm - bounds.width) / 2.0 - bounds.min_x + xy_offset_mm[0]
         oy = (config.size_y_mm - bounds.depth) / 2.0 - bounds.min_y + xy_offset_mm[1]
     else:
         ox = -bounds.min_x + xy_offset_mm[0]
         oy = -bounds.min_y + xy_offset_mm[1]
-    oz = z_offset_mm - bounds.min_z
+    oz = z_offset_mm if preserve_coordinates else z_offset_mm - bounds.min_z
 
     transformed = mesh.transformed((ox, oy, oz))
-    total_height = bounds.height + z_offset_mm
+    total_height = final_max_z
     layer_count = config.layer_count_for_height(total_height)
     return PreparedMesh(transformed, layer_count, total_height, _build_layer_index(transformed, config, layer_count))
 

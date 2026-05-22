@@ -1,7 +1,7 @@
 Option Explicit
 
-Dim shell, fso, root, packagePath, electronPath, splashPath, promptPath, readyPath
-Dim nodeCheck, npmCheck, installExit, waited
+Dim shell, fso, root, packagePath, electronPath, vitePath, concurrentlyPath, waitOnPath, crossEnvPath, splashPath, promptPath, readyPath
+Dim nodeCheck, npmCheck, installExit, waited, depsMissing
 
 Set shell = CreateObject("WScript.Shell")
 Set fso = CreateObject("Scripting.FileSystemObject")
@@ -9,6 +9,10 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 root = fso.GetParentFolderName(WScript.ScriptFullName)
 packagePath = fso.BuildPath(root, "package.json")
 electronPath = fso.BuildPath(root, "node_modules\electron")
+vitePath = fso.BuildPath(root, "node_modules\vite")
+concurrentlyPath = fso.BuildPath(root, "node_modules\concurrently")
+waitOnPath = fso.BuildPath(root, "node_modules\wait-on")
+crossEnvPath = fso.BuildPath(root, "node_modules\cross-env")
 splashPath = fso.BuildPath(root, "Show Resin Slicer Splash.ps1")
 promptPath = fso.BuildPath(root, "Show Resin Slicer Prompt.ps1")
 
@@ -50,16 +54,22 @@ If npmCheck <> 0 Then
     WScript.Quit 1
 End If
 
-If Not fso.FolderExists(electronPath) Then
+depsMissing = Not fso.FolderExists(electronPath) Or _
+              Not fso.FolderExists(vitePath) Or _
+              Not fso.FolderExists(concurrentlyPath) Or _
+              Not fso.FolderExists(waitOnPath) Or _
+              Not fso.FolderExists(crossEnvPath)
+
+If depsMissing Then
     installExit = shell.Run("cmd.exe /d /c cd /d """ & root & """ && npm.cmd install", 0, True)
     If installExit <> 0 Then
-        ShowThemedPrompt "Electron dependency installation failed." & vbCrLf & _
+        ShowThemedPrompt "Resin Slicer development dependency installation failed." & vbCrLf & _
                          "Run npm install manually in:" & vbCrLf & root
         WScript.Quit installExit
     End If
 End If
 
-shell.Run "cmd.exe /d /c cd /d """ & root & """ && npm.cmd start", 0, False
+shell.Run "cmd.exe /d /c cd /d """ & root & """ && npm.cmd run dev", 0, False
 
 Sub ShowThemedPrompt(message)
     Dim messagePath, file

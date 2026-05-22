@@ -14,6 +14,18 @@ class SliceSupportTests(unittest.TestCase):
         self.assertEqual(prepared.layer_count, 8)
         self.assertTrue(all(count > 0 for count in counts))
 
+    def test_preserve_coordinates_keeps_plate_position(self) -> None:
+        config = profile("small-test").with_overrides(layer_height_mm=1.0, center_model=False)
+        prepared = prepare_mesh(cube_mesh(8).transformed((20, 10, 3)), config, preserve_coordinates=True)
+        bounds = prepared.mesh.bounds()
+        self.assertAlmostEqual(bounds.min_x, 20)
+        self.assertAlmostEqual(bounds.min_y, 10)
+        self.assertAlmostEqual(bounds.min_z, 3)
+        self.assertAlmostEqual(bounds.max_x, 28)
+        self.assertAlmostEqual(bounds.max_y, 18)
+        self.assertAlmostEqual(bounds.max_z, 11)
+        self.assertEqual(prepared.layer_count, 11)
+
     def test_supports_are_deterministic_and_add_pixels(self) -> None:
         config = profile("small-test").with_overrides(layer_height_mm=1.0)
         prepared = prepare_mesh(_ledge_mesh(), config)

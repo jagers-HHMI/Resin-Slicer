@@ -53,6 +53,8 @@ The GUI can import and export:
 - Resin profiles
 - Support settings
 
+Machine profiles can also be imported directly from the UVTools GitHub printer list. Use `Printer` -> `UVTools GitHub`, search for the printer, then import it into the current machine settings.
+
 Exports are JSON files using this slicer's schema. Resin import also includes best-effort Chitubox-style field mapping for common names such as `normalExposureTime`, `bottomExposureTime`, `bottomLayerCount`, `liftingDistance`, `liftingSpeed`, `retractSpeed`, and `lightOffDelay`.
 
 Chitubox profile formats are not fully standardized, so imported values should be reviewed after import.
@@ -123,12 +125,25 @@ Run tests:
 python -m unittest discover -s tests
 ```
 
-Run the Electron app from source:
+Run the Electron app from source with Vite hot renderer updates:
 
 ```powershell
 npm install
+npm run dev
+```
+
+The double-click `Launch Resin Slicer.vbs` launcher also starts this development flow. It launches the Vite dev server on `http://127.0.0.1:5178` and then starts Electron with `VITE_DEV_SERVER_URL` pointed at that server.
+
+Renderer/UI changes hot-update through Vite without closing the Electron window. Electron main-process and preload changes still require restarting the app.
+
+Build and run the production-style renderer files:
+
+```powershell
+npm run build
 npm start
 ```
+
+In production mode Electron loads `dist/index.html`; keep `npm run build` in the packaging flow before launching `npm start`.
 
 Build the portable app folder without the release zip:
 

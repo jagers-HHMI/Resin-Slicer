@@ -30,14 +30,27 @@ if (Test-Path $nextDist) {
 New-Item -ItemType Directory -Force -Path $nextDist | Out-Null
 New-Item -ItemType Directory -Force -Path $resourcesApp | Out-Null
 
+Write-Host "Building renderer..."
+Push-Location $root
+try {
+    & npm.cmd run build
+    if ($LASTEXITCODE -ne 0) {
+        throw "npm run build failed with exit code $LASTEXITCODE"
+    }
+} finally {
+    Pop-Location
+}
+
 Write-Host "Copying Electron runtime..."
 Copy-Item -Path (Join-Path $runtimeDir "*") -Destination $nextDist -Recurse -Force
 
 Write-Host "Copying app files..."
 $items = @(
     "assets",
+    "dist",
     "electron",
     "resin_slicer",
+    "src",
     "package.json",
     "pyproject.toml",
     "README.md",

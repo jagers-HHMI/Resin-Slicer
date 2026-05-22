@@ -49,7 +49,8 @@ def _preview(request: dict[str, Any]) -> None:
     support = _support_from_request(request)
     transform = _transform_from_request(request)
     mesh = _mesh_from_request(request)
-    if not request.get("models"):
+    has_model_entries = bool(request.get("models"))
+    if not has_model_entries:
         mesh = apply_transform(
             mesh,
             MeshTransform(
@@ -65,6 +66,7 @@ def _preview(request: dict[str, Any]) -> None:
         config,
         z_offset_mm=model_lift + transform.translate_z_mm,
         xy_offset_mm=(transform.translate_x_mm, transform.translate_y_mm),
+        preserve_coordinates=has_model_entries,
     )
     plan = SupportPlan((), 0, 0, 0, 0)
     if support.enabled:
@@ -95,7 +97,8 @@ def _preview(request: dict[str, Any]) -> None:
 def _slice(request: dict[str, Any]) -> None:
     mesh = _mesh_from_request(request)
     transform = _transform_from_request(request)
-    if request.get("models"):
+    has_model_entries = bool(request.get("models"))
+    if has_model_entries:
         transform = MeshTransform(
             translate_x_mm=transform.translate_x_mm,
             translate_y_mm=transform.translate_y_mm,
@@ -107,6 +110,7 @@ def _slice(request: dict[str, Any]) -> None:
             print_config=_config_from_request(request),
             support_config=_support_from_request(request),
             transform=transform,
+            preserve_coordinates=has_model_entries,
         ),
         request["outputPath"],
         request.get("format", "goo"),

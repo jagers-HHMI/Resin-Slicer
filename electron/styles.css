@@ -187,7 +187,7 @@ details.group > .preset-row {
 
 .preset-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(auto-fit, minmax(98px, 1fr));
   gap: 8px;
   margin-bottom: 6px;
 }
@@ -241,6 +241,55 @@ details.group > .preset-row {
   background: #181d23;
   border-top: 1px solid #2b333d;
   border-bottom: 1px solid #2b333d;
+}
+
+.workspace-panel {
+  padding-bottom: 2px;
+}
+
+.sound-panel .row {
+  align-items: center;
+}
+
+.sound-panel input[type="range"] {
+  padding: 0;
+}
+
+.list-panel {
+  display: grid;
+  gap: 6px;
+  max-height: 156px;
+  overflow: auto;
+  margin: 8px 0;
+}
+
+.list-item {
+  width: 100%;
+  margin: 0;
+  padding: 8px 9px;
+  border: 1px solid #2b333d;
+  border-radius: 4px;
+  background: #101419;
+  color: #cdd6dd;
+  text-align: left;
+}
+
+.list-item:hover {
+  background: #18212a;
+}
+
+.list-item.active,
+.list-item.selected {
+  border-color: #3c83cf;
+  background: #1b334a;
+  color: #eef2f5;
+}
+
+.list-item small {
+  display: block;
+  margin-top: 3px;
+  color: #8f9ba6;
+  font-size: 11px;
 }
 
 #log {
@@ -334,4 +383,35 @@ details.group > .preset-row {
   width: auto;
   min-width: 92px;
   margin: 0;
+}
+
+.uvtools-dialog {
+  width: min(560px, 100%);
+  padding: 18px;
+  border: 1px solid #384450;
+  border-radius: 6px;
+  background: #181d23;
+  box-shadow: 0 18px 52px rgba(0, 0, 0, 0.42);
+}
+
+.uvtools-dialog h2 {
+  margin: 0 0 12px;
+  color: #eef2f5;
+  font-size: 15px;
+}
+
+#uvtoolsSearch {
+  margin: 0 0 10px;
+}
+
+#uvtoolsPrinterList {
+  height: 260px;
+  margin: 0;
+}
+
+#uvtoolsStatus {
+  min-height: 18px;
+  margin: 10px 0 0;
+  color: #aab5bf;
+  font-size: 12px;
 }

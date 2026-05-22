@@ -1,0 +1,253 @@
+{
+  "name": "electron-sound-kit",
+  "version": "1.0.0",
+  "sampleRate": 44100,
+  "channels": 1,
+  "format": "wav/pcm-s16le",
+  "license": "Original generated assets; free to reuse in personal, internal, and commercial apps.",
+  "sounds": [
+    {
+      "id": "app-start",
+      "file": "sounds/app-start.wav",
+      "category": "system",
+      "description": "Subtle launch chime for app boot.",
+      "durationMs": 460,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "app-ready",
+      "file": "sounds/app-ready.wav",
+      "category": "system",
+      "description": "Renderer-ready or setup-complete cue.",
+      "durationMs": 300,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "click-soft",
+      "file": "sounds/click-soft.wav",
+      "category": "input",
+      "description": "Soft button or list item click.",
+      "durationMs": 75,
+      "recommendedVolume": 0.55,
+      "loop": false
+    },
+    {
+      "id": "click-crisp",
+      "file": "sounds/click-crisp.wav",
+      "category": "input",
+      "description": "Sharper toolbar or icon button click.",
+      "durationMs": 55,
+      "recommendedVolume": 0.55,
+      "loop": false
+    },
+    {
+      "id": "hover-tick",
+      "file": "sounds/hover-tick.wav",
+      "category": "input",
+      "description": "Quiet hover or scrub tick.",
+      "durationMs": 60,
+      "recommendedVolume": 0.55,
+      "loop": false
+    },
+    {
+      "id": "toggle-on",
+      "file": "sounds/toggle-on.wav",
+      "category": "input",
+      "description": "Toggle enabled.",
+      "durationMs": 180,
+      "recommendedVolume": 0.55,
+      "loop": false
+    },
+    {
+      "id": "toggle-off",
+      "file": "sounds/toggle-off.wav",
+      "category": "input",
+      "description": "Toggle disabled.",
+      "durationMs": 160,
+      "recommendedVolume": 0.55,
+      "loop": false
+    },
+    {
+      "id": "confirm",
+      "file": "sounds/confirm.wav",
+      "category": "feedback",
+      "description": "Action accepted.",
+      "durationMs": 240,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "success",
+      "file": "sounds/success.wav",
+      "category": "feedback",
+      "description": "Longer success/completion cue.",
+      "durationMs": 420,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "warning",
+      "file": "sounds/warning.wav",
+      "category": "feedback",
+      "description": "Warning or non-blocking attention cue.",
+      "durationMs": 360,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "error",
+      "file": "sounds/error.wav",
+      "category": "feedback",
+      "description": "Error or denied action cue.",
+      "durationMs": 320,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "notification",
+      "file": "sounds/notification.wav",
+      "category": "feedback",
+      "description": "Incoming notification.",
+      "durationMs": 420,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "message",
+      "file": "sounds/message.wav",
+      "category": "feedback",
+      "description": "Incoming message or chat cue.",
+      "durationMs": 280,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "modal-open",
+      "file": "sounds/modal-open.wav",
+      "category": "surface",
+      "description": "Modal, popover, or command palette opens.",
+      "durationMs": 220,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "modal-close",
+      "file": "sounds/modal-close.wav",
+      "category": "surface",
+      "description": "Modal, popover, or command palette closes.",
+      "durationMs": 180,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "drawer-open",
+      "file": "sounds/drawer-open.wav",
+      "category": "surface",
+      "description": "Sidebar or drawer opens.",
+      "durationMs": 200,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "drawer-close",
+      "file": "sounds/drawer-close.wav",
+      "category": "surface",
+      "description": "Sidebar or drawer closes.",
+      "durationMs": 180,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "drop",
+      "file": "sounds/drop.wav",
+      "category": "object",
+      "description": "Dropped item or placed file.",
+      "durationMs": 200,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "drag-start",
+      "file": "sounds/drag-start.wav",
+      "category": "object",
+      "description": "Drag begins.",
+      "durationMs": 90,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "delete",
+      "file": "sounds/delete.wav",
+      "category": "object",
+      "description": "Deletion or destructive action.",
+      "durationMs": 260,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "undo",
+      "file": "sounds/undo.wav",
+      "category": "object",
+      "description": "Undo or revert cue.",
+      "durationMs": 240,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "save",
+      "file": "sounds/save.wav",
+      "category": "object",
+      "description": "Save completed.",
+      "durationMs": 260,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "search",
+      "file": "sounds/search.wav",
+      "category": "surface",
+      "description": "Search, scan, or filter cue.",
+      "durationMs": 220,
+      "recommendedVolume": 0.65,
+      "loop": false
+    },
+    {
+      "id": "loading-pulse",
+      "file": "sounds/loading-pulse.wav",
+      "category": "system",
+      "description": "Optional low-key loading pulse.",
+      "durationMs": 300,
+      "recommendedVolume": 0.65,
+      "loop": true
+    },
+    {
+      "id": "focus-ring",
+      "file": "sounds/focus-ring.wav",
+      "category": "input",
+      "description": "Keyboard focus or selection movement.",
+      "durationMs": 120,
+      "recommendedVolume": 0.55,
+      "loop": false
+    },
+    {
+      "id": "navigation-back",
+      "file": "sounds/navigation-back.wav",
+      "category": "navigation",
+      "description": "Navigate back.",
+      "durationMs": 140,
+      "recommendedVolume": 0.55,
+      "loop": false
+    },
+    {
+      "id": "navigation-forward",
+      "file": "sounds/navigation-forward.wav",
+      "category": "navigation",
+      "description": "Navigate forward.",
+      "durationMs": 140,
+      "recommendedVolume": 0.55,
+      "loop": false
+    }
+  ]
+}

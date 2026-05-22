@@ -5,6 +5,10 @@ const fs = require("fs/promises");
 const path = require("path");
 
 const repoRoot = path.resolve(__dirname, "..");
+const devServerUrl = process.env.VITE_DEV_SERVER_URL || "";
+const isDev = Boolean(devServerUrl);
+const uvtoolsPrinterApiUrl = "https://api.github.com/repos/sn4k3/UVtools/contents/PrusaSlicer/printer?ref=master";
+const uvtoolsRawBaseUrl = "https://raw.githubusercontent.com/sn4k3/UVtools/master/";
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -27,7 +31,11 @@ function createWindow() {
     win.showInactive();
   });
 
-  win.loadFile(path.join(__dirname, "index.html"));
+  if (isDev) {
+    win.loadURL(devServerUrl);
+  } else {
+    win.loadFile(path.join(repoRoot, "dist", "index.html"));
+  }
 }
 
 app.whenReady().then(() => {
@@ -123,6 +131,50 @@ ipcMain.handle("dialog:save-profile", async (_event, kind, defaultName, content)
 ipcMain.handle("file:read", async (_event, filePath) => {
   const data = await fs.readFile(filePath);
   return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+});
+
+ipcMain.handle("uvtools:list-printers", async () => {
+  const response = await fetch(uvtoolsPrinterApiUrl, {
+    headers: { "User-Agent": "Resin-Slicer" }
+  });
+  if (!response.ok) {
+    throw new Error(`UVTools GitHub request failed: ${response.status} ${response.statusText}`);
+  }
+  const entries = await response.json();
+  if (!Array.isArray(entries)) {
+    throw new Error("UVTools GitHub returned an unexpected printer list");
+  }
+  return {
+    sourceUrl: "https://github.com/sn4k3/UVtools/tree/master/PrusaSlicer/printer",
+    printers: entries
+      .filter((entry) => entry.type === "file" && /\.ini$/i.test(entry.name))
+      .map((entry) => ({
+        name: entry.name.replace(/\.ini$/i, ""),
+        path: entry.path,
+        htmlUrl: entry.html_url,
+        downloadUrl: entry.download_url
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+  };
+});
+
+ipcMain.handle("uvtools:read-printer", async (_event, printerPath) => {
+  const safePath = String(printerPath || "");
+  if (!/^PrusaSlicer\/printer\/[^/]+\.ini$/i.test(safePath)) {
+    throw new Error("Invalid UVTools printer profile path");
+  }
+  const url = uvtoolsRawBaseUrl + safePath.split("/").map(encodeURIComponent).join("/");
+  const response = await fetch(url, {
+    headers: { "User-Agent": "Resin-Slicer" }
+  });
+  if (!response.ok) {
+    throw new Error(`UVTools profile download failed: ${response.status} ${response.statusText}`);
+  }
+  return {
+    path: safePath,
+    sourceUrl: url,
+    text: await response.text()
+  };
 });
 
 ipcMain.handle("bridge:profiles", async () => runBridge("profiles", {}));

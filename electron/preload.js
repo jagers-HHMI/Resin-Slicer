@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld("slicer", {
   saveProfile: (kind, defaultName, content) => ipcRenderer.invoke("dialog:save-profile", kind, defaultName, content),
   pathForFile: (file) => webUtils.getPathForFile(file),
   readFile: (filePath) => ipcRenderer.invoke("file:read", filePath),
+  uvtoolsPrinters: () => ipcRenderer.invoke("uvtools:list-printers"),
+  uvtoolsPrinter: (printerPath) => ipcRenderer.invoke("uvtools:read-printer", printerPath),
   profiles: () => ipcRenderer.invoke("bridge:profiles"),
   preview: (payload) => ipcRenderer.invoke("bridge:preview", payload),
   slice: (payload) => ipcRenderer.invoke("bridge:slice", payload),
