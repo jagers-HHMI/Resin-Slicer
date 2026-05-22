@@ -1,10 +1,11 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 contextBridge.exposeInMainWorld("slicer", {
   openStl: () => ipcRenderer.invoke("dialog:open-stl"),
   saveOutput: (format) => ipcRenderer.invoke("dialog:save-output", format),
   openProfile: (kind) => ipcRenderer.invoke("dialog:open-profile", kind),
   saveProfile: (kind, defaultName, content) => ipcRenderer.invoke("dialog:save-profile", kind, defaultName, content),
+  pathForFile: (file) => webUtils.getPathForFile(file),
   readFile: (filePath) => ipcRenderer.invoke("file:read", filePath),
   profiles: () => ipcRenderer.invoke("bridge:profiles"),
   preview: (payload) => ipcRenderer.invoke("bridge:preview", payload),

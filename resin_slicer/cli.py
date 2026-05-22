@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .config import PrintConfig, SupportConfig, profile
 from .errors import SlicerError
-from .mesh import load_stl
+from .mesh import load_mesh
 from .pipeline import SliceJob, slice_to_file
 from .transform import MeshTransform
 
@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
             min_island_area_mm2=args.min_island_area,
             analysis_max_pixels=args.support_analysis_pixels,
         )
-        mesh = load_stl(args.input)
+        mesh = load_mesh(args.input)
         transform = MeshTransform(
             rotate_x_deg=args.rotate_x,
             rotate_y_deg=args.rotate_y,
@@ -75,8 +75,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Slice an STL model for MSLA resin printers.")
-    parser.add_argument("input", help="input STL file")
+    parser = argparse.ArgumentParser(description="Slice an STL or OBJ model for MSLA resin printers.")
+    parser.add_argument("input", help="input STL or OBJ file")
     parser.add_argument("-o", "--output", required=True, help="output .goo or .ctb path")
     parser.add_argument("--format", choices=["goo", "ctb"], help="output format; defaults to output extension")
     parser.add_argument("--profile", default="generic-2k", help="printer profile name")
@@ -97,7 +97,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--machine-name", help="machine name written to the output file")
     parser.add_argument("--resin-name", help="resin/profile name written to the output file")
     parser.add_argument("--resin-density", type=float, help="resin density in grams per milliliter")
-    parser.add_argument("--no-center", action="store_true", help="place mesh at its STL origin instead of centering")
+    parser.add_argument("--no-center", action="store_true", help="place mesh at its source-file origin instead of centering")
     parser.add_argument("--rotate-x", type=float, default=0.0, help="rotate model around its center on the X axis, degrees")
     parser.add_argument("--rotate-y", type=float, default=0.0, help="rotate model around its center on the Y axis, degrees")
     parser.add_argument("--rotate-z", type=float, default=0.0, help="rotate model around its center on the Z axis, degrees")

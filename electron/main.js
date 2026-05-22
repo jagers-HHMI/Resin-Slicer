@@ -48,14 +48,16 @@ app.on("window-all-closed", () => {
 
 ipcMain.handle("dialog:open-stl", async () => {
   const result = await dialog.showOpenDialog({
-    title: "Open STL",
-    properties: ["openFile"],
+    title: "Open Mesh",
+    properties: ["openFile", "multiSelections"],
     filters: [
+      { name: "Mesh Files", extensions: ["stl", "obj"] },
       { name: "STL Mesh", extensions: ["stl"] },
+      { name: "OBJ Mesh", extensions: ["obj"] },
       { name: "All Files", extensions: ["*"] }
     ]
   });
-  return result.canceled ? null : result.filePaths[0];
+  return result.canceled ? [] : result.filePaths;
 });
 
 ipcMain.handle("dialog:save-output", async (_event, format) => {

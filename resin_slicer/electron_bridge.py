@@ -9,7 +9,7 @@ from typing import Any
 
 from .config import PROFILES, PrintConfig, SupportConfig, profile
 from .errors import SlicerError
-from .mesh import load_stl
+from .mesh import Mesh, load_mesh
 from .pipeline import SliceJob, slice_to_file
 from .slicing import prepare_mesh
 from .supports import SupportPlan, plan_supports
@@ -45,20 +45,23 @@ def _write_json(payload: dict[str, Any]) -> None:
 
 
 def _preview(request: dict[str, Any]) -> None:
-    mesh = load_stl(request["inputPath"])
     config = _config_from_request(request)
     support = _support_from_request(request)
     transform = _transform_from_request(request)
-    orientation = MeshTransform(
-        rotate_x_deg=transform.rotate_x_deg,
-        rotate_y_deg=transform.rotate_y_deg,
-        rotate_z_deg=transform.rotate_z_deg,
-        scale=transform.scale,
-    )
-    oriented = apply_transform(mesh, orientation)
+    mesh = _mesh_from_request(request)
+    if not request.get("models"):
+        mesh = apply_transform(
+            mesh,
+            MeshTransform(
+                rotate_x_deg=transform.rotate_x_deg,
+                rotate_y_deg=transform.rotate_y_deg,
+                rotate_z_deg=transform.rotate_z_deg,
+                scale=transform.scale,
+            ),
+        )
     model_lift = support.model_lift_mm if support.enabled else 0.0
     prepared = prepare_mesh(
-        oriented,
+        mesh,
         config,
         z_offset_mm=model_lift + transform.translate_z_mm,
         xy_offset_mm=(transform.translate_x_mm, transform.translate_y_mm),
@@ -90,13 +93,20 @@ def _preview(request: dict[str, Any]) -> None:
 
 
 def _slice(request: dict[str, Any]) -> None:
-    mesh = load_stl(request["inputPath"])
+    mesh = _mesh_from_request(request)
+    transform = _transform_from_request(request)
+    if request.get("models"):
+        transform = MeshTransform(
+            translate_x_mm=transform.translate_x_mm,
+            translate_y_mm=transform.translate_y_mm,
+            translate_z_mm=transform.translate_z_mm,
+        )
     result = slice_to_file(
         SliceJob(
             mesh=mesh,
             print_config=_config_from_request(request),
             support_config=_support_from_request(request),
-            transform=_transform_from_request(request),
+            transform=transform,
         ),
         request["outputPath"],
         request.get("format", "goo"),
@@ -110,6 +120,36 @@ def _slice(request: dict[str, Any]) -> None:
             "supports": result.support_count,
             "materialMl": result.material_ml,
         }
+    )
+
+
+def _mesh_from_request(request: dict[str, Any]) -> Mesh:
+    models = request.get("models")
+    if models:
+        triangles = []
+        for model in models:
+            path = model.get("inputPath") or model.get("path")
+            if not path:
+                raise SlicerError("model entry is missing inputPath")
+            mesh = load_mesh(path)
+            triangles.extend(apply_transform(mesh, _model_transform(model)).triangles)
+        if not triangles:
+            raise SlicerError("no model triangles were loaded")
+        return Mesh(tuple(triangles))
+
+    return load_mesh(request["inputPath"])
+
+
+def _model_transform(model: dict[str, Any]) -> MeshTransform:
+    transform = model.get("transform", {})
+    return MeshTransform(
+        rotate_x_deg=float(transform.get("rotateX", 0.0)),
+        rotate_y_deg=float(transform.get("rotateY", 0.0)),
+        rotate_z_deg=float(transform.get("rotateZ", 0.0)),
+        scale=float(transform.get("scale", 1.0)),
+        translate_x_mm=float(transform.get("translateX", 0.0)),
+        translate_y_mm=float(transform.get("translateY", 0.0)),
+        translate_z_mm=float(transform.get("translateZ", 0.0)),
     )
 
 

@@ -27,9 +27,9 @@ Outputs:
 
 ## GUI Workflow
 
-1. Open an STL.
+1. Open one or more STL/OBJ files, or drag mesh files into the 3D view.
 2. Choose `GOO` or `CTB`.
-3. Adjust placement/orientation in the 3D viewer and `Placement` section.
+3. Adjust placement/orientation in the 3D viewer and `Placement` section. Multiple loaded meshes are arranged automatically on the build plate.
 4. Generate a support preview.
 5. Slice to the selected output path.
 
@@ -83,6 +83,7 @@ Basic slicing:
 python -m resin_slicer.cli model.stl --format goo --output model.goo --profile generic-2k
 python -m resin_slicer.cli model.stl --format ctb --output model.ctb --profile generic-2k
 python -m resin_slicer.cli model.stl --format goo --output model.goo --profile elegoo-jupiter-2-16k
+python -m resin_slicer.cli model.obj --format goo --output model.goo --profile generic-2k
 ```
 
 Orientation and printer overrides:

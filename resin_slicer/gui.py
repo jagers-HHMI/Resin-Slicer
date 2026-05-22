@@ -9,7 +9,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from .config import PROFILES, SupportConfig, profile
 from .errors import SlicerError
-from .mesh import load_stl
+from .mesh import load_mesh
 from .pipeline import SliceJob, slice_to_file
 from .transform import MeshTransform
 
@@ -85,7 +85,7 @@ class SlicerGui(tk.Tk):
         files = ttk.LabelFrame(root, text="Files", padding=10)
         files.grid(row=0, column=0, sticky="ew")
         files.columnconfigure(1, weight=1)
-        self._file_row(files, 0, "Input STL", self.input_var, self._browse_input)
+        self._file_row(files, 0, "Input Mesh", self.input_var, self._browse_input)
         self._file_row(files, 1, "Output", self.output_var, self._browse_output)
         ttk.Label(files, text="Format").grid(row=2, column=0, sticky="w", pady=(8, 0))
         ttk.Combobox(files, textvariable=self.format_var, values=["goo", "ctb"], state="readonly", width=8).grid(
@@ -172,7 +172,9 @@ class SlicerGui(tk.Tk):
         self.bottom_layers_var.set(str(cfg.bottom_layers))
 
     def _browse_input(self) -> None:
-        filename = filedialog.askopenfilename(filetypes=[("STL files", "*.stl"), ("All files", "*.*")])
+        filename = filedialog.askopenfilename(
+            filetypes=[("Mesh files", "*.stl *.obj"), ("STL files", "*.stl"), ("OBJ files", "*.obj"), ("All files", "*.*")]
+        )
         if not filename:
             return
         self.input_var.set(filename)
@@ -208,7 +210,7 @@ class SlicerGui(tk.Tk):
         input_text = self.input_var.get().strip()
         output_text = self.output_var.get().strip()
         if not input_text:
-            raise SlicerError("choose an input STL file")
+            raise SlicerError("choose an input STL or OBJ file")
         if not output_text:
             raise SlicerError("choose an output file")
         return GuiOptions(
@@ -268,8 +270,8 @@ class SlicerGui(tk.Tk):
                 rotate_z_deg=options.rotate_z,
                 scale=options.scale,
             )
-            self._messages.put(("progress", "loading STL"))
-            mesh = load_stl(options.input_path)
+            self._messages.put(("progress", "loading mesh"))
+            mesh = load_mesh(options.input_path)
             result = slice_to_file(
                 SliceJob(mesh, cfg, support, transform),
                 options.output_path,

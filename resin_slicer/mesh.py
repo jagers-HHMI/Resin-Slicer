@@ -69,6 +69,19 @@ def load_stl(path: str | Path) -> Mesh:
     return _load_ascii_stl(payload.decode("utf-8", errors="replace"))
 
 
+def load_obj(path: str | Path) -> Mesh:
+    return _load_obj(Path(path).read_text(encoding="utf-8", errors="replace"))
+
+
+def load_mesh(path: str | Path) -> Mesh:
+    suffix = Path(path).suffix.lower()
+    if suffix == ".obj":
+        return load_obj(path)
+    if suffix == ".stl":
+        return load_stl(path)
+    raise MeshError(f"unsupported mesh format {suffix or '<none>'}; expected .stl or .obj")
+
+
 def _looks_like_binary_stl(payload: bytes) -> bool:
     count = struct.unpack_from("<I", payload, 80)[0]
     return 84 + count * 50 == len(payload)
@@ -111,6 +124,51 @@ def _load_ascii_stl(text: str) -> Mesh:
     if not triangles:
         raise MeshError("ASCII STL contains no triangles")
     return Mesh(tuple(triangles))
+
+
+def _load_obj(text: str) -> Mesh:
+    vertices: list[Point3] = []
+    triangles: list[Triangle] = []
+    for raw_line in text.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        parts = line.split()
+        kind = parts[0].lower()
+        if kind == "v":
+            if len(parts) < 4:
+                raise MeshError(f"invalid OBJ vertex line: {raw_line!r}")
+            try:
+                vertices.append((float(parts[1]), float(parts[2]), float(parts[3])))
+            except ValueError as exc:
+                raise MeshError(f"invalid OBJ vertex line: {raw_line!r}") from exc
+        elif kind == "f":
+            if len(parts) < 4:
+                raise MeshError(f"invalid OBJ face line: {raw_line!r}")
+            face = [_obj_vertex(vertices, token, raw_line) for token in parts[1:]]
+            for index in range(1, len(face) - 1):
+                tri = (face[0], face[index], face[index + 1])
+                if _triangle_area2(*tri) > 1e-12:
+                    triangles.append(tri)
+    if not triangles:
+        raise MeshError("OBJ contains no non-degenerate faces")
+    return Mesh(tuple(triangles))
+
+
+def _obj_vertex(vertices: list[Point3], token: str, raw_line: str) -> Point3:
+    index_text = token.split("/", 1)[0]
+    if not index_text:
+        raise MeshError(f"invalid OBJ face line: {raw_line!r}")
+    try:
+        index = int(index_text)
+    except ValueError as exc:
+        raise MeshError(f"invalid OBJ face line: {raw_line!r}") from exc
+    if index == 0:
+        raise MeshError(f"OBJ vertex indices are 1-based: {raw_line!r}")
+    resolved = index - 1 if index > 0 else len(vertices) + index
+    if resolved < 0 or resolved >= len(vertices):
+        raise MeshError(f"OBJ face references missing vertex {index}: {raw_line!r}")
+    return vertices[resolved]
 
 
 def _triangle_area2(a: Point3, b: Point3, c: Point3) -> float:

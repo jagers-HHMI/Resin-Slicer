@@ -15,17 +15,16 @@ const fields = [
 ];
 
 let profiles = {};
-let mesh = null;
+let models = [];
 let supports = [];
 let supportBraces = [];
-let inputPath = "";
 let viewer = null;
 
 async function init() {
   viewer = new Viewer($("viewer"));
   $("openButton").addEventListener("click", openStl);
   $("inputPath").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") loadStlPath($("inputPath").value.trim());
+    if (event.key === "Enter") loadStlPaths(parseInputPaths($("inputPath").value), { append: false });
   });
   $("saveButton").addEventListener("click", chooseOutput);
   $("importMachineButton").addEventListener("click", () => importProfile("machine"));
@@ -41,7 +40,7 @@ async function init() {
     updateScene();
   });
   $("format").addEventListener("change", () => {
-    if (inputPath && !$("outputPath").value) setDefaultOutput();
+    if (models.length && !$("outputPath").value) setDefaultOutput();
   });
   $("centerModel").addEventListener("change", updateScene);
   $("supportsEnabled").addEventListener("change", updateScene);
@@ -51,6 +50,7 @@ async function init() {
   for (const id of fields) {
     $(id).addEventListener("input", updateScene);
   }
+  initDropLoading();
 
   window.slicer.onSliceProgress((message) => log(message.message));
   try {
@@ -103,33 +103,47 @@ async function init() {
 
 async function openStl() {
   try {
-    const path = await window.slicer.openStl();
-    if (!path) {
-      log("Open STL canceled.");
+    const paths = await window.slicer.openStl();
+    if (!paths || !paths.length) {
+      log("Open mesh canceled.");
       return;
     }
-    await loadStlPath(path);
+    await loadStlPaths(paths, { append: false });
   } catch (error) {
-    log(`Open STL failed: ${error.message}`);
+    log(`Open mesh failed: ${error.message}`);
   }
 }
 
-async function loadStlPath(path) {
-  if (!path) {
-    log("Enter or choose an STL path first.");
+async function loadStlPaths(paths, { append = false } = {}) {
+  const nextPaths = normalizeStlPaths(paths);
+  if (!nextPaths.length) {
+    log("Choose or drop at least one STL or OBJ file.");
     return;
   }
-  inputPath = path;
-  $("inputPath").value = path;
-  setDefaultOutput();
-  log(`Loading ${path}`);
-  const bytes = new Uint8Array(await window.slicer.readFile(path));
-  mesh = parseStl(bytes);
+
+  const loaded = append ? models.slice() : [];
+  const loadedKeys = new Set(loaded.map((item) => item.path.toLowerCase()));
+  for (const path of nextPaths) {
+    const key = path.toLowerCase();
+    if (loadedKeys.has(key)) continue;
+    log(`Loading ${path}`);
+    const bytes = new Uint8Array(await window.slicer.readFile(path));
+    const mesh = parseMesh(path, bytes);
+    loaded.push({ path, name: fileName(path), mesh });
+    loadedKeys.add(key);
+    log(`Loaded ${fileName(path)} (${mesh.triangleCount.toLocaleString()} triangles)`);
+  }
+
+  models = loaded;
   supports = [];
   supportBraces = [];
-  $("meshStatus").textContent = `${mesh.triangleCount.toLocaleString()} triangles`;
+  $("inputPath").value = models.map((item) => item.path).join("; ");
+  if (!append) $("outputPath").value = "";
+  setDefaultOutput();
+  const triangleCount = models.reduce((sum, item) => sum + item.mesh.triangleCount, 0);
+  $("meshStatus").textContent = `${models.length.toLocaleString()} mesh${models.length === 1 ? "" : "es"}, ${triangleCount.toLocaleString()} triangles`;
   $("supportStatus").textContent = "Supports not generated";
-  log(`Loaded ${mesh.triangleCount.toLocaleString()} triangles`);
+  if (models.length > 1) log(`Arranged ${models.length} mesh files on the build plate`);
   updateScene();
 }
 
@@ -140,7 +154,80 @@ async function chooseOutput() {
 
 function setDefaultOutput() {
   const ext = $("format").value;
-  $("outputPath").value = inputPath.replace(/\.[^.]+$/, `.${ext}`);
+  if (!models.length || $("outputPath").value) return;
+  $("outputPath").value = defaultOutputPath(models, ext);
+}
+
+function initDropLoading() {
+  const shell = document.querySelector(".viewer-shell");
+  const dropTarget = shell || document.body;
+  for (const eventName of ["dragenter", "dragover"]) {
+    dropTarget.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      if (shell) shell.classList.add("drag-over");
+    });
+  }
+  for (const eventName of ["dragleave", "drop"]) {
+    dropTarget.addEventListener(eventName, (event) => {
+      event.preventDefault();
+      if (eventName === "drop") handleDrop(event);
+      if (shell) shell.classList.remove("drag-over");
+    });
+  }
+}
+
+async function handleDrop(event) {
+  const files = Array.from(event.dataTransfer?.files || []);
+  const paths = files
+    .map((file) => window.slicer.pathForFile ? window.slicer.pathForFile(file) : file.path)
+    .filter(isSupportedMeshPath);
+  if (!paths.length) {
+    log("Drop one or more STL or OBJ files into the viewer.");
+    return;
+  }
+  await loadStlPaths(paths, { append: models.length > 0 });
+}
+
+function parseInputPaths(text) {
+  return String(text || "")
+    .split(/[\r\n;]+/)
+    .map((part) => part.trim().replace(/^"|"$/g, ""))
+    .filter(Boolean);
+}
+
+function normalizeStlPaths(paths) {
+  const list = Array.isArray(paths) ? paths : [paths];
+  const seen = new Set();
+  const out = [];
+  for (const rawPath of list) {
+    const path = String(rawPath || "").trim();
+    if (!isSupportedMeshPath(path)) continue;
+    const key = path.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(path);
+  }
+  return out;
+}
+
+function defaultOutputPath(items, ext) {
+  if (items.length === 1) return replaceExtension(items[0].path, ext);
+  const firstPath = items[0].path;
+  const separatorIndex = Math.max(firstPath.lastIndexOf("\\"), firstPath.lastIndexOf("/"));
+  const directory = separatorIndex >= 0 ? firstPath.slice(0, separatorIndex + 1) : "";
+  return `${directory}resin-slicer-job.${ext}`;
+}
+
+function replaceExtension(path, ext) {
+  return path.replace(/\.[^.\\/]+$/, `.${ext}`);
+}
+
+function fileName(path) {
+  return String(path).split(/[\\/]/).pop() || String(path);
+}
+
+function isSupportedMeshPath(path) {
+  return /\.(stl|obj)$/i.test(path || "");
 }
 
 async function importProfile(kind) {
@@ -208,8 +295,8 @@ async function slice() {
 }
 
 function ensureReady(requireOutput) {
-  if (!inputPath) {
-    log("Open an STL first.");
+  if (!models.length) {
+    log("Open or drop at least one STL or OBJ first.");
     return false;
   }
   if (requireOutput && !$("outputPath").value.trim()) {
@@ -220,8 +307,22 @@ function ensureReady(requireOutput) {
 }
 
 function collectPayload() {
+  const payload = basePayload();
+  payload.inputPath = models[0]?.path || "";
+  payload.models = [];
+  if (models.length) {
+    const arranged = arrangeModels(payload);
+    payload.models = arranged.placements.map((placement) => ({
+      inputPath: placement.model.path,
+      name: placement.model.name,
+      transform: placement.transform
+    }));
+  }
+  return payload;
+}
+
+function basePayload() {
   return {
-    inputPath,
     outputPath: $("outputPath").value.trim(),
     format: $("format").value,
     profile: $("profile").value,
@@ -582,15 +683,22 @@ function loadProfileDefaults() {
 }
 
 function updateScene() {
-  if (!mesh) {
+  if (!models.length) {
     viewer.setBed(number("sizeX"), number("sizeY"), number("sizeZ"));
+    viewer.setPart(null);
+    viewer.setSupports([], []);
     return;
   }
   supports = [];
   supportBraces = [];
   $("supportStatus").textContent = "Support preview stale";
-  viewer.setBed(number("sizeX"), number("sizeY"), number("sizeZ"));
-  viewer.setPart(transformMesh(mesh, collectPayload()));
+  const payload = basePayload();
+  const arranged = arrangeModels(payload);
+  if (arranged.overflow) {
+    $("supportStatus").textContent = "Arranged models exceed build plate";
+  }
+  viewer.setBed(payload.printer.sizeX, payload.printer.sizeY, payload.printer.sizeZ);
+  viewer.setPart(placeGroupMesh(arranged.mesh, payload));
   viewer.setSupports(supports, supportBraces);
 }
 
@@ -612,6 +720,11 @@ function log(message) {
 function setBusy(busy) {
   $("previewButton").disabled = busy;
   $("sliceButton").disabled = busy;
+}
+
+function parseMesh(path, bytes) {
+  if (/\.obj$/i.test(path)) return parseObj(new TextDecoder().decode(bytes));
+  return parseStl(bytes);
 }
 
 function parseStl(bytes) {
@@ -659,6 +772,43 @@ function parseAsciiStl(text) {
   return { vertices, normals, triangleCount: vertices.length / 9, bounds: boundsFor(vertices) };
 }
 
+function parseObj(text) {
+  const points = [];
+  const values = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.split("#", 1)[0].trim();
+    if (!line) continue;
+    const parts = line.split(/\s+/);
+    if (parts[0].toLowerCase() === "v") {
+      if (parts.length < 4) throw new Error(`Invalid OBJ vertex line: ${rawLine}`);
+      points.push([Number(parts[1]), Number(parts[2]), Number(parts[3])]);
+      if (points[points.length - 1].some((value) => !Number.isFinite(value))) {
+        throw new Error(`Invalid OBJ vertex line: ${rawLine}`);
+      }
+    } else if (parts[0].toLowerCase() === "f") {
+      if (parts.length < 4) throw new Error(`Invalid OBJ face line: ${rawLine}`);
+      const face = parts.slice(1).map((token) => objVertex(points, token, rawLine));
+      for (let i = 1; i < face.length - 1; i++) {
+        values.push(...face[0], ...face[i], ...face[i + 1]);
+      }
+    }
+  }
+  if (!values.length) throw new Error("OBJ contains no faces");
+  const vertices = new Float32Array(values);
+  const normals = new Float32Array(vertices.length);
+  normalizeMissingNormals(vertices, normals);
+  return { vertices, normals, triangleCount: vertices.length / 9, bounds: boundsFor(vertices) };
+}
+
+function objVertex(points, token, rawLine) {
+  const indexText = String(token).split("/", 1)[0];
+  const index = Number.parseInt(indexText, 10);
+  if (!Number.isInteger(index) || index === 0) throw new Error(`Invalid OBJ face line: ${rawLine}`);
+  const resolved = index > 0 ? index - 1 : points.length + index;
+  if (resolved < 0 || resolved >= points.length) throw new Error(`OBJ face references missing vertex ${index}: ${rawLine}`);
+  return points[resolved];
+}
+
 function normalizeMissingNormals(vertices, normals) {
   for (let i = 0; i < vertices.length; i += 9) {
     let n = [normals[i], normals[i + 1], normals[i + 2]];
@@ -679,11 +829,67 @@ function normalizeMissingNormals(vertices, normals) {
   }
 }
 
-function transformMesh(source, payload) {
-  const t = payload.transform;
-  const printer = payload.printer;
-  const centerModel = payload.centerModel;
-  const lift = payload.support.enabled ? payload.support.modelLift : 0;
+function arrangeModels(payload) {
+  const orientedModels = models.map((model) => {
+    const oriented = orientMesh(model.mesh, payload.transform);
+    const bounds = oriented.bounds;
+    return {
+      model,
+      mesh: oriented,
+      width: bounds.maxX - bounds.minX,
+      depth: bounds.maxY - bounds.minY,
+      height: bounds.maxZ - bounds.minZ
+    };
+  });
+  const ordered = orientedModels
+    .map((item, index) => ({ ...item, index }))
+    .sort((a, b) => Math.max(b.depth, b.width) - Math.max(a.depth, a.width) || a.index - b.index);
+  const gap = models.length > 1 ? 4 : 0;
+  const bedX = payload.printer.sizeX || 120;
+  let cursorX = 0;
+  let cursorY = 0;
+  let rowDepth = 0;
+  let extentX = 0;
+  let extentY = 0;
+  let overflow = false;
+  const placementsByIndex = [];
+  const placedMeshes = [];
+
+  for (const item of ordered) {
+    if (cursorX > 0 && cursorX + item.width > bedX) {
+      cursorX = 0;
+      cursorY += rowDepth + gap;
+      rowDepth = 0;
+    }
+    const transform = {
+      rotateX: payload.transform.rotateX,
+      rotateY: payload.transform.rotateY,
+      rotateZ: payload.transform.rotateZ,
+      scale: payload.transform.scale,
+      translateX: cursorX - item.mesh.bounds.minX,
+      translateY: cursorY - item.mesh.bounds.minY,
+      translateZ: -item.mesh.bounds.minZ
+    };
+    const placed = translateMesh(item.mesh, transform.translateX, transform.translateY, transform.translateZ);
+    const placedBounds = placed.bounds;
+    extentX = Math.max(extentX, placedBounds.maxX);
+    extentY = Math.max(extentY, placedBounds.maxY);
+    rowDepth = Math.max(rowDepth, item.depth);
+    cursorX += item.width + gap;
+    placementsByIndex[item.index] = { model: item.model, transform };
+    placedMeshes.push(placed);
+  }
+
+  overflow = extentX > payload.printer.sizeX || extentY > payload.printer.sizeY;
+  return {
+    placements: placementsByIndex.filter(Boolean),
+    mesh: combineMeshes(placedMeshes),
+    overflow
+  };
+}
+
+function orientMesh(source, transform) {
+  const t = transform;
   const bounds = source.bounds;
   const origin = [
     (bounds.minX + bounds.maxX) / 2,
@@ -708,16 +914,51 @@ function transformMesh(source, payload) {
     orientedNormals[i + 1] = normal[1];
     orientedNormals[i + 2] = normal[2];
   }
-  const orientedBounds = boundsFor(oriented);
-  const ox = (centerModel ? (printer.sizeX - (orientedBounds.maxX - orientedBounds.minX)) / 2 : 0) - orientedBounds.minX + t.translateX;
-  const oy = (centerModel ? (printer.sizeY - (orientedBounds.maxY - orientedBounds.minY)) / 2 : 0) - orientedBounds.minY + t.translateY;
-  const oz = lift + t.translateZ - orientedBounds.minZ;
-  for (let i = 0; i < oriented.length; i += 3) {
-    oriented[i] += ox;
-    oriented[i + 1] += oy;
-    oriented[i + 2] += oz;
-  }
   return { vertices: oriented, normals: orientedNormals, triangleCount: source.triangleCount, bounds: boundsFor(oriented) };
+}
+
+function placeGroupMesh(source, payload) {
+  const t = payload.transform;
+  const printer = payload.printer;
+  const centerModel = payload.centerModel;
+  const lift = payload.support.enabled ? payload.support.modelLift : 0;
+  const bounds = source.bounds;
+  const width = bounds.maxX - bounds.minX;
+  const depth = bounds.maxY - bounds.minY;
+  const ox = (centerModel ? (printer.sizeX - width) / 2 : 0) - bounds.minX + t.translateX;
+  const oy = (centerModel ? (printer.sizeY - depth) / 2 : 0) - bounds.minY + t.translateY;
+  const oz = lift + t.translateZ - bounds.minZ;
+  return translateMesh(source, ox, oy, oz);
+}
+
+function translateMesh(source, x, y, z) {
+  const vertices = new Float32Array(source.vertices.length);
+  for (let i = 0; i < source.vertices.length; i += 3) {
+    vertices[i] = source.vertices[i] + x;
+    vertices[i + 1] = source.vertices[i + 1] + y;
+    vertices[i + 2] = source.vertices[i + 2] + z;
+  }
+  return {
+    vertices,
+    normals: source.normals,
+    triangleCount: source.triangleCount,
+    bounds: boundsFor(vertices)
+  };
+}
+
+function combineMeshes(items) {
+  const totalVertices = items.reduce((sum, item) => sum + item.vertices.length, 0);
+  const vertices = new Float32Array(totalVertices);
+  const normals = new Float32Array(totalVertices);
+  let offset = 0;
+  let triangleCount = 0;
+  for (const item of items) {
+    vertices.set(item.vertices, offset);
+    normals.set(item.normals, offset);
+    offset += item.vertices.length;
+    triangleCount += item.triangleCount;
+  }
+  return { vertices, normals, triangleCount, bounds: boundsFor(vertices) };
 }
 
 function rotatePoint(point, angles) {
@@ -859,6 +1100,10 @@ class Viewer {
   }
 
   setPart(part) {
+    if (!part) {
+      delete this.meshes.part;
+      return;
+    }
     this.meshes.part = makeMesh(this.gl, { vertices: part.vertices, normals: part.normals }, [0.26, 0.72, 0.86, 1], this.gl.TRIANGLES);
   }
 
