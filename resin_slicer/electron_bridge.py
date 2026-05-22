@@ -111,6 +111,7 @@ def _slice(request: dict[str, Any]) -> None:
         request["outputPath"],
         request.get("format", "goo"),
         progress=lambda message: _write_json({"type": "progress", "message": message}),
+        layer_workers=_layer_workers_from_request(request),
     )
     _write_json(
         {
@@ -138,6 +139,17 @@ def _mesh_from_request(request: dict[str, Any]) -> Mesh:
         return Mesh(tuple(triangles))
 
     return load_mesh(request["inputPath"])
+
+
+def _layer_workers_from_request(request: dict[str, Any]) -> int | None:
+    value = request.get("layerWorkers")
+    if value in (None, ""):
+        return None
+    try:
+        workers = int(value)
+    except (TypeError, ValueError):
+        raise SlicerError("layerWorkers must be an integer") from None
+    return workers if workers > 0 else None
 
 
 def _model_transform(model: dict[str, Any]) -> MeshTransform:

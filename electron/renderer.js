@@ -16,6 +16,7 @@ const fields = [
 
 let profiles = {};
 let models = [];
+let selectedModelIndexes = new Set();
 let supports = [];
 let supportBraces = [];
 let viewer = null;
@@ -37,6 +38,7 @@ async function init() {
   $("sliceButton").addEventListener("click", slice);
   $("profile").addEventListener("change", () => {
     loadProfileDefaults();
+    syncSceneSettingCommits();
     updateScene();
   });
   $("format").addEventListener("change", () => {
@@ -47,10 +49,10 @@ async function init() {
   $("primarySupportsEnabled").addEventListener("change", updateScene);
   $("enforcersEnabled").addEventListener("change", updateScene);
   $("braceEnabled").addEventListener("change", updateScene);
-  for (const id of fields) {
-    $(id).addEventListener("input", updateScene);
-  }
+  bindSceneSettingUpdates();
   initDropLoading();
+  initThemedPrompts();
+  initGlobalShortcuts();
 
   window.slicer.onSliceProgress((message) => log(message.message));
   try {
@@ -64,8 +66,10 @@ async function init() {
     }
     $("profile").value = profiles["generic-2k"] ? "generic-2k" : Object.keys(profiles)[0] || "";
     loadProfileDefaults();
+    syncSceneSettingCommits();
   } catch (error) {
     log(`Could not load Python profiles: ${error.message}`);
+    showErrorPrompt("Profile Load Failed", error);
     profiles = {
       "generic-2k": {
         resolution_x: 1920,
@@ -96,9 +100,112 @@ async function init() {
     $("profile").appendChild(option);
     $("profile").value = "generic-2k";
     loadProfileDefaults();
+    syncSceneSettingCommits();
   }
 
   updateScene();
+}
+
+function bindSceneSettingUpdates() {
+  for (const id of fields) {
+    const field = $(id);
+    if (field.tagName === "SELECT") {
+      field.addEventListener("change", () => commitSceneSetting(field));
+      continue;
+    }
+    field.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        commitSceneSetting(field);
+        field.blur();
+      }
+    });
+    field.addEventListener("blur", () => commitSceneSetting(field));
+    field.addEventListener("change", () => commitSceneSetting(field));
+  }
+  syncSceneSettingCommits();
+}
+
+function syncSceneSettingCommits() {
+  for (const id of fields) {
+    const field = $(id);
+    field.dataset.sceneCommittedValue = fieldValue(field);
+  }
+}
+
+function commitSceneSetting(field) {
+  const value = fieldValue(field);
+  if (value === field.dataset.sceneCommittedValue) return;
+  field.dataset.sceneCommittedValue = value;
+  updateScene();
+}
+
+function fieldValue(field) {
+  return field.type === "checkbox" ? String(field.checked) : field.value;
+}
+
+function initThemedPrompts() {
+  $("promptClose").addEventListener("click", hideThemedPrompt);
+  $("promptOverlay").addEventListener("pointerdown", (event) => {
+    if (event.target === $("promptOverlay")) hideThemedPrompt();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !$("promptOverlay").hidden) hideThemedPrompt();
+  });
+  if (window.slicer.onAppPrompt) {
+    window.slicer.onAppPrompt((payload) => showThemedPrompt(payload));
+  }
+}
+
+function showThemedPrompt({ title = "Resin Slicer", message = "", detail = "", kind = "info" } = {}) {
+  const overlay = $("promptOverlay");
+  const dialog = overlay.querySelector(".prompt-dialog");
+  $("promptTitle").textContent = title;
+  $("promptMessage").textContent = message || "Something needs your attention.";
+  $("promptIcon").textContent = kind === "error" ? "!" : "i";
+  $("promptDetail").textContent = detail || "";
+  $("promptDetail").hidden = !detail;
+  dialog.classList.toggle("error", kind === "error");
+  overlay.hidden = false;
+  $("promptClose").focus();
+}
+
+function hideThemedPrompt() {
+  $("promptOverlay").hidden = true;
+}
+
+function showErrorPrompt(title, error) {
+  showThemedPrompt({
+    title,
+    message: error && error.message ? error.message : String(error),
+    detail: error && error.stack ? error.stack : "",
+    kind: "error"
+  });
+}
+
+function logAndPrompt(title, message, kind = "info") {
+  log(message);
+  showThemedPrompt({ title, message, kind });
+}
+
+function initGlobalShortcuts() {
+  document.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
+      event.preventDefault();
+      event.stopPropagation();
+      selectAllModels();
+    }
+  }, true);
+}
+
+function selectAllModels() {
+  const selection = window.getSelection ? window.getSelection() : null;
+  if (selection) selection.removeAllRanges();
+  selectedModelIndexes = new Set(models.map((_model, index) => index));
+  updateScene();
+  if (models.length) {
+    $("meshStatus").textContent = `${models.length.toLocaleString()} model${models.length === 1 ? "" : "s"} selected`;
+  }
 }
 
 async function openStl() {
@@ -111,13 +218,14 @@ async function openStl() {
     await loadStlPaths(paths, { append: false });
   } catch (error) {
     log(`Open mesh failed: ${error.message}`);
+    showErrorPrompt("Open Mesh Failed", error);
   }
 }
 
 async function loadStlPaths(paths, { append = false } = {}) {
   const nextPaths = normalizeStlPaths(paths);
   if (!nextPaths.length) {
-    log("Choose or drop at least one STL or OBJ file.");
+    logAndPrompt("No Mesh Files", "Choose or drop at least one STL or OBJ file.");
     return;
   }
 
@@ -135,6 +243,7 @@ async function loadStlPaths(paths, { append = false } = {}) {
   }
 
   models = loaded;
+  selectedModelIndexes = new Set();
   supports = [];
   supportBraces = [];
   $("inputPath").value = models.map((item) => item.path).join("; ");
@@ -148,8 +257,13 @@ async function loadStlPaths(paths, { append = false } = {}) {
 }
 
 async function chooseOutput() {
-  const path = await window.slicer.saveOutput($("format").value);
-  if (path) $("outputPath").value = path;
+  try {
+    const path = await window.slicer.saveOutput($("format").value);
+    if (path) $("outputPath").value = path;
+  } catch (error) {
+    log(`Choose output failed: ${error.message}`);
+    showErrorPrompt("Choose Output Failed", error);
+  }
 }
 
 function setDefaultOutput() {
@@ -182,7 +296,7 @@ async function handleDrop(event) {
     .map((file) => window.slicer.pathForFile ? window.slicer.pathForFile(file) : file.path)
     .filter(isSupportedMeshPath);
   if (!paths.length) {
-    log("Drop one or more STL or OBJ files into the viewer.");
+    logAndPrompt("Unsupported Drop", "Drop one or more STL or OBJ files into the viewer.");
     return;
   }
   await loadStlPaths(paths, { append: models.length > 0 });
@@ -240,13 +354,18 @@ async function importProfile(kind) {
     const imported = parseImportedProfile(file.text);
     const changed = applyImportedProfile(kind, imported.flat);
     if (!changed) {
-      log(`No recognizable ${kind} settings found in ${file.path}`);
+      logAndPrompt(
+        "Profile Not Recognized",
+        `No recognizable ${kind} settings found in ${file.path}`
+      );
       return;
     }
     log(`Imported ${kind} profile from ${file.path}`);
+    syncSceneSettingCommits();
     updateScene();
   } catch (error) {
     log(`Import ${kind} failed: ${error.message}`);
+    showErrorPrompt(`Import ${profileKindLabel(kind)} Failed`, error);
   }
 }
 
@@ -258,6 +377,7 @@ async function exportProfile(kind) {
     if (path) log(`Exported ${kind} profile to ${path}`);
   } catch (error) {
     log(`Export ${kind} failed: ${error.message}`);
+    showErrorPrompt(`Export ${profileKindLabel(kind)} Failed`, error);
   }
 }
 
@@ -274,6 +394,7 @@ async function generatePreview() {
     log(`Preview: ${result.layers} layers, ${supports.length} supports, ${supportBraces.length} braces`);
   } catch (error) {
     log(`Preview failed: ${error.message}`);
+    showErrorPrompt("Preview Failed", error);
   } finally {
     setBusy(false);
   }
@@ -289,6 +410,7 @@ async function slice() {
     log(`${result.layers} layers, ${result.supports} supports, ${result.materialMl.toFixed(2)} ml resin`);
   } catch (error) {
     log(`Slice failed: ${error.message}`);
+    showErrorPrompt("Slice Failed", error);
   } finally {
     setBusy(false);
   }
@@ -296,11 +418,11 @@ async function slice() {
 
 function ensureReady(requireOutput) {
   if (!models.length) {
-    log("Open or drop at least one STL or OBJ first.");
+    logAndPrompt("No Mesh Loaded", "Open or drop at least one STL or OBJ first.");
     return false;
   }
   if (requireOutput && !$("outputPath").value.trim()) {
-    log("Choose an output path first.");
+    logAndPrompt("No Output Path", "Choose an output path first.");
     return false;
   }
   return true;
@@ -657,6 +779,13 @@ function profileFileName(kind) {
   return `${safe}-${kind}.json`;
 }
 
+function profileKindLabel(kind) {
+  if (kind === "machine") return "Machine";
+  if (kind === "resin") return "Resin";
+  if (kind === "support") return "Support";
+  return "Settings";
+}
+
 function loadProfileDefaults() {
   const cfg = profiles[$("profile").value];
   if (!cfg) return;
@@ -686,6 +815,7 @@ function updateScene() {
   if (!models.length) {
     viewer.setBed(number("sizeX"), number("sizeY"), number("sizeZ"));
     viewer.setPart(null);
+    viewer.setSelectionBoxes([]);
     viewer.setSupports([], []);
     return;
   }
@@ -699,7 +829,12 @@ function updateScene() {
   }
   viewer.setBed(payload.printer.sizeX, payload.printer.sizeY, payload.printer.sizeZ);
   viewer.setPart(placeGroupMesh(arranged.mesh, payload));
+  viewer.setSelectionBoxes(selectionBoxesFor(arranged, payload));
   viewer.setSupports(supports, supportBraces);
+  if (selectedModelIndexes.size) {
+    const count = Math.min(selectedModelIndexes.size, models.length);
+    $("meshStatus").textContent = `${count.toLocaleString()} model${count === 1 ? "" : "s"} selected`;
+  }
 }
 
 function number(id) {
@@ -876,7 +1011,7 @@ function arrangeModels(payload) {
     extentY = Math.max(extentY, placedBounds.maxY);
     rowDepth = Math.max(rowDepth, item.depth);
     cursorX += item.width + gap;
-    placementsByIndex[item.index] = { model: item.model, transform };
+    placementsByIndex[item.index] = { model: item.model, transform, placedMesh: placed };
     placedMeshes.push(placed);
   }
 
@@ -918,6 +1053,24 @@ function orientMesh(source, transform) {
 }
 
 function placeGroupMesh(source, payload) {
+  const offset = groupPlacementOffset(source, payload);
+  return translateMesh(source, offset.x, offset.y, offset.z);
+}
+
+function selectionBoxesFor(arranged, payload) {
+  if (!selectedModelIndexes.size) return [];
+  const offset = groupPlacementOffset(arranged.mesh, payload);
+  const boxes = [];
+  for (let index = 0; index < arranged.placements.length; index++) {
+    if (!selectedModelIndexes.has(index)) continue;
+    const mesh = arranged.placements[index].placedMesh;
+    if (!mesh) continue;
+    boxes.push(translateBounds(mesh.bounds, offset.x, offset.y, offset.z));
+  }
+  return boxes;
+}
+
+function groupPlacementOffset(source, payload) {
   const t = payload.transform;
   const printer = payload.printer;
   const centerModel = payload.centerModel;
@@ -928,7 +1081,18 @@ function placeGroupMesh(source, payload) {
   const ox = (centerModel ? (printer.sizeX - width) / 2 : 0) - bounds.minX + t.translateX;
   const oy = (centerModel ? (printer.sizeY - depth) / 2 : 0) - bounds.minY + t.translateY;
   const oz = lift + t.translateZ - bounds.minZ;
-  return translateMesh(source, ox, oy, oz);
+  return { x: ox, y: oy, z: oz };
+}
+
+function translateBounds(bounds, x, y, z) {
+  return {
+    minX: bounds.minX + x,
+    minY: bounds.minY + y,
+    minZ: bounds.minZ + z,
+    maxX: bounds.maxX + x,
+    maxY: bounds.maxY + y,
+    maxZ: bounds.maxZ + z
+  };
 }
 
 function translateMesh(source, x, y, z) {
@@ -1102,9 +1266,18 @@ class Viewer {
   setPart(part) {
     if (!part) {
       delete this.meshes.part;
+      delete this.meshes.selection;
       return;
     }
     this.meshes.part = makeMesh(this.gl, { vertices: part.vertices, normals: part.normals }, [0.26, 0.72, 0.86, 1], this.gl.TRIANGLES);
+  }
+
+  setSelectionBoxes(boxes) {
+    if (!boxes || !boxes.length) {
+      delete this.meshes.selection;
+      return;
+    }
+    this.meshes.selection = makeMesh(this.gl, makeSelectionBoxGeometry(boxes), [1.0, 0.86, 0.26, 1], this.gl.LINES);
   }
 
   setSupports(items, braces = []) {
@@ -1128,7 +1301,7 @@ class Viewer {
     const view = lookAt(eye, this.target, [0, 0, 1]);
     const mvp = multiply(projection, view);
 
-    for (const key of ["bed", "grid", "supports", "part"]) {
+    for (const key of ["bed", "grid", "supports", "part", "selection"]) {
       if (this.meshes[key]) drawMesh(gl, this.program, this.meshes[key], mvp);
     }
     requestAnimationFrame(() => this.draw());
@@ -1147,6 +1320,29 @@ function makeGridGeometry(bed) {
   const step = Math.max(5, Math.round(Math.max(bed.x, bed.y) / 16));
   for (let x = 0; x <= bed.x + 0.01; x += step) values.push(x, 0, 0.03, x, bed.y, 0.03);
   for (let y = 0; y <= bed.y + 0.01; y += step) values.push(0, y, 0.03, bed.x, y, 0.03);
+  const vertices = new Float32Array(values);
+  const normals = new Float32Array(vertices.length);
+  for (let i = 2; i < normals.length; i += 3) normals[i] = 1;
+  return { vertices, normals };
+}
+
+function makeSelectionBoxGeometry(boxes) {
+  const values = [];
+  for (const box of boxes) {
+    const minX = box.minX;
+    const minY = box.minY;
+    const minZ = box.minZ;
+    const maxX = box.maxX;
+    const maxY = box.maxY;
+    const maxZ = box.maxZ;
+    const corners = [
+      [minX, minY, minZ], [maxX, minY, minZ], [maxX, maxY, minZ], [minX, maxY, minZ],
+      [minX, minY, maxZ], [maxX, minY, maxZ], [maxX, maxY, maxZ], [minX, maxY, maxZ]
+    ];
+    for (const [a, b] of [[0, 1], [1, 2], [2, 3], [3, 0], [4, 5], [5, 6], [6, 7], [7, 4], [0, 4], [1, 5], [2, 6], [3, 7]]) {
+      values.push(...corners[a], ...corners[b]);
+    }
+  }
   const vertices = new Float32Array(values);
   const normals = new Float32Array(vertices.length);
   for (let i = 2; i < normals.length; i += 3) normals[i] = 1;

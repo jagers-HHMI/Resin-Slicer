@@ -33,6 +33,8 @@ Outputs:
 4. Generate a support preview.
 5. Slice to the selected output path.
 
+Layer rendering uses multiple worker threads by default, capped at four workers or the number of layers in the job.
+
 The main buttons stay visible by default. Deeper settings live in collapsible sections:
 
 - `Placement`: rotation, translation, scale, centering.
@@ -104,6 +106,13 @@ Disable supports:
 
 ```powershell
 python -m resin_slicer.cli model.stl --no-supports --format ctb --output model.ctb
+```
+
+Control slicing worker threads:
+
+```powershell
+python -m resin_slicer.cli model.stl --format goo --output model.goo --workers 8
+$env:RESIN_SLICER_LAYER_WORKERS = "8"
 ```
 
 ## Development

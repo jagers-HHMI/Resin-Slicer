@@ -62,6 +62,7 @@ def main(argv: list[str] | None = None) -> int:
             args.output,
             fmt,
             progress=(lambda message: print(message, file=sys.stderr)) if args.verbose else None,
+            layer_workers=args.workers,
         )
     except SlicerError as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -109,6 +110,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="translate model as XxYxZ millimeters before final placement",
     )
     parser.add_argument("--max-pixels-per-layer", type=int, help="raise or lower layer memory safety limit")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        help="worker threads for layer rendering; defaults to RESIN_SLICER_LAYER_WORKERS or up to 4",
+    )
     parser.add_argument("--no-supports", action="store_true", help="disable automatic support generation")
     parser.add_argument("--model-lift", type=float, default=5.0, help="raise supported models this many millimeters above the plate")
     parser.add_argument(

@@ -12,6 +12,7 @@ function createWindow() {
     height: 820,
     minWidth: 1040,
     minHeight: 700,
+    show: false,
     autoHideMenuBar: true,
     icon: path.join(repoRoot, "assets", "resin-slicer.ico"),
     backgroundColor: "#111418",
@@ -20,6 +21,10 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false
     }
+  });
+
+  win.once("ready-to-show", () => {
+    win.showInactive();
   });
 
   win.loadFile(path.join(__dirname, "index.html"));
@@ -34,12 +39,22 @@ app.whenReady().then(() => {
 });
 
 process.on("uncaughtException", (error) => {
-  dialog.showErrorBox("Resin Slicer error", error.stack || error.message || String(error));
+  showAppPrompt({
+    title: "Resin Slicer Error",
+    message: error.message || String(error),
+    detail: error.stack || "",
+    kind: "error"
+  });
 });
 
 process.on("unhandledRejection", (reason) => {
   const message = reason && reason.stack ? reason.stack : String(reason);
-  dialog.showErrorBox("Resin Slicer error", message);
+  showAppPrompt({
+    title: "Resin Slicer Error",
+    message: reason && reason.message ? reason.message : String(reason),
+    detail: message,
+    kind: "error"
+  });
 });
 
 app.on("window-all-closed", () => {
@@ -127,6 +142,97 @@ function profileKindLabel(kind) {
   if (kind === "resin") return "resin";
   if (kind === "support") return "support";
   return "settings";
+}
+
+function showAppPrompt(payload) {
+  const windows = BrowserWindow.getAllWindows().filter((win) => !win.isDestroyed());
+  const target = BrowserWindow.getFocusedWindow() || windows[0];
+  if (!target || target.webContents.isDestroyed()) {
+    showStandalonePrompt(payload);
+    return;
+  }
+
+  const sendPrompt = () => {
+    if (!target.isDestroyed() && !target.webContents.isDestroyed()) {
+      target.webContents.send("app:prompt", payload);
+    }
+  };
+
+  if (target.webContents.isLoading()) {
+    target.webContents.once("did-finish-load", sendPrompt);
+  } else {
+    sendPrompt();
+  }
+}
+
+function showStandalonePrompt(payload) {
+  if (!app.isReady()) {
+    app.whenReady().then(() => showStandalonePrompt(payload));
+    return;
+  }
+
+  const prompt = new BrowserWindow({
+    width: 500,
+    height: 260,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    title: payload.title || "Resin Slicer",
+    icon: path.join(repoRoot, "assets", "resin-slicer.ico"),
+    backgroundColor: "#181d23",
+    autoHideMenuBar: true,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+  prompt.setMenu(null);
+  prompt.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(standalonePromptHtml(payload))}`);
+}
+
+function standalonePromptHtml(payload) {
+  const title = escapeHtml(payload.title || "Resin Slicer");
+  const message = escapeHtml(payload.message || "Something needs your attention.");
+  const detail = escapeHtml(payload.detail || "");
+  const detailBlock = detail ? `<pre>${detail}</pre>` : "";
+  return `<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+:root{color-scheme:dark;font-family:"Segoe UI",system-ui,sans-serif;background:#181d23;color:#eef2f5}
+body{margin:0;background:#181d23}
+main{display:grid;grid-template-columns:42px 1fr;gap:14px;padding:20px}
+.icon{width:34px;height:34px;display:grid;place-items:center;border:1px solid #8f5353;border-radius:50%;color:#ff9b9b;background:#101419;font-weight:700}
+h1{margin:0 0 8px;font-size:15px}
+p{margin:0;color:#cdd6dd;font-size:13px;line-height:1.45}
+pre{max-height:96px;overflow:auto;margin:12px 0 0;padding:10px;border:1px solid #2b333d;background:#0f1318;color:#aab5bf;font-size:12px;white-space:pre-wrap}
+.actions{display:flex;justify-content:flex-end;margin-top:16px}
+button{min-width:92px;border:1px solid #3c83cf;background:#2b6cb0;color:#eef2f5;border-radius:4px;padding:8px;font:inherit;cursor:pointer}
+</style>
+</head>
+<body>
+<main>
+<div class="icon">!</div>
+<section>
+<h1>${title}</h1>
+<p>${message}</p>
+${detailBlock}
+<div class="actions"><button autofocus onclick="window.close()">OK</button></div>
+</section>
+</main>
+</body>
+</html>`;
+}
+
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  }[char]));
 }
 
 function runBridge(command, payload, onMessage) {

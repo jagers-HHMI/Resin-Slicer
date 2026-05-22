@@ -191,6 +191,19 @@
         </div>
       </aside>
     </main>
+    <div id="promptOverlay" class="prompt-overlay" hidden>
+      <section class="prompt-dialog" role="dialog" aria-modal="true" aria-labelledby="promptTitle">
+        <div id="promptIcon" class="prompt-icon">!</div>
+        <div class="prompt-body">
+          <h2 id="promptTitle">Resin Slicer</h2>
+          <p id="promptMessage"></p>
+          <pre id="promptDetail" hidden></pre>
+          <div class="prompt-actions">
+            <button id="promptClose" class="primary" type="button">OK</button>
+          </div>
+        </div>
+      </section>
+    </div>
     <script src="./renderer.js"></script>
   </body>
 </html>

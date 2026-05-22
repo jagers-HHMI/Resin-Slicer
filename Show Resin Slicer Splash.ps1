@@ -1,3 +1,7 @@
+param(
+    [string]$ReadyFile = ""
+)
+
 $ErrorActionPreference = "Stop"
 
 Add-Type -AssemblyName System.Drawing
@@ -20,6 +24,17 @@ public static class SplashNative {
             return SetWindowLongPtr64(hWnd, GWLP_HWNDPARENT, owner);
         }
         return SetWindowLongPtr32(hWnd, GWLP_HWNDPARENT, owner);
+    }
+
+    public const uint SWP_NOSIZE = 0x0001;
+    public const uint SWP_NOMOVE = 0x0002;
+    public const uint SWP_NOACTIVATE = 0x0010;
+
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
+    public static void PlaceAboveOwner(IntPtr hWnd, IntPtr owner) {
+        SetWindowPos(hWnd, owner, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 }
 "@
@@ -96,15 +111,9 @@ $bar.BackColor = [System.Drawing.Color]::FromArgb(122, 236, 224)
 $bar.Cursor = [System.Windows.Forms.Cursors]::Hand
 $barBack.Controls.Add($bar)
 
-$hint = New-Object System.Windows.Forms.Label
-$hint.AutoSize = $false
-$hint.Location = [System.Drawing.Point]::new(135, 166)
-$hint.Size = [System.Drawing.Size]::new(235, 20)
-$hint.Font = [System.Drawing.Font]::new("Segoe UI", 8)
-$hint.ForeColor = [System.Drawing.Color]::FromArgb(143, 155, 166)
-$hint.Text = "Click to dismiss"
-$hint.Cursor = [System.Windows.Forms.Cursors]::Hand
-$card.Controls.Add($hint)
+$script:splashControls = @($form, $card, $picture, $title, $subtitle, $barBack, $bar)
+$script:ownerHandle = [IntPtr]::Zero
+$script:mainWindowLoaded = $false
 
 $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $timer = New-Object System.Windows.Forms.Timer
@@ -113,6 +122,7 @@ $timer.Add_Tick({
     $elapsed = [Math]::Min(5000, $stopwatch.ElapsedMilliseconds)
     $bar.Width = [int]($barBack.Width * ($elapsed / 5000.0))
     $script:ownerHandle = Set-SplashOwner -Form $form -CurrentOwner $script:ownerHandle
+    Ensure-SplashAboveOwner -Form $form -Owner $script:ownerHandle
     if ($elapsed -ge 5000) {
         $timer.Stop()
         $form.Close()
@@ -120,11 +130,14 @@ $timer.Add_Tick({
 })
 
 $dismiss = {
+    if (-not $script:mainWindowLoaded) {
+        return
+    }
     $timer.Stop()
     $form.Close()
 }
 
-foreach ($control in @($form, $card, $picture, $title, $subtitle, $barBack, $bar, $hint)) {
+foreach ($control in $script:splashControls) {
     $control.Add_Click($dismiss)
 }
 
@@ -157,14 +170,51 @@ function Set-SplashOwner {
     $nextOwner = Get-ResinSlicerWindowHandle
     if ($nextOwner -ne [IntPtr]::Zero -and $nextOwner -ne $CurrentOwner) {
         [SplashNative]::SetWindowOwner($Form.Handle, $nextOwner) | Out-Null
+        [SplashNative]::PlaceAboveOwner($Form.Handle, $nextOwner)
+        Set-SplashDismissEnabled -Enabled $true
         return $nextOwner
+    }
+    if ($nextOwner -ne [IntPtr]::Zero) {
+        Set-SplashDismissEnabled -Enabled $true
     }
     return $CurrentOwner
 }
 
-$script:ownerHandle = [IntPtr]::Zero
+function Ensure-SplashAboveOwner {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Forms.Form]$Form,
+        [Parameter(Mandatory = $true)][IntPtr]$Owner
+    )
+
+    if ($Owner -ne [IntPtr]::Zero) {
+        [SplashNative]::PlaceAboveOwner($Form.Handle, $Owner)
+    }
+}
+
+function Set-SplashDismissEnabled {
+    param([Parameter(Mandatory = $true)][bool]$Enabled)
+
+    $script:mainWindowLoaded = $Enabled
+    $cursor = if ($Enabled) {
+        [System.Windows.Forms.Cursors]::Hand
+    } else {
+        [System.Windows.Forms.Cursors]::AppStarting
+    }
+    foreach ($control in $script:splashControls) {
+        $control.Cursor = $cursor
+    }
+}
+
+Set-SplashDismissEnabled -Enabled $false
 
 $form.Add_Shown({
+    if ($ReadyFile) {
+        try {
+            Set-Content -LiteralPath $ReadyFile -Value "ready" -Encoding ASCII
+        } catch {
+            # The splash should still work even if the launcher readiness marker cannot be written.
+        }
+    }
     $script:ownerHandle = Set-SplashOwner -Form $form -CurrentOwner $script:ownerHandle
     $timer.Start()
 })

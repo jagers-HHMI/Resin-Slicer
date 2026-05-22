@@ -14,5 +14,10 @@ contextBridge.exposeInMainWorld("slicer", {
     const listener = (_event, message) => callback(message);
     ipcRenderer.on("slice:progress", listener);
     return () => ipcRenderer.removeListener("slice:progress", listener);
+  },
+  onAppPrompt: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("app:prompt", listener);
+    return () => ipcRenderer.removeListener("app:prompt", listener);
   }
 });

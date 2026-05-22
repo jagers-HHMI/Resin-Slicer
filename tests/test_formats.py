@@ -36,6 +36,17 @@ class FormatSmokeTests(unittest.TestCase):
             self.assertTrue(path.exists())
             self.assertGreater(result.layer_count, 0)
 
+    def test_writes_with_parallel_layer_rendering(self) -> None:
+        config = profile("small-test").with_overrides(layer_height_mm=2.0)
+        job = SliceJob(cube_mesh(6), config, SupportConfig(enabled=True))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "parallel.goo"
+            result = slice_to_file(job, path, "goo", layer_workers=2)
+
+            self.assertTrue(path.exists())
+            self.assertEqual(result.layer_count, 6)
+            self.assertGreater(result.support_count, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
