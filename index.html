@@ -8,25 +8,91 @@
     <link rel="stylesheet" href="./electron/styles.css">
   </head>
   <body>
-    <main class="app">
-      <section class="viewer-shell">
-        <canvas id="viewer"></canvas>
-        <div class="viewer-status">
-          <span id="meshStatus">No mesh loaded</span>
-          <span id="supportStatus">Supports not generated</span>
+    <main id="appShell" class="app">
+      <aside id="leftPanel" class="sidebar left-panel">
+        <div class="sidebar-header">
+          <div>
+            <h2>Build Plates</h2>
+            <p>Parts grouped by plate</p>
+          </div>
         </div>
+        <div class="sidebar-actions">
+          <button id="addBuildPlateButton" type="button">Add Build Plate</button>
+          <button id="selectAllButton" type="button">Select All</button>
+        </div>
+        <button id="moveToActivePlateButton" type="button">Move Selected To Active</button>
+        <div id="leftTree" class="plate-tree"></div>
+      </aside>
+
+      <section class="center-stage">
+        <nav class="topbar">
+          <label>Machine Profile <select id="profile"></select></label>
+          <div class="topbar-menu">
+            <button id="modifyPrinterButton" class="topbar-menu-button" type="button" data-topbar-menu-button="printerTopbarMenu" aria-expanded="false">Modify Printer</button>
+            <section id="printerTopbarMenu" class="topbar-menu-panel" hidden>
+              <label>Machine <input id="machineName" value="Generic MSLA"></label>
+              <div class="row">
+                <button id="importUvtoolsMachineButton" type="button">Import Printer</button>
+                <button id="exportMachineButton" type="button">Export Printer</button>
+              </div>
+              <div class="grid two">
+                <label>X pixels <input id="resolutionX" type="number"></label>
+                <label>Y pixels <input id="resolutionY" type="number"></label>
+                <label>X mm <input id="sizeX" type="number" step="0.01"></label>
+                <label>Y mm <input id="sizeY" type="number" step="0.01"></label>
+                <label>Z mm <input id="sizeZ" type="number" step="0.01"></label>
+                <label>Layer mm <input id="layerHeight" type="number" step="0.01"></label>
+              </div>
+            </section>
+          </div>
+          <div class="topbar-menu">
+            <button id="modifyResinButton" class="topbar-menu-button" type="button" data-topbar-menu-button="resinTopbarMenu" aria-expanded="false">Modify Resin</button>
+            <section id="resinTopbarMenu" class="topbar-menu-panel wide" hidden>
+              <label>Resin <input id="resinName" value="Standard"></label>
+              <div class="row">
+                <button id="importResinButton" type="button">Import Resin</button>
+                <button id="exportResinButton" type="button">Export Resin</button>
+              </div>
+              <div class="grid two">
+                <label>Normal exposure <input id="exposure" type="number" step="0.01" value="2.5"></label>
+                <label>Bottom exposure <input id="bottomExposure" type="number" step="0.1" value="35"></label>
+                <label>Bottom layers <input id="bottomLayers" type="number" step="1" value="6"></label>
+                <label>Transition layers <input id="transitionLayers" type="number" step="1" value="6"></label>
+                <label>Lift distance <input id="liftDistance" type="number" step="0.1" value="5"></label>
+                <label>Lift speed <input id="liftSpeed" type="number" step="1" value="65"></label>
+                <label>Retract distance <input id="retractDistance" type="number" step="0.1" value="5"></label>
+                <label>Retract speed <input id="retractSpeed" type="number" step="1" value="150"></label>
+                <label>Wait after retract <input id="waitAfterRetract" type="number" step="0.1" value="0.2"></label>
+                <label>Density g/ml <input id="resinDensity" type="number" step="0.01" value="1.1"></label>
+                <label>Light PWM <input id="lightPwm" type="number" step="1" value="255"></label>
+                <label>Bottom PWM <input id="bottomLightPwm" type="number" step="1" value="255"></label>
+              </div>
+            </section>
+          </div>
+        </nav>
+
+        <section class="viewer-shell">
+          <canvas id="viewer"></canvas>
+          <div class="viewer-status">
+            <span id="meshStatus">No mesh loaded</span>
+            <span id="supportStatus">Supports not generated</span>
+          </div>
+          <div id="viewerToast" class="viewer-toast" hidden></div>
+          <div id="loadProgressPanel" class="load-progress-panel" hidden></div>
+        </section>
       </section>
 
-      <aside class="panel">
-        <header>
-          <h1>Resin Slicer</h1>
-          <p>Orient, preview supports, then export GOO or CTB.</p>
-        </header>
+      <aside id="rightPanel" class="panel right-panel">
+        <div class="sidebar-header">
+          <div>
+            <h1>Resin Slicer</h1>
+            <p>Load, place, preview, slice.</p>
+          </div>
+        </div>
 
-        <section class="group workflow">
+        <section id="menuJob" class="group workflow right-menu-section" data-right-menu-section="job">
           <h2>Job</h2>
-          <button id="openButton">Open Mesh Files</button>
-          <label>Input <input id="inputPath" placeholder="Choose, paste, or drop STL/OBJ files"></label>
+          <button id="openButton" type="button">Open Mesh Files</button>
           <div class="row">
             <label>Format
               <select id="format">
@@ -34,19 +100,20 @@
                 <option value="ctb">CTB</option>
               </select>
             </label>
-            <button id="saveButton">Choose Output</button>
+            <button id="saveButton" type="button">Choose Output</button>
           </div>
           <label>Output <input id="outputPath"></label>
           <label class="check"><input id="supportsEnabled" type="checkbox" checked> Generate supports</label>
         </section>
 
-        <section class="actions">
-          <button id="previewButton">Generate Support Preview</button>
-          <button id="sliceButton" class="primary">Slice</button>
+        <section class="actions right-menu-section" data-right-menu-section="job">
+          <button id="previewButton" type="button">Preview Supports</button>
+          <button id="sliceButton" class="primary" type="button">Slice</button>
+          <button id="sliceAllButton" type="button">Slice All</button>
+          <button id="saveAllButton" type="button">Save All</button>
         </section>
-        <pre id="log"></pre>
 
-        <section class="group sound-panel">
+        <section id="menuSound" class="group sound-panel right-menu-section" data-right-menu-section="sound">
           <h2>Sound</h2>
           <div class="row">
             <label class="check"><input id="soundEnabled" type="checkbox" checked> Audio feedback</label>
@@ -54,13 +121,9 @@
           </div>
         </section>
 
-        <section class="group workspace-panel">
-          <h2>Build Plates</h2>
-          <div class="row">
-            <button id="addBuildPlateButton">Add Build Plate</button>
-            <button id="fitViewButton">Fit View</button>
-          </div>
-          <div id="buildPlateList" class="list-panel"></div>
+        <section id="menuView" class="group workspace-panel right-menu-section" data-right-menu-section="view">
+          <h2>View</h2>
+          <button id="fitViewButton" type="button">Fit View</button>
           <label>Height
             <input id="clipHeight" type="range" min="0" max="160" step="0.05" value="160">
           </label>
@@ -70,160 +133,116 @@
           </div>
         </section>
 
-        <section class="group workspace-panel">
-          <h2>Objects</h2>
-          <div id="objectList" class="list-panel"></div>
-          <div class="row">
-            <button id="selectAllButton">Select All</button>
-            <button id="moveToActivePlateButton">Move To Active</button>
-          </div>
-        </section>
-
         <div class="settings-stack">
-          <details class="group">
+          <details id="menuPlacement" class="group right-menu-section" data-right-menu-section="placement" open>
             <summary>
               <span>Placement</span>
               <small>Orientation, position, scale</small>
             </summary>
             <div class="grid three">
-              <label>Rot X <input id="rotateX" type="number" step="1" value="0"></label>
-              <label>Rot Y <input id="rotateY" type="number" step="1" value="0"></label>
-              <label>Rot Z <input id="rotateZ" type="number" step="1" value="0"></label>
-              <label>Move X <input id="translateX" type="number" step="0.1" value="0"></label>
-              <label>Move Y <input id="translateY" type="number" step="0.1" value="0"></label>
-              <label>Move Z <input id="translateZ" type="number" step="0.1" value="0"></label>
+              <label>Rot X <input id="rotateX" type="number" step="0.01" value="0.00"></label>
+              <label>Rot Y <input id="rotateY" type="number" step="0.01" value="0.00"></label>
+              <label>Rot Z <input id="rotateZ" type="number" step="0.01" value="0.00"></label>
+              <label>Move X <input id="translateX" type="number" step="0.01" value="0.00"></label>
+              <label>Move Y <input id="translateY" type="number" step="0.01" value="0.00"></label>
+              <label>Move Z <input id="translateZ" type="number" step="0.01" value="0.00"></label>
             </div>
-            <label>Scale <input id="scale" type="number" step="0.01" value="1"></label>
+            <label>Scale <input id="scale" type="number" step="0.01" value="1.00"></label>
+            <label>Drop offset <input id="dropOffset" type="number" min="0" step="0.01" value="0.05"></label>
             <label class="check"><input id="centerModel" type="checkbox" checked> Center on build plate</label>
           </details>
 
-          <details class="group">
-            <summary>
-              <span>Printer</span>
-              <small>Build volume and resolution</small>
-            </summary>
-            <div class="preset-row">
-              <button id="importMachineButton">Import Machine</button>
-              <button id="importUvtoolsMachineButton">UVTools GitHub</button>
-              <button id="exportMachineButton">Export Machine</button>
-            </div>
-            <label>Profile <select id="profile"></select></label>
-            <label>Machine name <input id="machineName" value="Generic MSLA"></label>
-            <div class="grid two">
-              <label>X pixels <input id="resolutionX" type="number"></label>
-              <label>Y pixels <input id="resolutionY" type="number"></label>
-              <label>X mm <input id="sizeX" type="number" step="0.01"></label>
-              <label>Y mm <input id="sizeY" type="number" step="0.01"></label>
-              <label>Z mm <input id="sizeZ" type="number" step="0.01"></label>
-              <label>Layer mm <input id="layerHeight" type="number" step="0.01"></label>
-            </div>
-          </details>
-
-          <details class="group">
-            <summary>
-              <span>Resin</span>
-              <small>Exposure, lift, retract</small>
-            </summary>
-            <div class="preset-row">
-              <button id="importResinButton">Import Resin</button>
-              <button id="exportResinButton">Export Resin</button>
-            </div>
-            <label>Resin name <input id="resinName" value="Standard"></label>
-            <div class="grid two">
-              <label>Normal exposure <input id="exposure" type="number" step="0.01" value="2.5"></label>
-              <label>Bottom exposure <input id="bottomExposure" type="number" step="0.1" value="35"></label>
-              <label>Bottom layers <input id="bottomLayers" type="number" step="1" value="6"></label>
-              <label>Transition layers <input id="transitionLayers" type="number" step="1" value="6"></label>
-              <label>Lift distance <input id="liftDistance" type="number" step="0.1" value="5"></label>
-              <label>Lift speed <input id="liftSpeed" type="number" step="1" value="65"></label>
-              <label>Retract distance <input id="retractDistance" type="number" step="0.1" value="5"></label>
-              <label>Retract speed <input id="retractSpeed" type="number" step="1" value="150"></label>
-              <label>Wait after retract <input id="waitAfterRetract" type="number" step="0.1" value="0.2"></label>
-              <label>Density g/ml <input id="resinDensity" type="number" step="0.01" value="1.1"></label>
-              <label>Light PWM <input id="lightPwm" type="number" step="1" value="255"></label>
-              <label>Bottom PWM <input id="bottomLightPwm" type="number" step="1" value="255"></label>
-            </div>
-          </details>
-
-          <details class="group">
+          <details id="menuSupportBasics" class="group right-menu-section" data-right-menu-section="support-basics">
             <summary>
               <span>Support Basics</span>
               <small>Lift, overhang, spacing</small>
             </summary>
             <div class="preset-row">
-              <button id="importSupportButton">Import Supports</button>
-              <button id="exportSupportButton">Export Supports</button>
+              <button id="importSupportButton" type="button">Import Supports</button>
+              <button id="exportSupportButton" type="button">Export Supports</button>
             </div>
             <div class="grid two">
-            <label>Lift mm <input id="modelLift" type="number" step="0.1" value="5"></label>
-            <label>Overhang deg <input id="overhangAngle" type="number" step="1" value="45"></label>
-            <label>Spacing mm <input id="supportSpacing" type="number" step="0.1" value="3"></label>
-            <label class="check"><input id="primarySupportsEnabled" type="checkbox"> Primary extras</label>
-            <label>Primary density <input id="primaryDensityMultiplier" type="number" step="0.1" value="2"></label>
-            <label>Primary radius <input id="primaryAreaRadius" type="number" step="0.1" value="4"></label>
-            <label>Max primary extra <input id="primaryMaxExtra" type="number" step="1" value="8"></label>
-            <label>Post radius <input id="postRadius" type="number" step="0.01" value="0.28"></label>
-            <label>Tip radius <input id="tipRadius" type="number" step="0.01" value="0.18"></label>
-            <label>Tip type
-              <select id="tipType">
-                <option value="cone">Cone</option>
-                <option value="sphere">Sphere</option>
-                <option value="cylinder">Cylinder</option>
-              </select>
-            </label>
+              <label>Lift mm <input id="modelLift" type="number" step="0.1" value="5"></label>
+              <label>Overhang deg <input id="overhangAngle" type="number" step="1" value="45"></label>
+              <label>Spacing mm <input id="supportSpacing" type="number" step="0.1" value="3"></label>
+              <label class="check"><input id="primarySupportsEnabled" type="checkbox"> Primary extras</label>
+              <label>Primary density <input id="primaryDensityMultiplier" type="number" step="0.1" value="2"></label>
+              <label>Primary radius <input id="primaryAreaRadius" type="number" step="0.1" value="4"></label>
+              <label>Max primary extra <input id="primaryMaxExtra" type="number" step="1" value="8"></label>
+              <label>Post radius <input id="postRadius" type="number" step="0.01" value="0.28"></label>
+              <label>Tip radius <input id="tipRadius" type="number" step="0.01" value="0.18"></label>
+              <label>Tip type
+                <select id="tipType">
+                  <option value="cone">Cone</option>
+                  <option value="sphere">Sphere</option>
+                  <option value="cylinder">Cylinder</option>
+                </select>
+              </label>
             </div>
           </details>
 
-          <details class="group">
+          <details id="menuTipBed" class="group right-menu-section" data-right-menu-section="tip-bed">
             <summary>
               <span>Tip And Bed</span>
               <small>Contact shape and base interface</small>
             </summary>
             <div class="grid two">
-            <label>Tip length <input id="tipLength" type="number" step="0.1" value="0.8"></label>
-            <label>Tip angle <input id="tipAngle" type="number" step="1" value="25"></label>
-            <label>Foot radius <input id="footRadius" type="number" step="0.01" value="0.8"></label>
-            <label>Bed interface
-              <select id="bedInterface">
-                <option value="raft">Raft</option>
-                <option value="feet">Feet</option>
-                <option value="skate">Skate</option>
-                <option value="none">None</option>
-              </select>
-            </label>
-            <label>Raft margin <input id="raftMargin" type="number" step="0.1" value="0.6"></label>
+              <label>Tip length <input id="tipLength" type="number" step="0.1" value="0.8"></label>
+              <label>Tip angle <input id="tipAngle" type="number" step="1" value="25"></label>
+              <label>Foot radius <input id="footRadius" type="number" step="0.01" value="0.8"></label>
+              <label>Bed interface
+                <select id="bedInterface">
+                  <option value="raft">Raft</option>
+                  <option value="feet">Feet</option>
+                  <option value="skate">Skate</option>
+                  <option value="none">None</option>
+                </select>
+              </label>
+              <label>Raft margin <input id="raftMargin" type="number" step="0.1" value="0.6"></label>
             </div>
           </details>
 
-          <details class="group">
+          <details id="menuSupportAccess" class="group right-menu-section" data-right-menu-section="support-access">
             <summary>
               <span>Support Access</span>
               <small>Clearance, reach, enforcers</small>
             </summary>
             <div class="grid two">
-            <label>Path clearance <input id="collisionClearance" type="number" step="0.01" value="0.08"></label>
-            <label>Base reach <input id="maxBaseReach" type="number" step="1" value="45"></label>
-            <label>Max shaft angle <input id="maxSupportAngle" type="number" step="1" value="35"></label>
-            <label class="check"><input id="enforcersEnabled" type="checkbox"> Enforcers</label>
-            <label>Enforcer reach <input id="enforcerReach" type="number" step="0.5" value="10"></label>
-            <label>Enforcer drop <input id="enforcerMinDrop" type="number" step="0.1" value="1"></label>
+              <label>Path clearance <input id="collisionClearance" type="number" step="0.01" value="0.08"></label>
+              <label>Base reach <input id="maxBaseReach" type="number" step="1" value="45"></label>
+              <label>Max shaft angle <input id="maxSupportAngle" type="number" step="1" value="35"></label>
+              <label class="check"><input id="enforcersEnabled" type="checkbox"> Enforcers</label>
+              <label>Enforcer reach <input id="enforcerReach" type="number" step="0.5" value="10"></label>
+              <label>Enforcer drop <input id="enforcerMinDrop" type="number" step="0.1" value="1"></label>
             </div>
           </details>
 
-          <details class="group">
+          <details id="menuBracing" class="group right-menu-section" data-right-menu-section="bracing">
             <summary>
               <span>Bracing</span>
               <small>Cross-support structure</small>
             </summary>
             <div class="grid two">
-            <label class="check"><input id="braceEnabled" type="checkbox" checked> Cross braces</label>
-            <label>Brace radius <input id="braceRadius" type="number" step="0.01" value="0.18"></label>
-            <label>Brace height <input id="braceHeight" type="number" step="0.1" value="3"></label>
-            <label>Brace distance <input id="braceDistance" type="number" step="0.5" value="8"></label>
+              <label class="check"><input id="braceEnabled" type="checkbox" checked> Cross braces</label>
+              <label>Brace radius <input id="braceRadius" type="number" step="0.01" value="0.18"></label>
+              <label>Brace height <input id="braceHeight" type="number" step="0.1" value="3"></label>
+              <label>Brace distance <input id="braceDistance" type="number" step="0.5" value="8"></label>
             </div>
           </details>
         </div>
       </aside>
+      <button id="hideLeftPanelButton" class="panel-tab left-hide" type="button">Hide Parts</button>
+      <button id="showLeftPanelButton" class="panel-tab left-restore" type="button">Parts</button>
+      <div id="rightMenuRail" class="right-menu-rail" aria-label="Settings menu tabs">
+        <button class="right-menu-tab active" type="button" data-right-menu="job">Job</button>
+        <button class="right-menu-tab" type="button" data-right-menu="sound">Sound</button>
+        <button class="right-menu-tab" type="button" data-right-menu="view">View</button>
+        <button class="right-menu-tab" type="button" data-right-menu="placement">Placement</button>
+        <button class="right-menu-tab" type="button" data-right-menu="support-basics">Supports</button>
+        <button class="right-menu-tab" type="button" data-right-menu="tip-bed">Tip Bed</button>
+        <button class="right-menu-tab" type="button" data-right-menu="support-access">Access</button>
+        <button class="right-menu-tab" type="button" data-right-menu="bracing">Bracing</button>
+      </div>
     </main>
     <div id="promptOverlay" class="prompt-overlay" hidden>
       <section class="prompt-dialog" role="dialog" aria-modal="true" aria-labelledby="promptTitle">
@@ -233,6 +252,7 @@
           <p id="promptMessage"></p>
           <pre id="promptDetail" hidden></pre>
           <div class="prompt-actions">
+            <button id="promptCancel" type="button" hidden>Cancel</button>
             <button id="promptClose" class="primary" type="button">OK</button>
           </div>
         </div>
@@ -240,11 +260,12 @@
     </div>
     <div id="uvtoolsOverlay" class="prompt-overlay" hidden>
       <section class="uvtools-dialog" role="dialog" aria-modal="true" aria-labelledby="uvtoolsTitle">
-        <h2 id="uvtoolsTitle">Import UVTools Machine</h2>
-        <input id="uvtoolsSearch" placeholder="Search printers">
+        <h2 id="uvtoolsTitle">Import Printer</h2>
+        <input id="uvtoolsSearch" placeholder="Search UVTools printers">
         <select id="uvtoolsPrinterList" size="12"></select>
         <p id="uvtoolsStatus">Loading UVTools printer profiles...</p>
         <div class="prompt-actions">
+          <button id="importMachineButton" type="button">Browse</button>
           <button id="uvtoolsCancel" type="button">Cancel</button>
           <button id="uvtoolsImport" class="primary" type="button">Import</button>
         </div>

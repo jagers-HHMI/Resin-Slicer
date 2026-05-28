@@ -19,14 +19,26 @@ const placementFields = new Set(["rotateX", "rotateY", "rotateZ", "translateX", 
 let profiles = {};
 let models = [];
 let selectedModelIds = new Set();
+let lastSelectedModelId = null;
 let buildPlates = [];
 let activePlateId = null;
+let expandedPlateId = null;
 let nextBuildPlateId = 1;
 let nextModelId = 1;
+let nextImportJobId = 1;
+let nextLoadProgressId = 1;
+let latestImportJobId = 0;
 let uvtoolsPrinterCache = [];
 let viewer = null;
+let partClipboard = [];
 let soundPlayer = null;
 let soundInitError = null;
+let sceneUpdateFrame = null;
+let toastTimer = null;
+let themedPromptResolver = null;
+let activeRightMenuId = "placement";
+const loadProgressItems = new Map();
+const fileReadProgressHandlers = new Map();
 
 const soundAssetRoot = "../src/assets/electron-sound-kit/";
 const soundStorageKeys = {
@@ -64,11 +76,8 @@ async function init() {
   viewer = new Viewer($("viewer"));
   initSounds();
   $("openButton").addEventListener("click", openStl);
-  $("inputPath").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") loadStlPaths(parseInputPaths($("inputPath").value), { append: false });
-  });
   $("saveButton").addEventListener("click", chooseOutput);
-  $("importMachineButton").addEventListener("click", () => importProfile("machine"));
+  $("importMachineButton").addEventListener("click", browseMachineProfile);
   $("importUvtoolsMachineButton").addEventListener("click", importUvtoolsMachine);
   $("exportMachineButton").addEventListener("click", () => exportProfile("machine"));
   $("importResinButton").addEventListener("click", () => importProfile("resin"));
@@ -99,6 +108,8 @@ async function init() {
   });
   $("previewButton").addEventListener("click", generatePreview);
   $("sliceButton").addEventListener("click", slice);
+  $("sliceAllButton").addEventListener("click", sliceAll);
+  $("saveAllButton").addEventListener("click", saveAll);
   $("profile").addEventListener("change", () => {
     loadProfileDefaults();
     writeActivePlateSettingsFromForm();
@@ -115,14 +126,26 @@ async function init() {
     });
   }
   bindSceneSettingUpdates();
+  bindPanelToggles();
+  bindTopbarMenus();
+  bindAccordionMenus();
   initDropLoading();
   initThemedPrompts();
   initUvtoolsDialog();
   initGlobalShortcuts();
   viewer.onScenePick = handleScenePick;
   viewer.onModelDrag = handleModelDrag;
+  viewer.onModelDragEnd = handleModelDragEnd;
+  viewer.onGizmoDrag = handleGizmoDrag;
+  viewer.onGizmoDragEnd = handleGizmoDragEnd;
 
   window.slicer.onSliceProgress((message) => log(message.message));
+  if (window.slicer.onFileReadProgress) {
+    window.slicer.onFileReadProgress((message) => {
+      const handler = fileReadProgressHandlers.get(message.jobId);
+      if (handler) handler(message);
+    });
+  }
   try {
     const profilePayload = await window.slicer.profiles();
     profiles = profilePayload.profiles || {};
@@ -194,18 +217,32 @@ function bindSceneSettingUpdates() {
     field.addEventListener("blur", () => commitSceneSetting(field));
     field.addEventListener("change", () => commitSceneSetting(field));
   }
+  const dropOffset = $("dropOffset");
+  dropOffset.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      normalizePlacementField(dropOffset);
+      dropOffset.blur();
+    }
+  });
+  dropOffset.addEventListener("blur", () => normalizePlacementField(dropOffset));
+  dropOffset.addEventListener("change", () => normalizePlacementField(dropOffset));
+  normalizePlacementField(dropOffset);
   syncSceneSettingCommits();
 }
 
 function syncSceneSettingCommits() {
   for (const id of fields) {
     const field = $(id);
+    if (placementFields.has(id)) field.value = formatPlacementValue(number(id));
     field.dataset.sceneCommittedValue = fieldValue(field);
   }
 }
 
 function commitSceneSetting(field) {
-  const value = fieldValue(field);
+  const value = placementFields.has(field.id)
+    ? normalizePlacementField(field)
+    : fieldValue(field);
   if (value === field.dataset.sceneCommittedValue) return;
   field.dataset.sceneCommittedValue = value;
   if (placementFields.has(field.id)) {
@@ -219,6 +256,150 @@ function commitSceneSetting(field) {
 
 function fieldValue(field) {
   return field.type === "checkbox" ? String(field.checked) : field.value;
+}
+
+function normalizePlacementField(field) {
+  const value = roundPlacementValue(Number(field.value));
+  field.value = formatPlacementValue(value);
+  return field.value;
+}
+
+function roundPlacementValue(value) {
+  return Number.isFinite(value) ? Math.round(value * 100) / 100 : 0;
+}
+
+function formatPlacementValue(value) {
+  return roundPlacementValue(value).toFixed(2);
+}
+
+function bindPanelToggles() {
+  const shell = $("appShell");
+  $("hideLeftPanelButton").addEventListener("click", () => {
+    shell.classList.add("left-hidden");
+    resizeViewerThroughPanelTransition();
+  });
+  $("showLeftPanelButton").addEventListener("click", () => {
+    shell.classList.remove("left-hidden");
+    resizeViewerThroughPanelTransition();
+  });
+  for (const button of document.querySelectorAll("[data-right-menu]")) {
+    button.addEventListener("click", () => {
+      toggleRightMenu(button.dataset.rightMenu);
+    });
+  }
+  syncRightMenuRail();
+}
+
+function bindTopbarMenus() {
+  for (const button of document.querySelectorAll("[data-topbar-menu-button]")) {
+    button.addEventListener("click", () => toggleTopbarMenu(button.dataset.topbarMenuButton));
+  }
+  document.addEventListener("pointerdown", (event) => {
+    if (event.target.closest(".topbar-menu")) return;
+    closeTopbarMenus();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeTopbarMenus();
+  });
+}
+
+function toggleTopbarMenu(panelId) {
+  const panel = $(panelId);
+  if (!panel) return;
+  const button = document.querySelector(`[data-topbar-menu-button="${panelId}"]`);
+  const willOpen = panel.hidden;
+  closeTopbarMenus();
+  panel.hidden = !willOpen;
+  if (button) button.setAttribute("aria-expanded", String(willOpen));
+  if (willOpen) playSound("drawer-open");
+}
+
+function closeTopbarMenus() {
+  for (const button of document.querySelectorAll("[data-topbar-menu-button]")) {
+    button.setAttribute("aria-expanded", "false");
+  }
+  for (const panel of document.querySelectorAll(".topbar-menu-panel")) {
+    panel.hidden = true;
+  }
+}
+
+function resizeViewerThroughPanelTransition() {
+  const startedAt = performance.now();
+  const tick = () => {
+    viewer.resize({ recenter: true });
+    if (performance.now() - startedAt < 320) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+function bindAccordionMenus() {
+  const groups = [...document.querySelectorAll(".right-panel details.group")];
+  const initiallyOpen = groups.find((details) => details.open) || groups[0];
+  for (const details of groups) {
+    details.open = details === initiallyOpen;
+    details.addEventListener("toggle", () => {
+      if (!details.open) return;
+      for (const other of groups) {
+        if (other !== details) other.open = false;
+      }
+      setActiveRightMenu(details.dataset.rightMenuSection || activeRightMenuId);
+    });
+  }
+  setActiveRightMenu(initiallyOpen?.dataset.rightMenuSection || activeRightMenuId);
+  syncRightMenuRail();
+}
+
+function openRightMenu(menuId) {
+  const shell = $("appShell");
+  const panel = $("rightPanel");
+  const targets = [...document.querySelectorAll(`[data-right-menu-section="${menuId}"]`)];
+  const fallback = document.querySelector(`[data-right-menu-section="${activeRightMenuId}"]`)
+    || document.querySelector("[data-right-menu-section]");
+  const target = targets[0] || fallback;
+  if (!target) return;
+  shell.classList.remove("right-hidden");
+  panel.classList.add("menu-focused");
+  for (const section of document.querySelectorAll("[data-right-menu-section]")) {
+    section.classList.toggle("active-menu-section", section.dataset.rightMenuSection === (target.dataset.rightMenuSection || menuId));
+  }
+  for (const details of document.querySelectorAll(".right-panel details.group")) {
+    details.open = details === target && target.tagName.toLowerCase() === "details";
+  }
+  setActiveRightMenu(target.dataset.rightMenuSection || menuId);
+  syncRightMenuRail();
+  resizeViewerThroughPanelTransition();
+  requestAnimationFrame(() => {
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+}
+
+function toggleRightMenu(menuId) {
+  const shell = $("appShell");
+  const isActive = activeRightMenuId === menuId;
+  if (!shell.classList.contains("right-hidden") && isActive) {
+    shell.classList.add("right-hidden");
+    syncRightMenuRail();
+    resizeViewerThroughPanelTransition();
+    playSound("drawer-close");
+    return;
+  }
+  openRightMenu(menuId);
+  playSound("drawer-open");
+}
+
+function setActiveRightMenu(menuId) {
+  activeRightMenuId = menuId || "placement";
+  for (const button of document.querySelectorAll("[data-right-menu]")) {
+    button.classList.toggle("active", button.dataset.rightMenu === activeRightMenuId);
+  }
+}
+
+function syncRightMenuRail() {
+  const shell = $("appShell");
+  const hidden = shell.classList.contains("right-hidden");
+  for (const button of document.querySelectorAll("[data-right-menu]")) {
+    button.setAttribute("aria-expanded", hidden ? "false" : String(button.dataset.rightMenu === activeRightMenuId));
+  }
 }
 
 function initSounds() {
@@ -363,8 +544,10 @@ function storeValue(key, value) {
 function ensureInitialBuildPlate() {
   if (buildPlates.length) return;
   const plate = createBuildPlate("Plate 1", buildPlateSettingsFromForm());
+  placeBuildPlateInSpiral(plate);
   buildPlates.push(plate);
   activePlateId = plate.id;
+  expandedPlateId = plate.id;
   updateBuildPlateLayout();
   applyBuildPlateSettingsToForm(plate);
 }
@@ -375,11 +558,13 @@ function createBuildPlate(name, settings) {
     name,
     settings: cloneSettings(settings),
     origin: { x: 0, y: 0 },
+    layoutSlot: null,
     clipHeight: Number(settings.printer.sizeZ) || 160,
     clipEnabled: false,
     layersGenerated: false,
     supports: [],
-    supportBraces: []
+    supportBraces: [],
+    dropAnimation: null
   };
 }
 
@@ -522,18 +707,80 @@ function updatePlateControls(plate) {
   $("clipEnabled").checked = !!plate.clipEnabled;
 }
 
-function addBuildPlate() {
+function addBuildPlate(options = {}) {
+  if (options instanceof Event) options = {};
   writeActivePlateSettingsFromForm();
-  const plate = createBuildPlate(`Plate ${buildPlates.length + 1}`, activePlate().settings);
+  const sourcePlate = options.sourcePlateId
+    ? buildPlates.find((item) => item.id === options.sourcePlateId) || activePlate()
+    : activePlate();
+  const plate = createBuildPlate(`Plate ${buildPlates.length + 1}`, sourcePlate.settings);
+  placeBuildPlateInSpiral(plate);
   buildPlates.push(plate);
   activePlateId = plate.id;
+  expandedPlateId = plate.id;
+  plate.dropAnimation = { start: performance.now(), duration: 820 };
   updateBuildPlateLayout();
   selectedModelIds = new Set();
+  lastSelectedModelId = null;
   applyBuildPlateSettingsToForm(plate);
-  renderWorkspaceLists();
   updateScene();
+  animateBuildPlateDrop(plate);
   viewer.recenter();
   playSound("confirm");
+}
+
+async function addPartsToBuildPlate(plateId) {
+  setActiveBuildPlate(plateId);
+  try {
+    playSound("click-soft");
+    const paths = await window.slicer.openStl();
+    if (!paths || !paths.length) {
+      log("Add parts canceled.");
+      return;
+    }
+    await loadStlPaths(paths, { append: true, sound: "drop", targetPlateId: plateId });
+  } catch (error) {
+    log(`Add parts failed: ${error.message}`);
+    showErrorPrompt("Add Parts Failed", error);
+  }
+}
+
+async function deleteBuildPlate(plateId) {
+  const plate = buildPlates.find((item) => item.id === plateId);
+  if (!plate) return;
+  const plateModels = models.filter((model) => model.plateId === plateId);
+  if (plateModels.length) {
+    const confirmed = await showThemedConfirm({
+      title: "Delete Build Plate?",
+      message: `Delete ${plate.name} and ${plateModels.length.toLocaleString()} part${plateModels.length === 1 ? "" : "s"} on it?`,
+      detail: "This removes the build plate and every part assigned to it from the current job.",
+      confirmText: "Delete",
+      kind: "warning"
+    });
+    if (!confirmed) return;
+  }
+
+  const deletedIds = new Set(plateModels.map((model) => model.id));
+  models = models.filter((model) => model.plateId !== plateId);
+  selectedModelIds = new Set([...selectedModelIds].filter((id) => !deletedIds.has(id)));
+  if (deletedIds.has(lastSelectedModelId)) lastSelectedModelId = null;
+  buildPlates = buildPlates.filter((item) => item.id !== plateId);
+
+  if (!buildPlates.length) {
+    const replacement = createBuildPlate("Plate 1", plate.settings);
+    placeBuildPlateInSpiral(replacement);
+    buildPlates.push(replacement);
+    activePlateId = replacement.id;
+  } else if (activePlateId === plateId) {
+    activePlateId = buildPlates[Math.min(buildPlates.length - 1, 0)].id;
+  }
+  expandedPlateId = activePlateId;
+  updateBuildPlateLayout();
+  applyBuildPlateSettingsToForm(activePlate());
+  normalizeLastSelectedModel();
+  updateScene();
+  log(`Deleted ${plate.name}`);
+  playSound("delete");
 }
 
 function setActiveBuildPlate(id, { loadSettings = true, sound = true } = {}) {
@@ -541,6 +788,7 @@ function setActiveBuildPlate(id, { loadSettings = true, sound = true } = {}) {
   if (!plate || plate.id === activePlateId) return;
   writeActivePlateSettingsFromForm();
   activePlateId = plate.id;
+  expandedPlateId = plate.id;
   if (loadSettings) applyBuildPlateSettingsToForm(plate);
   renderWorkspaceLists();
   updateScene();
@@ -548,58 +796,299 @@ function setActiveBuildPlate(id, { loadSettings = true, sound = true } = {}) {
 }
 
 function updateBuildPlateLayout() {
-  const count = buildPlates.length || 1;
-  const cols = Math.ceil(Math.sqrt(count));
-  const maxX = Math.max(...buildPlates.map((plate) => plate.settings.printer.sizeX || 120), 120);
-  const maxY = Math.max(...buildPlates.map((plate) => plate.settings.printer.sizeY || 67.5), 67.5);
-  const gap = Math.max(35, Math.max(maxX, maxY) * 0.35);
-  buildPlates.forEach((plate, index) => {
-    const col = index % cols;
-    const row = Math.floor(index / cols);
-    plate.origin = { x: col * (maxX + gap), y: row * (maxY + gap) };
+  buildPlates.forEach((plate) => {
+    if (!Number.isFinite(plate.layoutSlot) || !isFiniteOrigin(plate.origin)) {
+      placeBuildPlateInSpiral(plate);
+    }
   });
 }
 
+function nextBuildPlatePreview() {
+  const settings = cloneSettings(activePlate().settings);
+  const preview = { settings, origin: { x: 0, y: 0 }, layoutSlot: null };
+  const slot = nextOpenSpiralSlot(preview);
+  const origin = buildPlateOriginForSlot(slot, preview);
+  const bed = {
+    x: settings.printer.sizeX || 120,
+    y: settings.printer.sizeY || 67.5,
+    z: settings.printer.sizeZ || 160
+  };
+  return {
+    id: "next-build-plate",
+    origin,
+    bed,
+    visual: { z: 0, scaleX: 1, scaleY: 1 }
+  };
+}
+
+function placeBuildPlateInSpiral(plate) {
+  const slot = Number.isFinite(plate.layoutSlot) && !spiralSlotOccupied(plate.layoutSlot, plate)
+    ? plate.layoutSlot
+    : nextOpenSpiralSlot(plate);
+  plate.layoutSlot = slot;
+  plate.origin = buildPlateOriginForSlot(slot, plate);
+}
+
+function nextOpenSpiralSlot(candidate) {
+  const used = new Set(buildPlates
+    .filter((plate) => plate !== candidate && Number.isFinite(plate.layoutSlot))
+    .map((plate) => plate.layoutSlot));
+  for (let slot = 0; slot < 512; slot++) {
+    if (used.has(slot)) continue;
+    const origin = buildPlateOriginForSlot(slot, candidate);
+    const candidateBed = buildPlateBed(candidate);
+    const overlaps = buildPlates.some((plate) => plate !== candidate && rectsOverlap(
+      origin,
+      candidateBed,
+      plate.origin,
+      buildPlateBed(plate)
+    ));
+    if (!overlaps) return slot;
+  }
+  return buildPlates.length;
+}
+
+function spiralSlotOccupied(slot, candidate) {
+  return buildPlates.some((plate) => plate !== candidate && plate.layoutSlot === slot);
+}
+
+function buildPlateOriginForSlot(slot, plate) {
+  if (slot === 0) return { x: 0, y: 0 };
+  const grid = spiralGridCoordinate(slot);
+  const step = buildPlateSpiralStep(plate);
+  return {
+    x: grid.x * step.x,
+    y: grid.y * step.y
+  };
+}
+
+function spiralGridCoordinate(slot) {
+  if (slot <= 0) return { x: 0, y: 0 };
+  const directions = [
+    [1, 0],
+    [0, 1],
+    [-1, 0],
+    [0, -1]
+  ];
+  let x = 0;
+  let y = 0;
+  let index = 0;
+  let segmentLength = 1;
+  let directionIndex = 0;
+  while (index < slot) {
+    for (let repeat = 0; repeat < 2; repeat++) {
+      const [dx, dy] = directions[directionIndex % directions.length];
+      for (let step = 0; step < segmentLength; step++) {
+        x += dx;
+        y += dy;
+        index++;
+        if (index === slot) return { x, y };
+      }
+      directionIndex++;
+    }
+    segmentLength++;
+  }
+  return { x, y };
+}
+
+function buildPlateSpiralStep(plate) {
+  const all = [...buildPlates, plate].filter(Boolean);
+  const maxX = Math.max(...all.map((item) => buildPlateBed(item).x), 120);
+  const maxY = Math.max(...all.map((item) => buildPlateBed(item).y), 67.5);
+  const gap = Math.max(35, Math.max(maxX, maxY) * 0.35);
+  return {
+    x: maxX + gap,
+    y: maxY + gap
+  };
+}
+
+function buildPlateBed(plate) {
+  return {
+    x: plate?.settings?.printer?.sizeX || 120,
+    y: plate?.settings?.printer?.sizeY || 67.5
+  };
+}
+
+function isFiniteOrigin(origin) {
+  return Number.isFinite(origin?.x) && Number.isFinite(origin?.y);
+}
+
+function rectsOverlap(aOrigin, aSize, bOrigin, bSize) {
+  return aOrigin.x < bOrigin.x + bSize.x
+    && aOrigin.x + aSize.x > bOrigin.x
+    && aOrigin.y < bOrigin.y + bSize.y
+    && aOrigin.y + aSize.y > bOrigin.y;
+}
+
 function renderWorkspaceLists() {
-  renderBuildPlateList();
-  renderObjectList();
+  renderLeftTree();
 }
 
 function renderBuildPlateList() {
-  const root = $("buildPlateList");
-  if (!root) return;
-  root.innerHTML = "";
-  for (const plate of buildPlates) {
-    const count = models.filter((model) => model.plateId === plate.id).length;
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `list-item${plate.id === activePlateId ? " active" : ""}`;
-    button.innerHTML = `${escapeText(plate.name)}<small>${count} object${count === 1 ? "" : "s"} - ${plate.settings.printer.sizeX}x${plate.settings.printer.sizeY} mm</small>`;
-    button.addEventListener("click", () => setActiveBuildPlate(plate.id));
-    root.appendChild(button);
-  }
+  renderLeftTree();
 }
 
 function renderObjectList() {
-  const root = $("objectList");
+  renderLeftTree();
+}
+
+function renderLeftTree() {
+  const root = $("leftTree");
   if (!root) return;
   root.innerHTML = "";
-  if (!models.length) {
-    const empty = document.createElement("div");
-    empty.className = "list-item";
-    empty.textContent = "No objects loaded";
-    root.appendChild(empty);
+  if (!expandedPlateId || !buildPlates.some((plate) => plate.id === expandedPlateId)) {
+    expandedPlateId = activePlateId || buildPlates[0]?.id || null;
+  }
+  buildPlates.forEach((plate, plateIndex) => {
+    const plateModels = models.filter((model) => model.plateId === plate.id);
+    const node = document.createElement("section");
+    node.className = `plate-node${plate.id === activePlateId ? " active" : ""}`;
+    node.addEventListener("dragover", (event) => {
+      if (Array.from(event.dataTransfer.types).includes("application/x-resin-slicer-models")) {
+        event.preventDefault();
+        node.classList.add("drag-over");
+      }
+    });
+    node.addEventListener("dragleave", () => node.classList.remove("drag-over"));
+    node.addEventListener("drop", (event) => {
+      event.preventDefault();
+      node.classList.remove("drag-over");
+      dropModelsOnPlate(event, plate.id);
+    });
+
+    const label = document.createElement("div");
+    label.className = "plate-label";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "plate-toggle";
+    toggle.innerHTML = `<span class="plate-title"><strong>${plateIndex + 1}. ${escapeText(plate.name)}</strong><small>${plateModels.length} part${plateModels.length === 1 ? "" : "s"}</small></span>`;
+    toggle.addEventListener("click", () => {
+      expandedPlateId = expandedPlateId === plate.id ? null : plate.id;
+      setActiveBuildPlate(plate.id);
+      renderLeftTree();
+    });
+    label.appendChild(toggle);
+    if (plate.id === activePlateId) {
+      const actions = document.createElement("div");
+      actions.className = "plate-actions";
+      const addButton = document.createElement("button");
+      addButton.type = "button";
+      addButton.className = "plate-action add";
+      addButton.title = "Add parts to this build plate";
+      addButton.textContent = "+";
+      addButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        addPartsToBuildPlate(plate.id);
+      });
+      const deleteButton = document.createElement("button");
+      deleteButton.type = "button";
+      deleteButton.className = "plate-action delete";
+      deleteButton.title = "Delete this build plate";
+      deleteButton.innerHTML = "&#128465;";
+      deleteButton.addEventListener("click", (event) => {
+        event.stopPropagation();
+        deleteBuildPlate(plate.id);
+      });
+      actions.append(addButton, deleteButton);
+      label.appendChild(actions);
+    }
+    node.appendChild(label);
+
+    if (expandedPlateId === plate.id) {
+      const list = document.createElement("div");
+      list.className = "part-list";
+      if (!plateModels.length) {
+        const empty = document.createElement("div");
+        empty.className = "empty-list";
+        empty.textContent = "No parts on this build plate";
+        list.appendChild(empty);
+      }
+      plateModels.forEach((model, modelIndex) => {
+        const row = document.createElement("div");
+        row.className = "part-row";
+        const part = document.createElement("button");
+        part.type = "button";
+        part.draggable = true;
+        part.className = `part-item${selectedModelIds.has(model.id) ? " selected" : ""}`;
+        part.innerHTML = `${modelIndex + 1}. ${escapeText(model.name)}<small>${escapeText(fileName(model.path))}</small>`;
+        part.addEventListener("click", (event) => selectModel(model.id, { additive: event.ctrlKey || event.metaKey || event.shiftKey }));
+        part.addEventListener("dragstart", (event) => startPartListDrag(event, model.id));
+        const deleteButton = document.createElement("button");
+        deleteButton.type = "button";
+        deleteButton.className = "part-delete";
+        deleteButton.title = `Delete ${model.name}`;
+        deleteButton.innerHTML = "&#128465;";
+        deleteButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          deleteModelsById([model.id]);
+        });
+        row.append(part, deleteButton);
+        list.appendChild(row);
+      });
+      node.appendChild(list);
+    }
+
+    root.appendChild(node);
+  });
+}
+
+function startPartListDrag(event, modelId) {
+  if (!selectedModelIds.has(modelId)) {
+    selectModel(modelId);
+  }
+  const ids = selectedModelIds.has(modelId) ? Array.from(selectedModelIds) : [modelId];
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("application/x-resin-slicer-models", JSON.stringify(ids));
+  event.dataTransfer.setData("text/plain", ids.join(","));
+  playSound("drag-start");
+}
+
+function dropModelsOnPlate(event, plateId) {
+  const raw = event.dataTransfer.getData("application/x-resin-slicer-models");
+  if (!raw) return;
+  const target = buildPlates.find((plate) => plate.id === plateId);
+  if (!target) return;
+  let ids = [];
+  try {
+    ids = JSON.parse(raw).map((id) => Number(id)).filter(Number.isFinite);
+  } catch {
     return;
   }
-  for (const model of models) {
-    const plate = buildPlates.find((item) => item.id === model.plateId);
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = `list-item${selectedModelIds.has(model.id) ? " selected" : ""}`;
-    button.innerHTML = `${escapeText(model.name)}<small>${escapeText(plate ? plate.name : "No plate")}</small>`;
-    button.addEventListener("click", (event) => selectModel(model.id, { additive: event.ctrlKey || event.metaKey || event.shiftKey }));
-    root.appendChild(button);
-  }
+  const moving = models.filter((model) => ids.includes(model.id));
+  if (!moving.length) return;
+  for (const model of moving) model.plateId = target.id;
+  activePlateId = target.id;
+  expandedPlateId = target.id;
+  applyBuildPlateSettingsToForm(target);
+  invalidateGeneratedLayersForSelection(moving);
+  selectedModelIds = new Set(moving.map((model) => model.id));
+  lastSelectedModelId = moving[moving.length - 1].id;
+  renderWorkspaceLists();
+  updatePlacementFieldsFromSelection();
+  updateScene();
+  playSound("drop");
+}
+
+function deleteModelsById(ids) {
+  const idSet = new Set((ids || []).map((id) => Number(id)).filter(Number.isFinite));
+  if (!idSet.size) return;
+  const deleting = models.filter((model) => idSet.has(model.id));
+  if (!deleting.length) return;
+  removeSupportStructureForModels(deleting);
+  models = models.filter((model) => !idSet.has(model.id));
+  selectedModelIds = new Set([...selectedModelIds].filter((id) => !idSet.has(id)));
+  if (idSet.has(lastSelectedModelId)) lastSelectedModelId = null;
+  normalizeLastSelectedModel();
+  renderWorkspaceLists();
+  updatePlacementFieldsFromSelection();
+  updateScene();
+  log(`Deleted ${deleting.length.toLocaleString()} part${deleting.length === 1 ? "" : "s"}.`);
+  playSound("delete");
+}
+
+function deleteSelectedModels() {
+  if (!selectedModelIds.size) return;
+  deleteModelsById([...selectedModelIds]);
 }
 
 function escapeText(value) {
@@ -613,19 +1102,20 @@ function escapeText(value) {
 }
 
 function initThemedPrompts() {
-  $("promptClose").addEventListener("click", hideThemedPrompt);
+  $("promptClose").addEventListener("click", () => hideThemedPrompt(true));
+  $("promptCancel").addEventListener("click", () => hideThemedPrompt(false));
   $("promptOverlay").addEventListener("pointerdown", (event) => {
-    if (event.target === $("promptOverlay")) hideThemedPrompt();
+    if (event.target === $("promptOverlay")) hideThemedPrompt(false);
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && !$("promptOverlay").hidden) hideThemedPrompt();
+    if (event.key === "Escape" && !$("promptOverlay").hidden) hideThemedPrompt(false);
   });
   if (window.slicer.onAppPrompt) {
     window.slicer.onAppPrompt((payload) => showThemedPrompt(payload));
   }
 }
 
-function showThemedPrompt({ title = "Resin Slicer", message = "", detail = "", kind = "info" } = {}) {
+function showThemedPrompt({ title = "Resin Slicer", message = "", detail = "", kind = "info", confirmText = "OK", cancelText = "Cancel", cancelable = false } = {}) {
   const overlay = $("promptOverlay");
   const dialog = overlay.querySelector(".prompt-dialog");
   $("promptTitle").textContent = title;
@@ -633,15 +1123,33 @@ function showThemedPrompt({ title = "Resin Slicer", message = "", detail = "", k
   $("promptIcon").textContent = kind === "error" ? "!" : "i";
   $("promptDetail").textContent = detail || "";
   $("promptDetail").hidden = !detail;
+  $("promptClose").textContent = confirmText;
+  $("promptCancel").textContent = cancelText;
+  $("promptCancel").hidden = !cancelable;
   dialog.classList.toggle("error", kind === "error");
+  dialog.classList.toggle("warning", kind === "warning");
   overlay.hidden = false;
   $("promptClose").focus();
   playSound(kind === "error" ? "error" : kind === "warning" ? "warning" : "modal-open");
 }
 
-function hideThemedPrompt() {
+function hideThemedPrompt(result = true) {
   $("promptOverlay").hidden = true;
+  $("promptClose").textContent = "OK";
+  $("promptCancel").hidden = true;
+  if (themedPromptResolver) {
+    const resolver = themedPromptResolver;
+    themedPromptResolver = null;
+    resolver(result);
+  }
   playSound("modal-close");
+}
+
+function showThemedConfirm(options = {}) {
+  return new Promise((resolve) => {
+    themedPromptResolver = resolve;
+    showThemedPrompt({ ...options, cancelable: true });
+  });
 }
 
 function showErrorPrompt(title, error) {
@@ -672,6 +1180,11 @@ function initUvtoolsDialog() {
   $("uvtoolsOverlay").addEventListener("pointerdown", (event) => {
     if (event.target === $("uvtoolsOverlay")) hideUvtoolsDialog();
   });
+}
+
+async function browseMachineProfile() {
+  hideUvtoolsDialog();
+  await importProfile("machine");
 }
 
 async function importUvtoolsMachine() {
@@ -772,23 +1285,120 @@ function setUvtoolsStatus(message) {
 
 function initGlobalShortcuts() {
   document.addEventListener("keydown", (event) => {
+    const key = event.key.toLowerCase();
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "a") {
       event.preventDefault();
       event.stopPropagation();
       selectAllModels();
+      return;
+    }
+    if (!isEditableTarget(event.target) && (event.ctrlKey || event.metaKey) && key === "c") {
+      event.preventDefault();
+      event.stopPropagation();
+      copySelectedParts();
+      return;
+    }
+    if (!isEditableTarget(event.target) && (event.ctrlKey || event.metaKey) && key === "v") {
+      event.preventDefault();
+      event.stopPropagation();
+      pasteCopiedParts();
+      return;
+    }
+    if (!isEditableTarget(event.target) && event.key === "Delete") {
+      event.preventDefault();
+      event.stopPropagation();
+      deleteSelectedModels();
     }
   }, true);
+}
+
+function isEditableTarget(target) {
+  return target instanceof HTMLInputElement
+    || target instanceof HTMLTextAreaElement
+    || target instanceof HTMLSelectElement
+    || !!target?.isContentEditable;
 }
 
 function selectAllModels() {
   const selection = window.getSelection ? window.getSelection() : null;
   if (selection) selection.removeAllRanges();
   selectedModelIds = new Set(models.map((model) => model.id));
+  lastSelectedModelId = models[models.length - 1]?.id || null;
   updateScene();
   if (models.length) {
     $("meshStatus").textContent = `${models.length.toLocaleString()} model${models.length === 1 ? "" : "s"} selected`;
     playSound("focus-ring");
   }
+}
+
+function copySelectedParts() {
+  const selection = selectedModels();
+  if (!selection.length) return;
+  const centers = selection.map((model) => boundsCenter(modelWorldBounds(model)));
+  const groupCenter = centers.reduce((sum, center) => add(sum, center), [0, 0, 0]).map((value) => value / centers.length);
+  partClipboard = selection.map((model, index) => {
+    const plate = buildPlates.find((item) => item.id === model.plateId);
+    const center = centers[index];
+    return {
+      path: model.path,
+      name: model.name,
+      mesh: model.mesh,
+      transform: cloneSettings(model.transform),
+      relativeCenter: sub(center, groupCenter),
+      sourceCenterLocal: plate ? [center[0] - plate.origin.x, center[1] - plate.origin.y, center[2]] : center,
+      supports: collectSupportStructureForModel(model)
+    };
+  });
+  log(`Copied ${partClipboard.length.toLocaleString()} part${partClipboard.length === 1 ? "" : "s"}.`);
+  playSound("focus-ring");
+}
+
+function pasteCopiedParts() {
+  if (!partClipboard.length) return;
+  ensureInitialBuildPlate();
+  const targetPlate = highlightedBuildPlate() || activePlate();
+  const targetCenter = [
+    targetPlate.origin.x + (targetPlate.settings.printer.sizeX || 120) / 2,
+    targetPlate.origin.y + (targetPlate.settings.printer.sizeY || 67.5) / 2,
+    0
+  ];
+  const pastedModels = partClipboard.map((item) => ({
+    id: nextModelId++,
+    path: item.path,
+    name: item.name,
+    mesh: item.mesh,
+    plateId: targetPlate.id,
+    transform: cloneSettings(item.transform),
+    dropAnimation: startDropAnimation()
+  }));
+  let copiedSupportStructure = false;
+  for (let index = 0; index < pastedModels.length; index++) {
+    const model = pastedModels[index];
+    const desiredCenter = add(targetCenter, partClipboard[index].relativeCenter || [0, 0, 0]);
+    const local = modelLocalCentroid(model);
+    model.transform.translateX = desiredCenter[0] - targetPlate.origin.x - local[0];
+    model.transform.translateY = desiredCenter[1] - targetPlate.origin.y - local[1];
+    copiedSupportStructure = copySupportStructureToPlate(partClipboard[index], model, targetPlate) || copiedSupportStructure;
+  }
+  targetPlate.layersGenerated = copiedSupportStructure;
+  models.push(...pastedModels);
+  activePlateId = targetPlate.id;
+  expandedPlateId = targetPlate.id;
+  selectedModelIds = new Set(pastedModels.map((model) => model.id));
+  lastSelectedModelId = pastedModels[pastedModels.length - 1]?.id || lastSelectedModelId;
+  applyBuildPlateSettingsToForm(targetPlate);
+  animateModelDrop(pastedModels);
+  renderWorkspaceLists();
+  updatePlacementFieldsFromSelection();
+  updateScene();
+  log(`Pasted ${pastedModels.length.toLocaleString()} part${pastedModels.length === 1 ? "" : "s"} onto ${targetPlate.name}.`);
+  playSound("drop");
+}
+
+function highlightedBuildPlate() {
+  const hit = viewer?.hoveredHit;
+  const id = hit?.type === "plate-action" ? hit.plateId : hit?.type === "plate" ? hit.id : null;
+  return id ? buildPlates.find((plate) => plate.id === id) || null : null;
 }
 
 function selectModel(modelId, { additive = false, preserveExisting = false } = {}) {
@@ -797,30 +1407,65 @@ function selectModel(modelId, { additive = false, preserveExisting = false } = {
   if (model.plateId !== activePlateId) {
     setActiveBuildPlate(model.plateId, { sound: false });
   }
+  expandedPlateId = model.plateId;
   if (preserveExisting && selectedModelIds.has(modelId) && !additive) {
     // Keep the group selection intact when beginning a drag from one selected model.
   } else if (additive) {
     if (selectedModelIds.has(modelId)) {
       selectedModelIds.delete(modelId);
+      if (lastSelectedModelId === modelId) lastSelectedModelId = null;
     } else {
       selectedModelIds.add(modelId);
+      lastSelectedModelId = modelId;
     }
   } else {
     selectedModelIds = new Set([modelId]);
+    lastSelectedModelId = modelId;
   }
+  normalizeLastSelectedModel();
   updatePlacementFieldsFromSelection();
   renderWorkspaceLists();
   updateScene();
   playSound("focus-ring");
 }
 
+function clearModelSelection({ renderListsNow = true, updateSceneNow = true } = {}) {
+  if (!selectedModelIds.size && !lastSelectedModelId) return false;
+  selectedModelIds = new Set();
+  lastSelectedModelId = null;
+  if (renderListsNow) renderWorkspaceLists();
+  if (updateSceneNow) updateScene();
+  return true;
+}
+
 function handleScenePick(hit) {
   if (!hit) return;
   if (hit.type === "model") {
     selectModel(hit.id, { additive: hit.additive, preserveExisting: hit.dragStart });
+  } else if (hit.type === "plate-action") {
+    setActiveBuildPlate(hit.plateId);
+    if (hit.action === "add") addPartsToBuildPlate(hit.plateId);
+    if (hit.action === "delete") deleteBuildPlate(hit.plateId);
   } else if (hit.type === "plate") {
+    const clickedActivePlate = hit.id === activePlateId;
+    const clearedSelection = clearModelSelection({ renderListsNow: false, updateSceneNow: false });
     setActiveBuildPlate(hit.id);
+    centerViewOnBuildPlate(hit.id);
+    if (clickedActivePlate && clearedSelection) {
+      renderWorkspaceLists();
+      updateScene();
+    }
+  } else if (hit.type === "add-plate") {
+    addBuildPlate();
+  } else if (hit.type === "background") {
+    clearModelSelection();
   }
+}
+
+function centerViewOnBuildPlate(plateId) {
+  const plate = buildPlates.find((item) => item.id === plateId);
+  if (!plate) return;
+  viewer.centerOnBuildPlate(plate);
 }
 
 function handleModelDrag(drag) {
@@ -831,21 +1476,81 @@ function handleModelDrag(drag) {
     model.transform.translateY += drag.y;
     maybeMoveModelToPlateByCentroid(model);
   }
+  requestSceneUpdate({ renderLists: false, updateStatus: false, skipDerivedGeometry: true });
+}
+
+function handleModelDragEnd() {
+  const selection = selectedModels();
+  if (!selection.length) return;
   invalidateGeneratedLayersForSelection(selection);
   updatePlacementFieldsFromSelection();
   renderWorkspaceLists();
   updateScene();
 }
 
+function handleGizmoDragEnd(drag = {}) {
+  const selection = selectedModels();
+  if (!selection.length) return;
+  if (drag.action?.startsWith("rotate-")) {
+    for (const model of selection) dropModelToBuildPlate(model, { exact: true });
+  }
+  handleModelDragEnd();
+}
+
+function handleGizmoDrag(drag) {
+  const selection = selectedModels();
+  if (!selection.length) return;
+  const planeDelta = viewer.screenDeltaToBuildPlane(drag.dx, drag.dy);
+  const zDelta = -drag.dy * Math.max(0.02, viewer.distance * 0.0015);
+  const rotationDelta = (drag.dx - drag.dy) * 0.35;
+  const translatesModel = drag.action.startsWith("move-");
+  const rotatesModel = drag.action.startsWith("rotate-");
+  for (const model of selection) {
+    if (drag.action === "move-x") model.transform.translateX += planeDelta.x;
+    if (drag.action === "move-y") model.transform.translateY += planeDelta.y;
+    if (drag.action === "move-z") model.transform.translateZ += zDelta;
+    if (drag.action === "move-xy") {
+      model.transform.translateX += planeDelta.x;
+      model.transform.translateY += planeDelta.y;
+    }
+    if (drag.action === "move-xz") {
+      model.transform.translateX += planeDelta.x;
+      model.transform.translateZ += zDelta;
+    }
+    if (drag.action === "move-yz") {
+      model.transform.translateY += planeDelta.y;
+      model.transform.translateZ += zDelta;
+    }
+    if (drag.action === "rotate-x") model.transform.rotateX += rotationDelta;
+    if (drag.action === "rotate-y") model.transform.rotateY += rotationDelta;
+    if (drag.action === "rotate-z") model.transform.rotateZ += rotationDelta;
+    if (rotatesModel) dropModelToBuildPlate(model);
+    if (translatesModel) maybeMoveModelToPlateByCentroid(model);
+  }
+  requestSceneUpdate({ renderLists: false, updateStatus: false, skipDerivedGeometry: true });
+}
+
 function selectedModels() {
   return models.filter((model) => selectedModelIds.has(model.id));
+}
+
+function normalizeLastSelectedModel() {
+  if (lastSelectedModelId && selectedModelIds.has(lastSelectedModelId)) return;
+  lastSelectedModelId = [...selectedModelIds].pop() || null;
+}
+
+function widgetModel() {
+  normalizeLastSelectedModel();
+  return lastSelectedModelId ? models.find((model) => model.id === lastSelectedModelId) || null : null;
 }
 
 function applyPlacementFieldToSelected(fieldId) {
   const selection = selectedModels();
   if (!selection.length) return;
   const key = placementKey(fieldId);
-  const value = number(fieldId);
+  const value = roundPlacementValue(number(fieldId));
+  $(fieldId).value = formatPlacementValue(value);
+  const rotatesModel = key === "rotateX" || key === "rotateY" || key === "rotateZ";
   for (const model of selection) {
     if (key === "translateX" || key === "translateY" || key === "translateZ") {
       model.transform[key] = value;
@@ -854,10 +1559,15 @@ function applyPlacementFieldToSelected(fieldId) {
     } else {
       model.transform[key] = value;
     }
-    maybeMoveModelToPlateByCentroid(model);
+    if (rotatesModel) {
+      dropModelToBuildPlate(model, { exact: true });
+    } else {
+      maybeMoveModelToPlateByCentroid(model);
+    }
   }
   invalidateGeneratedLayersForSelection(selection);
   renderWorkspaceLists();
+  if (rotatesModel) updatePlacementFieldsFromSelection();
 }
 
 function placementKey(fieldId) {
@@ -875,13 +1585,13 @@ function placementKey(fieldId) {
 function updatePlacementFieldsFromSelection() {
   const model = selectedModels()[0];
   if (!model) return;
-  $("rotateX").value = model.transform.rotateX;
-  $("rotateY").value = model.transform.rotateY;
-  $("rotateZ").value = model.transform.rotateZ;
-  $("translateX").value = model.transform.translateX;
-  $("translateY").value = model.transform.translateY;
-  $("translateZ").value = model.transform.translateZ;
-  $("scale").value = model.transform.scale;
+  $("rotateX").value = formatPlacementValue(model.transform.rotateX);
+  $("rotateY").value = formatPlacementValue(model.transform.rotateY);
+  $("rotateZ").value = formatPlacementValue(model.transform.rotateZ);
+  $("translateX").value = formatPlacementValue(model.transform.translateX);
+  $("translateY").value = formatPlacementValue(model.transform.translateY);
+  $("translateZ").value = formatPlacementValue(model.transform.translateZ);
+  $("scale").value = formatPlacementValue(model.transform.scale);
   syncSceneSettingCommits();
 }
 
@@ -892,11 +1602,112 @@ function invalidateGeneratedLayersForSelection(selection) {
   }
 }
 
+function collectSupportStructureForModel(model) {
+  const plate = buildPlates.find((item) => item.id === model.plateId);
+  if (!plate) return { supports: [], braces: [] };
+  const bounds = expandedModelPlateBounds(model, plate, 2.5);
+  return {
+    supports: (plate.supports || []).filter((support) => supportInsidePlateBounds(support, bounds)).map(cloneSettings),
+    braces: (plate.supportBraces || []).filter((brace) => braceInsidePlateBounds(brace, bounds)).map(cloneSettings)
+  };
+}
+
+function copySupportStructureToPlate(snapshot, model, targetPlate) {
+  const structure = snapshot?.supports;
+  if (!structure || (!structure.supports?.length && !structure.braces?.length)) return false;
+  const newCenter = modelPlateCenter(model, targetPlate);
+  const oldCenter = snapshot.sourceCenterLocal || [newCenter[0], newCenter[1], newCenter[2]];
+  const dx = newCenter[0] - oldCenter[0];
+  const dy = newCenter[1] - oldCenter[1];
+  const copiedSupports = (structure.supports || []).map((support) => translateSupport(support, dx, dy));
+  const copiedBraces = (structure.braces || []).map((brace) => translateBrace(brace, dx, dy));
+  targetPlate.supports = [...(targetPlate.supports || []), ...copiedSupports];
+  targetPlate.supportBraces = [...(targetPlate.supportBraces || []), ...copiedBraces];
+  return !!(copiedSupports.length || copiedBraces.length);
+}
+
+function removeSupportStructureForModels(selection) {
+  const byPlate = new Map();
+  for (const model of selection) {
+    const plate = buildPlates.find((item) => item.id === model.plateId);
+    if (!plate) continue;
+    if (!byPlate.has(plate.id)) byPlate.set(plate.id, { plate, bounds: [] });
+    byPlate.get(plate.id).bounds.push(expandedModelPlateBounds(model, plate, 2.5));
+  }
+  for (const { plate, bounds } of byPlate.values()) {
+    const beforeSupports = plate.supports?.length || 0;
+    const beforeBraces = plate.supportBraces?.length || 0;
+    plate.supports = (plate.supports || []).filter((support) => !bounds.some((box) => supportInsidePlateBounds(support, box)));
+    plate.supportBraces = (plate.supportBraces || []).filter((brace) => !bounds.some((box) => braceInsidePlateBounds(brace, box)));
+    if (beforeSupports !== plate.supports.length || beforeBraces !== plate.supportBraces.length) {
+      plate.layersGenerated = false;
+    }
+  }
+}
+
+function expandedModelPlateBounds(model, plate, margin = 0) {
+  const bounds = modelWorldBounds(model);
+  return {
+    minX: bounds.minX - plate.origin.x - margin,
+    minY: bounds.minY - plate.origin.y - margin,
+    minZ: bounds.minZ - margin,
+    maxX: bounds.maxX - plate.origin.x + margin,
+    maxY: bounds.maxY - plate.origin.y + margin,
+    maxZ: bounds.maxZ + margin
+  };
+}
+
+function modelPlateCenter(model, plate = buildPlates.find((item) => item.id === model.plateId)) {
+  const center = boundsCenter(modelWorldBounds(model));
+  return plate ? [center[0] - plate.origin.x, center[1] - plate.origin.y, center[2]] : center;
+}
+
+function supportInsidePlateBounds(support, bounds) {
+  return pointInsideBounds2d(support.x, support.y, bounds)
+    || pointInsideBounds2d(support.baseX, support.baseY, bounds)
+    || pointInsideBounds2d(support.jointX, support.jointY, bounds);
+}
+
+function braceInsidePlateBounds(brace, bounds) {
+  return pointInsideBounds2d(brace.x0, brace.y0, bounds) || pointInsideBounds2d(brace.x1, brace.y1, bounds);
+}
+
+function pointInsideBounds2d(x, y, bounds) {
+  return Number.isFinite(x) && Number.isFinite(y)
+    && x >= bounds.minX && x <= bounds.maxX
+    && y >= bounds.minY && y <= bounds.maxY;
+}
+
+function translateSupport(support, dx, dy) {
+  return {
+    ...cloneSettings(support),
+    x: translateCoord(support.x, dx),
+    y: translateCoord(support.y, dy),
+    baseX: translateCoord(support.baseX ?? support.x, dx),
+    baseY: translateCoord(support.baseY ?? support.y, dy),
+    jointX: translateCoord(support.jointX ?? support.x, dx),
+    jointY: translateCoord(support.jointY ?? support.y, dy)
+  };
+}
+
+function translateBrace(brace, dx, dy) {
+  return {
+    ...cloneSettings(brace),
+    x0: translateCoord(brace.x0, dx),
+    y0: translateCoord(brace.y0, dy),
+    x1: translateCoord(brace.x1, dx),
+    y1: translateCoord(brace.y1, dy)
+  };
+}
+
+function translateCoord(value, delta) {
+  return Number.isFinite(value) ? value + delta : value;
+}
+
 function maybeMoveModelToPlateByCentroid(model) {
   const currentPlate = buildPlates.find((plate) => plate.id === model.plateId);
   if (!currentPlate) return;
-  const world = modelWorldMesh(model);
-  const centroid = boundsCenter(world.bounds);
+  const centroid = boundsCenter(modelWorldBounds(model));
   const destination = buildPlates.find((plate) => pointInsidePlate(centroid, plate));
   if (!destination || destination.id === model.plateId) return;
 
@@ -904,6 +1715,7 @@ function maybeMoveModelToPlateByCentroid(model) {
   model.transform.translateX = centroid[0] - destination.origin.x - modelLocalCentroid(model)[0];
   model.transform.translateY = centroid[1] - destination.origin.y - modelLocalCentroid(model)[1];
   activePlateId = destination.id;
+  expandedPlateId = destination.id;
   applyBuildPlateSettingsToForm(destination);
   playSound("drop");
 }
@@ -920,6 +1732,7 @@ function moveSelectedModelsToActivePlate() {
     model.transform.translateX = centroid[0] - plate.origin.x - local[0];
     model.transform.translateY = centroid[1] - plate.origin.y - local[1];
   }
+  expandedPlateId = plate.id;
   renderWorkspaceLists();
   updateScene();
   playSound("drop");
@@ -928,70 +1741,145 @@ function moveSelectedModelsToActivePlate() {
 async function openStl() {
   try {
     playSound("click-soft");
+    const targetPlateId = activePlate().id;
     const paths = await window.slicer.openStl();
     if (!paths || !paths.length) {
       log("Open mesh canceled.");
       return;
     }
-    await loadStlPaths(paths, { append: false });
+    await loadStlPaths(paths, { append: true, targetPlateId });
   } catch (error) {
     log(`Open mesh failed: ${error.message}`);
     showErrorPrompt("Open Mesh Failed", error);
   }
 }
 
-async function loadStlPaths(paths, { append = false, sound = append ? "drop" : "confirm" } = {}) {
+async function loadStlPaths(paths, { append = false, sound = append ? "drop" : "confirm", targetPlateId = activePlate().id } = {}) {
   ensureInitialBuildPlate();
+  const initialTargetPlate = buildPlates.find((plate) => plate.id === targetPlateId) || activePlate();
+  const resolvedTargetPlateId = initialTargetPlate.id;
   const nextPaths = normalizeStlPaths(paths);
   if (!nextPaths.length) {
     logAndPrompt("No Mesh Files", "Choose or drop at least one STL or OBJ file.");
     return;
   }
 
-  const loaded = append ? models.slice() : [];
-  const loadedKeys = new Set(loaded.map((item) => item.path.toLowerCase()));
-  const importedModels = [];
-  for (const path of nextPaths) {
-    const key = path.toLowerCase();
-    if (loadedKeys.has(key)) continue;
-    log(`Loading ${path}`);
-    const bytes = new Uint8Array(await window.slicer.readFile(path));
-    const mesh = parseMesh(path, bytes);
-    const model = {
-      id: nextModelId++,
-      path,
-      name: fileName(path),
-      mesh,
-      plateId: activePlateId,
-      transform: defaultModelTransform()
-    };
-    loaded.push(model);
-    importedModels.push(model);
-    loadedKeys.add(key);
-    log(`Loaded ${fileName(path)} (${mesh.triangleCount.toLocaleString()} triangles)`);
-  }
-
-  models = loaded;
-  if (!append) {
+  const importJobId = nextImportJobId++;
+  latestImportJobId = importJobId;
+  const shouldReplace = !append && importJobId === latestImportJobId;
+  if (shouldReplace) {
+    models = [];
+    selectedModelIds = new Set();
+    lastSelectedModelId = null;
     for (const plate of buildPlates) {
       plate.supports = [];
       plate.supportBraces = [];
       plate.layersGenerated = false;
     }
+    $("outputPath").value = "";
+    renderWorkspaceLists();
+    updateScene();
   }
-  arrangeModelsOnPlate(activePlateId);
-  selectedModelIds = new Set(importedModels.map((model) => model.id));
-  $("inputPath").value = models.map((item) => item.path).join("; ");
-  if (!append) $("outputPath").value = "";
+
+  const results = await Promise.allSettled(nextPaths.map((path) => loadSingleMeshPath(path, {
+    importJobId,
+    append,
+    sound,
+    targetPlateId: resolvedTargetPlateId
+  })));
+  const loadedCount = results.filter((result) => result.status === "fulfilled" && result.value).length;
+  if (loadedCount > 1) {
+    const destinationPlate = buildPlates.find((plate) => plate.id === resolvedTargetPlateId) || activePlate();
+    log(`Loaded ${loadedCount.toLocaleString()} mesh files on ${destinationPlate.name}.`);
+  }
+}
+
+async function loadSingleMeshPath(path, { importJobId, append, sound, targetPlateId }) {
+  const progress = createLoadProgressItem(path);
+  const readJobId = `mesh-read-${progress.id}`;
+  try {
+    updateLoadProgressItem(progress.id, 0.02, "Queued");
+    fileReadProgressHandlers.set(readJobId, (message) => {
+      const percent = Math.round((message.progress || 0) * 100);
+      updateLoadProgressItem(progress.id, 0.04 + (message.progress || 0) * 0.68, `Reading ${percent}%`);
+    });
+    log(`Loading ${path}`);
+    const raw = window.slicer.readFileProgress
+      ? await window.slicer.readFileProgress(path, readJobId)
+      : await window.slicer.readFile(path);
+    fileReadProgressHandlers.delete(readJobId);
+
+    updateLoadProgressItem(progress.id, 0.78, "Parsing");
+    await nextFrame();
+    const bytes = new Uint8Array(raw);
+    const mesh = parseMesh(path, bytes);
+    updateLoadProgressItem(progress.id, 0.92, "Adding");
+
+    if (!append && importJobId !== latestImportJobId) {
+      updateLoadProgressItem(progress.id, 1, "Skipped");
+      scheduleLoadProgressRemoval(progress.id);
+      return null;
+    }
+
+    const model = {
+      id: nextModelId++,
+      path,
+      name: fileName(path),
+      mesh,
+      plateId: targetPlateId,
+      transform: defaultModelTransform(),
+      dropAnimation: startDropAnimation()
+    };
+    const committed = commitLoadedModel(model, { importJobId, targetPlateId });
+    updateLoadProgressItem(progress.id, 1, committed ? "Loaded" : "Skipped");
+    scheduleLoadProgressRemoval(progress.id);
+    if (committed) {
+      log(`Loaded ${fileName(path)} (${mesh.triangleCount.toLocaleString()} triangles)`);
+      if (sound) playSound(sound);
+    }
+    return committed ? model : null;
+  } catch (error) {
+    fileReadProgressHandlers.delete(readJobId);
+    updateLoadProgressItem(progress.id, 1, "Failed");
+    log(`Load failed for ${fileName(path)}: ${error.message}`);
+    showErrorPrompt("Mesh Load Failed", error);
+    scheduleLoadProgressRemoval(progress.id, 4200);
+    return null;
+  }
+}
+
+function commitLoadedModel(model, { importJobId, targetPlateId }) {
+  const destinationPlate = buildPlates.find((plate) => plate.id === targetPlateId) || activePlate();
+  if (!destinationPlate) return false;
+  model.plateId = destinationPlate.id;
+  placeNewModelOnPlate(model, destinationPlate);
+  models.push(model);
+  destinationPlate.layersGenerated = false;
+
+  if (importJobId === latestImportJobId) {
+    activePlateId = destinationPlate.id;
+    expandedPlateId = destinationPlate.id;
+    applyBuildPlateSettingsToForm(destinationPlate);
+    selectedModelIds.add(model.id);
+    lastSelectedModelId = model.id;
+  } else {
+    selectedModelIds = new Set([...selectedModelIds].filter((id) => models.some((item) => item.id === id)));
+    normalizeLastSelectedModel();
+  }
+
   setDefaultOutput();
-  const triangleCount = models.reduce((sum, item) => sum + item.mesh.triangleCount, 0);
-  $("meshStatus").textContent = `${models.length.toLocaleString()} mesh${models.length === 1 ? "" : "es"}, ${triangleCount.toLocaleString()} triangles`;
+  updateMeshStatusFromModels();
   $("supportStatus").textContent = "Supports not generated";
-  if (models.length > 1) log(`Arranged ${models.length} mesh files on the build plate`);
   renderWorkspaceLists();
   updatePlacementFieldsFromSelection();
   updateScene();
-  if (importedModels.length && sound) playSound(sound);
+  animateModelDrop([model]);
+  return true;
+}
+
+function updateMeshStatusFromModels() {
+  const triangleCount = models.reduce((sum, item) => sum + item.mesh.triangleCount, 0);
+  $("meshStatus").textContent = `${models.length.toLocaleString()} mesh${models.length === 1 ? "" : "es"}, ${triangleCount.toLocaleString()} triangles`;
 }
 
 async function chooseOutput() {
@@ -1020,6 +1908,8 @@ function initDropLoading() {
   for (const eventName of ["dragenter", "dragover"]) {
     dropTarget.addEventListener(eventName, (event) => {
       event.preventDefault();
+      updateExternalDropHover(event);
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
       if (shell && !shell.classList.contains("drag-over")) {
         shell.classList.add("drag-over");
         playSound("drag-start");
@@ -1030,12 +1920,32 @@ function initDropLoading() {
     dropTarget.addEventListener(eventName, (event) => {
       event.preventDefault();
       if (eventName === "drop") handleDrop(event);
+      if (eventName === "dragleave") viewer.setHoverHit(null);
       if (shell) shell.classList.remove("drag-over");
     });
   }
 }
 
+function updateExternalDropHover(event) {
+  if (!viewer) return;
+  const hit = viewer.hitAt(event.clientX, event.clientY, { skipModels: true });
+  if (hit?.type === "plate") {
+    viewer.setHoverHit(hit);
+  } else if (hit?.type === "plate-action") {
+    viewer.setHoverHit({ type: "plate", id: hit.plateId });
+  } else {
+    viewer.setHoverHit(null);
+  }
+}
+
 async function handleDrop(event) {
+  const hit = viewer.hitAt(event.clientX, event.clientY, { skipModels: true });
+  const dropPlateId = hit?.type === "plate-action" ? hit.plateId : hit?.type === "plate" ? hit.id : null;
+  const targetPlateId = dropPlateId || activePlate().id;
+  if (dropPlateId && dropPlateId !== activePlateId) {
+    setActiveBuildPlate(dropPlateId, { sound: false });
+  }
+  viewer.setHoverHit(null);
   const files = Array.from(event.dataTransfer?.files || []);
   const paths = files
     .map((file) => window.slicer.pathForFile ? window.slicer.pathForFile(file) : file.path)
@@ -1044,14 +1954,7 @@ async function handleDrop(event) {
     logAndPrompt("Unsupported Drop", "Drop one or more STL or OBJ files into the viewer.");
     return;
   }
-  await loadStlPaths(paths, { append: models.length > 0, sound: "drop" });
-}
-
-function parseInputPaths(text) {
-  return String(text || "")
-    .split(/[\r\n;]+/)
-    .map((part) => part.trim().replace(/^"|"$/g, ""))
-    .filter(Boolean);
+  await loadStlPaths(paths, { append: true, sound: "drop", targetPlateId });
 }
 
 function normalizeStlPaths(paths) {
@@ -1155,15 +2058,44 @@ async function generatePreview() {
 }
 
 async function slice() {
+  if (!ensureReady(true, true)) return;
+  await slicePlates([activePlate()], { forceSuffix: false, label: "Slicing" });
+}
+
+async function sliceAll() {
   if (!ensureReady(true, false)) return;
+  await slicePlates(platesWithModels(), { forceSuffix: true, label: "Slicing all build plates" });
+}
+
+async function saveAll() {
+  if (!ensureReady(false, false)) return;
+  playSound("click-crisp");
+  try {
+    const path = await window.slicer.saveOutput($("format").value);
+    if (!path) {
+      log("Save all canceled.");
+      return;
+    }
+    $("outputPath").value = path;
+    await slicePlates(platesWithModels(), { forceSuffix: true, label: "Saving all build plates" });
+  } catch (error) {
+    log(`Save all failed: ${error.message}`);
+    showErrorPrompt("Save All Failed", error);
+  }
+}
+
+async function slicePlates(platesToSlice, { forceSuffix = false, label = "Slicing" } = {}) {
+  const occupied = (platesToSlice || []).filter((plate) => models.some((model) => model.plateId === plate.id));
+  if (!occupied.length) {
+    logAndPrompt("No Objects To Slice", "Move or load at least one object onto a build plate first.");
+    return;
+  }
   playSound("click-crisp");
   setBusy(true);
-  log("Slicing...");
+  log(`${label}...`);
   try {
-    const platesToSlice = buildPlates.filter((plate) => models.some((model) => model.plateId === plate.id));
-    for (let index = 0; index < platesToSlice.length; index++) {
-      const plate = platesToSlice[index];
-      const payload = collectPayloadForPlate(plate, outputPathForPlate(plate, index, platesToSlice.length));
+    for (const plate of occupied) {
+      const payload = collectPayloadForPlate(plate, outputPathForPlate(plate, { forceSuffix }));
       log(`Slicing ${plate.name}...`);
       const result = await window.slicer.slice(payload);
       plate.layersGenerated = true;
@@ -1173,11 +2105,15 @@ async function slice() {
     updateScene();
     playSound("success");
   } catch (error) {
-    log(`Slice failed: ${error.message}`);
-    showErrorPrompt("Slice Failed", error);
+    log(`${label} failed: ${error.message}`);
+    showErrorPrompt(`${label} Failed`, error);
   } finally {
     setBusy(false);
   }
+}
+
+function platesWithModels() {
+  return buildPlates.filter((plate) => models.some((model) => model.plateId === plate.id));
 }
 
 function ensureReady(requireOutput, requireActivePlateObjects = true) {
@@ -1233,11 +2169,11 @@ function basePayload(plate = activePlate(), outputPath = $("outputPath").value.t
   };
 }
 
-function outputPathForPlate(plate, index, total) {
+function outputPathForPlate(plate, { forceSuffix = false } = {}) {
   const outputPath = $("outputPath").value.trim();
-  if (total <= 1) return outputPath;
+  if (!forceSuffix) return outputPath;
   const ext = $("format").value;
-  const suffix = `-${safeFileStem(plate.name || `plate-${index + 1}`)}`;
+  const suffix = `-plate-${plate.id}`;
   if (/\.[^.\\/]+$/.test(outputPath)) return outputPath.replace(/\.[^.\\/]+$/, `${suffix}.${ext}`);
   return `${outputPath}${suffix}.${ext}`;
 }
@@ -1546,12 +2482,58 @@ function loadProfileDefaults() {
   $("resinDensity").value = cfg.resin_density_g_ml ?? 1.1;
 }
 
-function updateScene() {
+function requestSceneUpdate(options = {}) {
+  if (sceneUpdateFrame !== null) return;
+  sceneUpdateFrame = requestAnimationFrame(() => {
+    sceneUpdateFrame = null;
+    updateScene(options);
+  });
+}
+
+function animateBuildPlateDrop(plate) {
+  const tick = () => {
+    if (!plate.dropAnimation) return;
+    const elapsed = performance.now() - plate.dropAnimation.start;
+    if (elapsed >= plate.dropAnimation.duration) {
+      plate.dropAnimation = null;
+      updateScene();
+      return;
+    }
+    updateScene({ renderLists: false, updateStatus: false, skipDerivedGeometry: true });
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+function animateModelDrop(items) {
+  const dropping = (items || []).filter(Boolean);
+  if (!dropping.length) return;
+  const tick = () => {
+    const active = dropping.some((model) => model.dropAnimation);
+    if (!active) return;
+    const now = performance.now();
+    for (const model of dropping) {
+      if (model.dropAnimation && now - model.dropAnimation.start >= model.dropAnimation.duration) {
+        model.dropAnimation = null;
+      }
+    }
+    updateScene({ renderLists: false, updateStatus: false, skipDerivedGeometry: true });
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+function startDropAnimation() {
+  return { start: performance.now(), duration: 820 };
+}
+
+function updateScene({ renderLists = true, updateStatus = true, skipDerivedGeometry = false } = {}) {
   ensureInitialBuildPlate();
   updateBuildPlateLayout();
-  const scene = buildScene();
+  const scene = buildScene({ skipDerivedGeometry });
   viewer.setScene(scene);
-  renderWorkspaceLists();
+  if (renderLists) renderWorkspaceLists();
+  if (!updateStatus) return;
   const active = activePlate();
   const activeModels = models.filter((model) => model.plateId === active.id);
   $("meshStatus").textContent = selectedModelIds.size
@@ -1583,30 +2565,61 @@ function stepClipHeightFromWheel(event) {
   setActivePlateClipHeight(activePlate().clipHeight + (event.deltaY > 0 ? -step : step));
 }
 
-function buildScene() {
+function buildScene({ skipDerivedGeometry = false } = {}) {
   const active = activePlate();
   const modelItems = [];
   const selectionBoxes = [];
   const outOfBounds = [];
+  const gizmoModel = widgetModel();
+  let transformGizmo = null;
 
   for (const model of models) {
     const plate = buildPlates.find((item) => item.id === model.plateId);
     if (!plate) continue;
-    const world = modelWorldMesh(model);
+    const local = model.mesh;
+    const localBounds = modelDisplayLocalBounds(model);
+    const visual = buildModelVisual(model);
+    const offset = modelWorldOffset(model, plate);
+    offset[2] += visual.z;
+    const bounds = offsetBounds(localBounds, offset);
     const isActive = plate.id === active.id;
     const selected = selectedModelIds.has(model.id);
     modelItems.push({
       id: model.id,
       plateId: plate.id,
-      mesh: world,
-      bounds: world.bounds,
+      mesh: local,
+      offset,
+      geometryKey: "raw",
+      modelOrigin: boundsCenter(model.mesh.bounds),
+      modelRotation: modelRotationRadians(model.transform),
+      modelScale: model.transform.scale || 1,
+      scale: [visual.scaleX, visual.scaleY, visual.scaleZ],
+      scaleOrigin: boundsCenter(localBounds),
+      bounds,
       color: isActive ? (selected ? [0.3, 0.78, 0.95, 1] : [0.26, 0.72, 0.86, 1]) : [0.44, 0.48, 0.52, 1]
     });
-    if (selected) selectionBoxes.push(world.bounds);
-    if (isActive) {
+    if (selected) selectionBoxes.push(bounds);
+    if (isActive && !skipDerivedGeometry) {
       const redMesh = outOfBoundsMesh(model, plate);
       if (redMesh) outOfBounds.push(redMesh);
     }
+  }
+
+  if (gizmoModel && selectedModelIds.size) {
+    const gizmoPlate = buildPlates.find((item) => item.id === gizmoModel.plateId);
+    const bounds = offsetBounds(modelDisplayLocalBounds(gizmoModel), modelWorldOffset(gizmoModel, gizmoPlate));
+    const center = boundsCenter(bounds);
+    const span = Math.max(
+      bounds.maxX - bounds.minX,
+      bounds.maxY - bounds.minY,
+      bounds.maxZ - bounds.minZ,
+      18
+    );
+    transformGizmo = {
+      center,
+      length: clamp(span * 0.48, 16, 44),
+      radius: clamp(span * 0.018, 0.45, 1.25)
+    };
   }
 
   return {
@@ -1614,6 +2627,7 @@ function buildScene() {
       id: plate.id,
       name: plate.name,
       origin: plate.origin,
+      visual: buildPlateVisual(plate),
       bed: {
         x: plate.settings.printer.sizeX || 120,
         y: plate.settings.printer.sizeY || 67.5,
@@ -1621,11 +2635,13 @@ function buildScene() {
       },
       active: plate.id === active.id
     })),
+    nextPlate: nextBuildPlatePreview(),
     models: modelItems,
     selectionBoxes,
     outOfBounds,
-    supports: offsetSupports(active.supports, active.origin),
-    supportBraces: offsetBraces(active.supportBraces, active.origin),
+    supports: skipDerivedGeometry ? null : offsetSupports(active.supports, active.origin),
+    supportBraces: skipDerivedGeometry ? null : offsetBraces(active.supportBraces, active.origin),
+    transformGizmo,
     clip: {
       enabled: active.clipEnabled,
       z: active.clipHeight,
@@ -1636,13 +2652,163 @@ function buildScene() {
         depth: active.settings.printer.sizeY || 67.5
       },
       showLayer: active.layersGenerated,
-      layerLines: active.layersGenerated ? makeLayerLines(active, active.clipHeight) : null
+      layerLines: !skipDerivedGeometry && active.layersGenerated ? makeLayerLines(active, active.clipHeight) : null
     }
+  };
+}
+
+function buildPlateVisual(plate) {
+  if (!plate.dropAnimation) return { z: 0, scaleX: 1, scaleY: 1 };
+  const t = clamp((performance.now() - plate.dropAnimation.start) / plate.dropAnimation.duration, 0, 1);
+  const dropHeight = 112;
+  const hitAt = 0.48;
+  let z = 0;
+  let squash = 0;
+  let stretch = 0;
+  if (t < hitAt) {
+    const fallT = t / hitAt;
+    z = dropHeight * (1 - fallT * fallT);
+  } else {
+    const bounceT = (t - hitAt) / (1 - hitAt);
+    squash = Math.max(0, 1 - bounceT / 0.16);
+    if (bounceT < 0.42) {
+      const reboundT = bounceT / 0.42;
+      z = Math.sin(reboundT * Math.PI) * 28 * Math.pow(1 - reboundT * 0.35, 1.5);
+      stretch = Math.max(0, Math.sin(reboundT * Math.PI)) * Math.max(0, 1 - reboundT);
+    }
+  }
+  return {
+    z,
+    scaleX: 1 + squash * 0.14 - stretch * 0.055,
+    scaleY: 1 - squash * 0.08 + stretch * 0.11
+  };
+}
+
+function buildModelVisual(model) {
+  if (!model.dropAnimation) return { z: 0, scaleX: 1, scaleY: 1, scaleZ: 1 };
+  const t = clamp((performance.now() - model.dropAnimation.start) / model.dropAnimation.duration, 0, 1);
+  const dropHeight = 72;
+  const hitAt = 0.48;
+  let z = 0;
+  let squash = 0;
+  let stretch = 0;
+  if (t < hitAt) {
+    const fallT = t / hitAt;
+    z = dropHeight * (1 - fallT * fallT);
+  } else {
+    const bounceT = (t - hitAt) / (1 - hitAt);
+    squash = Math.max(0, 1 - bounceT / 0.16);
+    if (bounceT < 0.42) {
+      const reboundT = bounceT / 0.42;
+      z = Math.sin(reboundT * Math.PI) * 18 * Math.pow(1 - reboundT * 0.35, 1.5);
+      stretch = Math.max(0, Math.sin(reboundT * Math.PI)) * Math.max(0, 1 - reboundT);
+    }
+  }
+  return {
+    z,
+    scaleX: 1 + squash * 0.1 - stretch * 0.04,
+    scaleY: 1 + squash * 0.1 - stretch * 0.04,
+    scaleZ: 1 - squash * 0.16 + stretch * 0.18
   };
 }
 
 function defaultModelTransform() {
   return { rotateX: 0, rotateY: 0, rotateZ: 0, translateX: 0, translateY: 0, translateZ: 0, scale: 1 };
+}
+
+function positionModelsAtPlateCenter(items, plate) {
+  const placing = (items || []).filter(Boolean);
+  if (!placing.length || !plate) return;
+  const gap = placing.length > 1 ? 4 : 0;
+  const bedX = plate.settings.printer.sizeX || 120;
+  const bedY = plate.settings.printer.sizeY || 67.5;
+  const packed = [];
+  const cols = Math.max(1, Math.ceil(Math.sqrt(placing.length)));
+  let cursorX = 0;
+  let cursorY = 0;
+  let rowDepth = 0;
+  let groupWidth = 0;
+  for (let index = 0; index < placing.length; index++) {
+    const model = placing[index];
+    const oriented = modelRenderMesh(model);
+    const width = oriented.bounds.maxX - oriented.bounds.minX;
+    const depth = oriented.bounds.maxY - oriented.bounds.minY;
+    if (index > 0 && index % cols === 0) {
+      cursorX = 0;
+      cursorY += rowDepth + gap;
+      rowDepth = 0;
+    }
+    packed.push({ model, bounds: oriented.bounds, x: cursorX, y: cursorY, width, depth });
+    cursorX += width + gap;
+    groupWidth = Math.max(groupWidth, cursorX - gap);
+    rowDepth = Math.max(rowDepth, depth);
+  }
+  const groupDepth = packed.reduce((max, item) => Math.max(max, item.y + item.depth), 0);
+  const startX = (bedX - groupWidth) / 2;
+  const startY = (bedY - groupDepth) / 2;
+  for (const item of packed) {
+    item.model.plateId = plate.id;
+    item.model.transform.translateX = startX + item.x - item.bounds.minX;
+    item.model.transform.translateY = startY + item.y - item.bounds.minY;
+    item.model.transform.translateZ = -item.bounds.minZ;
+  }
+}
+
+function placeNewModelOnPlate(model, plate) {
+  if (!model || !plate) return;
+  const oriented = modelRenderMesh(model);
+  const bounds = oriented.bounds;
+  const width = bounds.maxX - bounds.minX;
+  const depth = bounds.maxY - bounds.minY;
+  const bedX = plate.settings.printer.sizeX || 120;
+  const bedY = plate.settings.printer.sizeY || 67.5;
+  const centerX = (bedX - width) / 2;
+  const centerY = (bedY - depth) / 2;
+  const candidates = placementCandidates(centerX, centerY, width, depth, bedX, bedY);
+  const existing = models
+    .filter((item) => item !== model && item.plateId === plate.id)
+    .map((item) => expandedModelPlateBounds(item, plate, 2));
+  const chosen = candidates.find((candidate) => !candidateOverlapsModels(candidate, width, depth, existing))
+    || { x: centerX, y: centerY };
+  model.transform.translateX = chosen.x - bounds.minX;
+  model.transform.translateY = chosen.y - bounds.minY;
+  model.transform.translateZ = -bounds.minZ;
+}
+
+function placementCandidates(centerX, centerY, width, depth, bedX, bedY) {
+  const stepX = Math.max(8, Math.min(width + 4, Math.max(8, bedX / 5)));
+  const stepY = Math.max(8, Math.min(depth + 4, Math.max(8, bedY / 5)));
+  const canClampX = width <= bedX;
+  const canClampY = depth <= bedY;
+  const seen = new Set();
+  const out = [];
+  const push = (x, y) => {
+    const nextX = canClampX ? clamp(x, 0, bedX - width) : x;
+    const nextY = canClampY ? clamp(y, 0, bedY - depth) : y;
+    const key = `${nextX.toFixed(3)},${nextY.toFixed(3)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ x: nextX, y: nextY });
+  };
+  push(centerX, centerY);
+  for (let radius = 1; radius <= 14; radius++) {
+    for (let ix = -radius; ix <= radius; ix++) {
+      for (let iy = -radius; iy <= radius; iy++) {
+        if (Math.max(Math.abs(ix), Math.abs(iy)) !== radius) continue;
+        push(centerX + ix * stepX, centerY + iy * stepY);
+      }
+    }
+  }
+  return out;
+}
+
+function candidateOverlapsModels(candidate, width, depth, existingBounds) {
+  return existingBounds.some((bounds) => rectsOverlap(
+    { x: candidate.x, y: candidate.y },
+    { x: width, y: depth },
+    { x: bounds.minX, y: bounds.minY },
+    { x: bounds.maxX - bounds.minX, y: bounds.maxY - bounds.minY }
+  ));
 }
 
 function arrangeModelsOnPlate(plateId) {
@@ -1655,7 +2821,7 @@ function arrangeModelsOnPlate(plateId) {
   let cursorY = 0;
   let rowDepth = 0;
   for (const model of plateModels) {
-    const oriented = orientMesh(model.mesh, model.transform);
+    const oriented = modelRenderMesh(model);
     const width = oriented.bounds.maxX - oriented.bounds.minX;
     const depth = oriented.bounds.maxY - oriented.bounds.minY;
     if (cursorX > 0 && cursorX + width > bedX) {
@@ -1673,19 +2839,98 @@ function arrangeModelsOnPlate(plateId) {
 
 function modelWorldMesh(model) {
   const plate = buildPlates.find((item) => item.id === model.plateId);
+  return translateMesh(modelRenderMesh(model), ...modelWorldOffset(model, plate));
+}
+
+function modelRenderMesh(model) {
+  const key = transformGeometryKey(model.transform);
+  if (!model.renderMesh || model.renderMesh.key !== key) {
+    model.renderMesh = {
+      key,
+      mesh: orientMesh(model.mesh, model.transform)
+    };
+  }
+  return model.renderMesh.mesh;
+}
+
+function transformGeometryKey(transform) {
+  return [
+    transform.rotateX || 0,
+    transform.rotateY || 0,
+    transform.rotateZ || 0,
+    transform.scale || 1
+  ].join("|");
+}
+
+function modelDisplayLocalBounds(model) {
+  return transformLocalBounds(model.mesh.bounds, model.transform);
+}
+
+function dropModelToBuildPlate(model, { exact = false } = {}) {
+  const offset = reorientationDropOffset();
+  const plate = buildPlates.find((item) => item.id === model.plateId);
+  const bounds = exact
+    ? modelWorldBounds(model)
+    : offsetBounds(modelDisplayLocalBounds(model), modelWorldOffset(model, plate));
+  model.transform.translateZ += offset - bounds.minZ;
+}
+
+function reorientationDropOffset() {
+  const value = Number($("dropOffset")?.value);
+  return Math.max(0, Number.isFinite(value) ? value : 0);
+}
+
+function transformLocalBounds(bounds, transform) {
+  const origin = boundsCenter(bounds);
+  return boundsForPointList(boundsCorners(bounds).map((point) => transformLocalPoint(point, transform, origin)));
+}
+
+function transformLocalPoint(point, transform, origin) {
+  const scale = transform.scale || 1;
+  const angles = modelRotationRadians(transform);
+  let local = [
+    (point[0] - origin[0]) * scale,
+    (point[1] - origin[1]) * scale,
+    (point[2] - origin[2]) * scale
+  ];
+  local = rotatePoint(local, angles);
+  return [
+    local[0] + origin[0],
+    local[1] + origin[1],
+    local[2] + origin[2]
+  ];
+}
+
+function modelRotationRadians(transform) {
+  return [deg(transform.rotateX || 0), deg(transform.rotateY || 0), deg(transform.rotateZ || 0)];
+}
+
+function modelWorldOffset(model, plate = buildPlates.find((item) => item.id === model.plateId)) {
   const origin = plate ? plate.origin : { x: 0, y: 0 };
-  const oriented = orientMesh(model.mesh, model.transform);
-  return translateMesh(
-    oriented,
+  return [
     origin.x + model.transform.translateX,
     origin.y + model.transform.translateY,
     model.transform.translateZ
-  );
+  ];
+}
+
+function modelWorldBounds(model) {
+  return offsetBounds(modelRenderMesh(model).bounds, modelWorldOffset(model));
+}
+
+function offsetBounds(bounds, offset) {
+  return {
+    minX: bounds.minX + offset[0],
+    minY: bounds.minY + offset[1],
+    minZ: bounds.minZ + offset[2],
+    maxX: bounds.maxX + offset[0],
+    maxY: bounds.maxY + offset[1],
+    maxZ: bounds.maxZ + offset[2]
+  };
 }
 
 function modelLocalCentroid(model) {
-  const oriented = orientMesh(model.mesh, model.transform);
-  const center = boundsCenter(oriented.bounds);
+  const center = boundsCenter(modelRenderMesh(model).bounds);
   return [center[0], center[1], center[2]];
 }
 
@@ -1695,6 +2940,19 @@ function boundsCenter(bounds) {
     (bounds.minY + bounds.maxY) / 2,
     (bounds.minZ + bounds.maxZ) / 2
   ];
+}
+
+function boundsForPointList(points) {
+  const b = { minX: Infinity, minY: Infinity, minZ: Infinity, maxX: -Infinity, maxY: -Infinity, maxZ: -Infinity };
+  for (const point of points) {
+    b.minX = Math.min(b.minX, point[0]);
+    b.minY = Math.min(b.minY, point[1]);
+    b.minZ = Math.min(b.minZ, point[2]);
+    b.maxX = Math.max(b.maxX, point[0]);
+    b.maxY = Math.max(b.maxY, point[1]);
+    b.maxZ = Math.max(b.maxZ, point[2]);
+  }
+  return b;
 }
 
 function pointInsidePlate(point, plate) {
@@ -1707,8 +2965,7 @@ function pointInsidePlate(point, plate) {
 }
 
 function modelOutOfBounds(model, plate) {
-  const world = modelWorldMesh(model);
-  return boundsOutsidePlate(world.bounds, plate);
+  return boundsOutsidePlate(modelWorldBounds(model), plate);
 }
 
 function boundsOutsidePlate(bounds, plate) {
@@ -1814,14 +3071,75 @@ function intNumber(id) {
 }
 
 function log(message) {
-  const out = $("log");
-  out.textContent += `${message}\n`;
-  out.scrollTop = out.scrollHeight;
+  const toast = $("viewerToast");
+  if (!toast) return;
+  toast.textContent = message;
+  toast.hidden = false;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    toast.hidden = true;
+    toastTimer = null;
+  }, 4200);
+}
+
+function createLoadProgressItem(path) {
+  const item = {
+    id: nextLoadProgressId++,
+    name: fileName(path),
+    progress: 0,
+    status: "Queued",
+    removeTimer: null
+  };
+  loadProgressItems.set(item.id, item);
+  renderLoadProgress();
+  return item;
+}
+
+function updateLoadProgressItem(id, progress, status) {
+  const item = loadProgressItems.get(id);
+  if (!item) return;
+  item.progress = clamp(progress, 0, 1);
+  item.status = status || item.status;
+  renderLoadProgress();
+}
+
+function scheduleLoadProgressRemoval(id, delay = 1600) {
+  const item = loadProgressItems.get(id);
+  if (!item) return;
+  if (item.removeTimer) clearTimeout(item.removeTimer);
+  item.removeTimer = setTimeout(() => {
+    loadProgressItems.delete(id);
+    renderLoadProgress();
+  }, delay);
+}
+
+function renderLoadProgress() {
+  const panel = $("loadProgressPanel");
+  if (!panel) return;
+  const items = [...loadProgressItems.values()];
+  panel.hidden = !items.length;
+  panel.innerHTML = items.map((item) => `
+    <div class="load-progress-item">
+      <div class="load-progress-header">
+        <span class="load-progress-name">${escapeText(item.name)}</span>
+        <span class="load-progress-status">${escapeText(item.status)}</span>
+      </div>
+      <div class="load-progress-track">
+        <div class="load-progress-fill" style="width: ${Math.round(item.progress * 100)}%"></div>
+      </div>
+    </div>
+  `).join("");
+}
+
+function nextFrame() {
+  return new Promise((resolve) => requestAnimationFrame(resolve));
 }
 
 function setBusy(busy) {
   $("previewButton").disabled = busy;
   $("sliceButton").disabled = busy;
+  $("sliceAllButton").disabled = busy;
+  $("saveAllButton").disabled = busy;
 }
 
 function parseMesh(path, bytes) {
@@ -2021,6 +3339,7 @@ class Viewer {
     this.gl = canvas.getContext("webgl", { antialias: true });
     this.program = createProgram(this.gl);
     this.meshes = {};
+    this.modelMeshCache = new Map();
     this.bed = { x: 120, y: 67.5, z: 160 };
     this.yaw = -0.65;
     this.pitch = 0.68;
@@ -2031,6 +3350,16 @@ class Viewer {
     this.pickRects = [];
     this.onScenePick = null;
     this.onModelDrag = null;
+    this.onModelDragEnd = null;
+    this.onGizmoDrag = null;
+    this.onGizmoDragEnd = null;
+    this.onFrame = null;
+    this.hoveredHit = null;
+    this.pressedHit = null;
+    this.activeGizmoAction = null;
+    this.activePlateFocus = null;
+    this.activePartFocus = null;
+    this.lastMvp = null;
     this.pointerStart = null;
     this.resizeTimer = null;
     this.resizeFrame = null;
@@ -2054,48 +3383,102 @@ class Viewer {
       this.canvas.setPointerCapture(event.pointerId);
       const additive = event.ctrlKey || event.metaKey || event.shiftKey;
       const hit = this.hitAt(event.clientX, event.clientY);
-      const mode = hit && hit.type === "model" ? "model" : "pan";
-      this.drag = { x: event.clientX, y: event.clientY, mode };
-      this.pointerStart = { x: event.clientX, y: event.clientY, additive, hit };
+      const isLeft = event.button === 0;
+      const isMiddle = event.button === 1;
+      const isRight = event.button === 2;
+      let mode = "press";
+      if (isMiddle) {
+        this.centerOnOrbitFocus();
+        mode = "orbit";
+      } else if (isRight) {
+        mode = "pan";
+      } else if (isLeft && hit?.type === "gizmo") {
+        mode = "gizmo";
+        this.activeGizmoAction = hit.action;
+        this.setHoverHit(hit);
+      } else if (isLeft && hit?.type === "model") {
+        mode = "model";
+      }
+      this.pressedHit = isLeft && hit && (hit.type === "plate" || hit.type === "add-plate" || hit.type === "plate-action") ? hit : null;
+      this.drag = { x: event.clientX, y: event.clientY, mode, moved: false, action: mode === "gizmo" ? this.activeGizmoAction : null };
+      this.pointerStart = { x: event.clientX, y: event.clientY, additive, hit, clickable: isLeft && mode !== "gizmo" };
       if (mode === "model" && this.onScenePick) {
         this.onScenePick({ type: "model", id: hit.id, plateId: hit.plateId, additive, dragStart: true });
       }
     });
     this.canvas.addEventListener("pointermove", (event) => {
-      if (!this.drag) return;
+      if (!this.drag) {
+        this.setHoverHit(this.hitAt(event.clientX, event.clientY));
+        return;
+      }
       event.preventDefault();
       const dx = event.clientX - this.drag.x;
       const dy = event.clientY - this.drag.y;
       const mode = this.drag.mode;
-      this.drag = { x: event.clientX, y: event.clientY, mode };
+      const action = this.drag.action;
+      const totalDx = this.pointerStart ? event.clientX - this.pointerStart.x : dx;
+      const totalDy = this.pointerStart ? event.clientY - this.pointerStart.y : dy;
+      const moved = this.drag.moved || Math.hypot(dx, dy) > 0.2 || Math.hypot(totalDx, totalDy) > 0.2;
+      this.drag = { x: event.clientX, y: event.clientY, mode, moved, action };
       if (mode === "model") {
         const delta = this.screenDeltaToBuildPlane(dx, dy);
         if (this.onModelDrag && (Math.abs(delta.x) > 0.0001 || Math.abs(delta.y) > 0.0001)) {
           this.onModelDrag(delta);
         }
-      } else {
+      } else if (mode === "gizmo") {
+        if (this.onGizmoDrag) this.onGizmoDrag({ action: this.activeGizmoAction, dx, dy });
+      } else if (mode === "pan") {
         this.pan(dx, dy);
+      } else if (mode === "orbit") {
+        this.orbit(dx, dy);
       }
     });
     this.canvas.addEventListener("pointerup", (event) => {
-      if (this.pointerStart) {
+      const finishedDrag = this.drag;
+      if (this.pointerStart?.clickable) {
         const dx = event.clientX - this.pointerStart.x;
         const dy = event.clientY - this.pointerStart.y;
-        if (Math.hypot(dx, dy) < 4) {
+        if (Math.hypot(dx, dy) < 4 && this.pointerStart.hit?.type !== "model") {
           this.pickAt(event.clientX, event.clientY, this.pointerStart.additive, { skipModels: this.pointerStart.hit?.type === "model" });
         }
       }
+      if (finishedDrag?.mode === "model" && finishedDrag.moved && this.onModelDragEnd) {
+        this.onModelDragEnd();
+      }
+      if (finishedDrag?.mode === "gizmo") {
+        if (finishedDrag.moved && this.onGizmoDragEnd) this.onGizmoDragEnd({ action: finishedDrag.action || this.activeGizmoAction });
+        this.activeGizmoAction = null;
+      }
+      this.pressedHit = null;
+      this.setHoverHit(this.hitAt(event.clientX, event.clientY));
       this.drag = null;
       this.pointerStart = null;
     });
     this.canvas.addEventListener("pointercancel", () => {
+      if (this.drag?.mode === "model" && this.drag.moved && this.onModelDragEnd) {
+        this.onModelDragEnd();
+      }
+      if (this.drag?.mode === "gizmo") {
+        if (this.drag.moved && this.onGizmoDragEnd) this.onGizmoDragEnd({ action: this.drag.action || this.activeGizmoAction });
+        this.activeGizmoAction = null;
+      }
+      this.pressedHit = null;
       this.drag = null;
       this.pointerStart = null;
+    });
+    this.canvas.addEventListener("pointerleave", () => {
+      if (!this.drag) this.setHoverHit(null);
     });
     this.canvas.addEventListener("wheel", (event) => {
       event.preventDefault();
       this.distance = clamp(this.distance * (1 + event.deltaY * 0.001), 25, 1200);
     }, { passive: false });
+  }
+
+  setHoverHit(hit) {
+    const interactiveTypes = ["plate", "add-plate", "model", "plate-action", "gizmo"];
+    this.hoveredHit = hit && interactiveTypes.includes(hit.type) ? hit : null;
+    this.canvas.style.cursor = hit && interactiveTypes.includes(hit.type) ? "pointer" : "default";
   }
 
   scheduleResize({ recenter = false } = {}) {
@@ -2126,6 +3509,29 @@ class Viewer {
     }
   }
 
+  orbit(dx, dy) {
+    this.centerOnOrbitFocus();
+    this.yaw -= dx * 0.008;
+    this.pitch = clamp(this.pitch - dy * 0.006, deg(10), deg(82));
+  }
+
+  centerOnOrbitFocus() {
+    if (this.activePartFocus) {
+      this.target = [...this.activePartFocus];
+      return;
+    }
+    if (this.activePlateFocus) this.target = [...this.activePlateFocus];
+  }
+
+  centerOnBuildPlate(plate) {
+    if (!plate) return;
+    this.target = [
+      plate.origin.x + (plate.settings.printer.sizeX || 120) / 2,
+      plate.origin.y + (plate.settings.printer.sizeY || 67.5) / 2,
+      Math.min(35, (plate.settings.printer.sizeZ || 160) / 3)
+    ];
+  }
+
   screenDeltaToBuildPlane(dx, dy) {
     const zAxis = normalize([
       Math.cos(this.pitch) * Math.sin(this.yaw),
@@ -2146,10 +3552,14 @@ class Viewer {
     const dpr = window.devicePixelRatio || 1;
     const width = Math.max(1, Math.floor(rect.width * dpr));
     const height = Math.max(1, Math.floor(rect.height * dpr));
-    this.canvas.width = width;
-    this.canvas.height = height;
-    this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    const changed = this.canvas.width !== width || this.canvas.height !== height;
+    if (changed) {
+      this.canvas.width = width;
+      this.canvas.height = height;
+      this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    }
     if (recenter) this.recenter();
+    if (changed || recenter) this.renderFrame();
   }
 
   setBed(x, y, z) {
@@ -2161,26 +3571,85 @@ class Viewer {
   }
 
   setScene(scene) {
-    this.bed = combinedSceneBed(scene.plates);
+    this.scene = scene;
+    this.bed = combinedSceneBed([...scene.plates, scene.nextPlate].filter(Boolean));
+    const activePlate = scene.plates.find((plate) => plate.active);
+    this.activePlateFocus = activePlate
+      ? [
+        activePlate.origin.x + activePlate.bed.x / 2,
+        activePlate.origin.y + activePlate.bed.y / 2,
+        Math.min(35, activePlate.bed.z / 3)
+      ]
+      : null;
+    this.activePartFocus = scene.transformGizmo?.center ? [...scene.transformGizmo.center] : null;
     this.meshes.plates = scene.plates.map((plate) => ({
       id: plate.id,
+      active: plate.active,
       bounds: {
         minX: plate.origin.x,
         minY: plate.origin.y,
-        minZ: 0,
+        minZ: Math.min(0, plate.visual?.z || 0),
         maxX: plate.origin.x + plate.bed.x,
         maxY: plate.origin.y + plate.bed.y,
-        maxZ: 0.05
+        maxZ: Math.max(0.05, (plate.visual?.z || 0) + 0.05)
       },
-      bed: makeMesh(this.gl, makeBedGeometry(plate.bed, plate.origin), plate.active ? [0.36, 0.43, 0.5, 1] : [0.24, 0.27, 0.3, 1], this.gl.TRIANGLES),
-      grid: makeMesh(this.gl, makeGridGeometry(plate.bed, plate.origin), plate.active ? [0.58, 0.66, 0.72, 1] : [0.34, 0.38, 0.42, 1], this.gl.LINES)
+      bed: makeMesh(this.gl, makeBedGeometry(plate.bed, plate.origin, plate.visual), plate.active ? [0.36, 0.43, 0.5, 1] : [0.24, 0.27, 0.3, 1], this.gl.TRIANGLES),
+      border: makeMesh(this.gl, makeRoundedPlateBorderGeometry(plate.bed, plate.origin, plate.visual), plate.active ? [0.42, 0.67, 0.95, 1] : [0.20, 0.27, 0.33, 1], this.gl.TRIANGLES),
+      actions: makeBuildPlateActionMeshes(this.gl, plate)
     }));
-    this.meshes.models = scene.models.map((item) => ({
-      id: item.id,
-      plateId: item.plateId,
-      bounds: item.bounds,
-      mesh: makeMesh(this.gl, { vertices: item.mesh.vertices, normals: item.mesh.normals }, item.color, this.gl.TRIANGLES, { clip: scene.clip.enabled })
-    }));
+    this.meshes.nextPlate = scene.nextPlate ? {
+      id: scene.nextPlate.id,
+      bounds: {
+        minX: scene.nextPlate.origin.x,
+        minY: scene.nextPlate.origin.y,
+        minZ: 0,
+        maxX: scene.nextPlate.origin.x + scene.nextPlate.bed.x,
+        maxY: scene.nextPlate.origin.y + scene.nextPlate.bed.y,
+        maxZ: 1.1
+      },
+      bed: makeMesh(this.gl, makeBedGeometry(scene.nextPlate.bed, scene.nextPlate.origin, scene.nextPlate.visual), [0.09, 0.125, 0.15, 1], this.gl.TRIANGLES),
+      border: makeMesh(this.gl, makeRoundedPlateBorderGeometry(scene.nextPlate.bed, scene.nextPlate.origin, scene.nextPlate.visual), [0.24, 0.34, 0.4, 1], this.gl.TRIANGLES),
+      plusPad: makeMesh(this.gl, makePlatePlusPadGeometry(scene.nextPlate.bed, scene.nextPlate.origin), [0.14, 0.195, 0.23, 1], this.gl.TRIANGLES),
+      plusOutline: makeMesh(this.gl, makePlatePlusOutlineGeometry(scene.nextPlate.bed, scene.nextPlate.origin), [0.4, 0.55, 0.64, 1], this.gl.TRIANGLES),
+      plus: makeMesh(this.gl, makePlatePlusGeometry(scene.nextPlate.bed, scene.nextPlate.origin), [0.82, 0.93, 1.0, 1], this.gl.TRIANGLES)
+    } : null;
+    const liveModelIds = new Set();
+    this.meshes.models = scene.models.map((item) => {
+      liveModelIds.add(item.id);
+      let cached = this.modelMeshCache.get(item.id);
+      if (!cached || cached.geometryKey !== item.geometryKey) {
+        cached = {
+          geometryKey: item.geometryKey,
+          mesh: makeMesh(this.gl, { vertices: item.mesh.vertices, normals: item.mesh.normals }, item.color, this.gl.TRIANGLES, {
+            clip: scene.clip.enabled,
+            offset: item.offset,
+            modelOrigin: item.modelOrigin,
+            modelRotation: item.modelRotation,
+            modelScale: item.modelScale,
+            scale: item.scale,
+            scaleOrigin: item.scaleOrigin
+          })
+        };
+        this.modelMeshCache.set(item.id, cached);
+      }
+      cached.mesh.color = item.color;
+      cached.mesh.clip = scene.clip.enabled;
+      cached.mesh.offset = item.offset || [0, 0, 0];
+      cached.mesh.modelOrigin = item.modelOrigin || [0, 0, 0];
+      cached.mesh.modelRotation = item.modelRotation || [0, 0, 0];
+      cached.mesh.modelScale = item.modelScale || 1;
+      cached.mesh.scale = item.scale || [1, 1, 1];
+      cached.mesh.scaleOrigin = item.scaleOrigin || [0, 0, 0];
+      return {
+        id: item.id,
+        plateId: item.plateId,
+        bounds: item.bounds,
+        mesh: cached.mesh
+      };
+    });
+    for (const id of this.modelMeshCache.keys()) {
+      if (!liveModelIds.has(id)) this.modelMeshCache.delete(id);
+    }
     this.meshes.selection = scene.selectionBoxes.length
       ? makeMesh(this.gl, makeSelectionBoxGeometry(scene.selectionBoxes), [1.0, 0.86, 0.26, 1], this.gl.LINES)
       : null;
@@ -2195,21 +3664,53 @@ class Viewer {
     this.meshes.layerLines = scene.clip.enabled && scene.clip.showLayer && scene.clip.layerLines
       ? makeMesh(this.gl, scene.clip.layerLines, [1.0, 0.95, 0.45, 1], this.gl.LINES)
       : null;
+    this.meshes.gizmo = scene.transformGizmo ? makeTransformGizmo(this.gl, scene.transformGizmo) : null;
     this.clipZ = scene.clip.z;
+    const plateActionPickables = this.meshes.plates.flatMap((plate) => (plate.actions || []).map((action) => ({
+      type: "plate-action",
+      id: `${plate.id}:${action.action}`,
+      plateId: plate.id,
+      action: action.action,
+      bounds: action.bounds
+    })));
+    const gizmoPickables = this.meshes.gizmo
+      ? this.meshes.gizmo.features.map((feature) => ({
+        type: "gizmo",
+        id: feature.action,
+        action: feature.action,
+        bounds: feature.bounds,
+        pickPoints: feature.pickPoints,
+        pickPadding: feature.pickPadding
+      }))
+      : [];
     this.pickables = [
+      ...gizmoPickables,
       ...scene.models.map((item) => ({ type: "model", id: item.id, plateId: item.plateId, bounds: item.bounds })),
+      ...plateActionPickables,
       ...scene.plates.map((plate) => ({
         type: "plate",
         id: plate.id,
         bounds: {
           minX: plate.origin.x,
           minY: plate.origin.y,
-          minZ: 0,
+          minZ: Math.min(0, plate.visual?.z || 0),
           maxX: plate.origin.x + plate.bed.x,
           maxY: plate.origin.y + plate.bed.y,
+          maxZ: Math.max(0.05, (plate.visual?.z || 0) + 0.05)
+        }
+      })),
+      ...(scene.nextPlate ? [{
+        type: "add-plate",
+        id: scene.nextPlate.id,
+        bounds: {
+          minX: scene.nextPlate.origin.x,
+          minY: scene.nextPlate.origin.y,
+          minZ: 0,
+          maxX: scene.nextPlate.origin.x + scene.nextPlate.bed.x,
+          maxY: scene.nextPlate.origin.y + scene.nextPlate.bed.y,
           maxZ: 0.05
         }
-      }))
+      }] : [])
     ];
     this.distance = Math.max(this.distance, Math.max(this.bed.x, this.bed.y, this.bed.z) * 0.55);
   }
@@ -2240,10 +3741,12 @@ class Viewer {
     this.meshes.supports = makeMesh(this.gl, makeSupportGeometry(items, braces), [1.0, 0.63, 0.18, 1], this.gl.TRIANGLES);
   }
 
-  draw() {
+  renderFrame() {
     const gl = this.gl;
     gl.enable(gl.DEPTH_TEST);
     gl.enable(gl.CULL_FACE);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.clearColor(0.075, 0.09, 0.11, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
@@ -2256,11 +3759,28 @@ class Viewer {
     ];
     const view = lookAt(eye, this.target, [0, 0, 1]);
     const mvp = multiply(projection, view);
+    this.lastMvp = mvp;
     this.updatePickRects(mvp);
 
+    if (this.meshes.nextPlate) {
+      this.applyPlateInteractionColors(this.meshes.nextPlate, "add-plate");
+      drawMesh(gl, this.program, this.meshes.nextPlate.bed, mvp, this.clipZ);
+      drawMesh(gl, this.program, this.meshes.nextPlate.border, mvp, this.clipZ);
+      drawMesh(gl, this.program, this.meshes.nextPlate.plusPad, mvp, this.clipZ);
+      drawMesh(gl, this.program, this.meshes.nextPlate.plusOutline, mvp, this.clipZ);
+      drawMesh(gl, this.program, this.meshes.nextPlate.plus, mvp, this.clipZ);
+    }
     for (const plate of this.meshes.plates || []) {
+      this.applyPlateInteractionColors(plate, "plate");
       drawMesh(gl, this.program, plate.bed, mvp, this.clipZ);
-      drawMesh(gl, this.program, plate.grid, mvp, this.clipZ);
+      drawMesh(gl, this.program, plate.border, mvp, this.clipZ);
+      if (!this.shouldShowPlateActions(plate)) continue;
+      this.applyPlateActionColors(plate);
+      for (const action of plate.actions || []) {
+        drawMesh(gl, this.program, action.pad, mvp, this.clipZ);
+        drawMesh(gl, this.program, action.outline, mvp, this.clipZ);
+        drawMesh(gl, this.program, action.icon, mvp, this.clipZ);
+      }
     }
     if (this.meshes.supports) drawMesh(gl, this.program, this.meshes.supports, mvp, this.clipZ);
     for (const item of this.meshes.models || []) {
@@ -2270,13 +3790,100 @@ class Viewer {
     if (this.meshes.clipPlane) drawMesh(gl, this.program, this.meshes.clipPlane, mvp, this.clipZ);
     if (this.meshes.layerLines) drawMesh(gl, this.program, this.meshes.layerLines, mvp, this.clipZ);
     if (this.meshes.selection) drawMesh(gl, this.program, this.meshes.selection, mvp, this.clipZ);
+    this.drawGizmo(mvp);
+    if (this.onFrame) this.onFrame();
+  }
+
+  draw() {
+    this.renderFrame();
     requestAnimationFrame(() => this.draw());
+  }
+
+  applyPlateInteractionColors(plate, type) {
+    const pressed = this.pressedHit?.type === type && this.pressedHit.id === plate.id;
+    const hovered = this.hoveredHit?.type === type && this.hoveredHit.id === plate.id;
+    if (type === "add-plate") {
+      plate.bed.color = pressed ? [0.06, 0.34, 0.18, 1] : hovered ? [0.12, 0.16, 0.16, 1] : [0.09, 0.125, 0.15, 1];
+      plate.border.color = pressed ? [0.18, 0.92, 0.42, 1] : hovered ? [1.0, 0.86, 0.22, 1] : [0.24, 0.34, 0.4, 1];
+      if (plate.plusPad) plate.plusPad.color = pressed ? [0.08, 0.42, 0.22, 1] : hovered ? [0.20, 0.22, 0.16, 1] : [0.14, 0.195, 0.23, 1];
+      if (plate.plusOutline) plate.plusOutline.color = pressed ? [0.18, 0.92, 0.42, 1] : hovered ? [1.0, 0.86, 0.22, 1] : [0.4, 0.55, 0.64, 1];
+      plate.plus.color = pressed ? [0.68, 1.0, 0.74, 1] : hovered ? [1.0, 0.9, 0.32, 1] : [0.82, 0.93, 1.0, 1];
+      return;
+    }
+    const baseBed = plate.active ? [0.36, 0.43, 0.5, 1] : [0.24, 0.27, 0.3, 1];
+    plate.bed.color = pressed ? [0.08, 0.42, 0.22, 1] : baseBed;
+    plate.border.color = pressed
+      ? [0.18, 0.92, 0.42, 1]
+      : hovered
+        ? [1.0, 0.86, 0.22, 1]
+        : plate.active
+          ? [0.42, 0.67, 0.95, 1]
+          : [0.20, 0.27, 0.33, 1];
+  }
+
+  applyPlateActionColors(plate) {
+    for (const action of plate.actions || []) {
+      const pressed = this.pressedHit?.type === "plate-action"
+        && this.pressedHit.plateId === plate.id
+        && this.pressedHit.action === action.action;
+      const hovered = this.hoveredHit?.type === "plate-action"
+        && this.hoveredHit.plateId === plate.id
+        && this.hoveredHit.action === action.action;
+      action.pad.color = pressed
+        ? [0.08, 0.42, 0.22, 1]
+        : hovered
+          ? [0.28, 0.30, 0.18, 1]
+          : action.padBaseColor;
+      action.outline.color = pressed
+        ? [0.18, 0.92, 0.42, 1]
+        : hovered
+          ? [1.0, 0.86, 0.22, 1]
+          : action.outlineBaseColor;
+      action.icon.color = pressed
+        ? [0.68, 1.0, 0.74, 1]
+        : hovered
+          ? [1.0, 0.9, 0.32, 1]
+          : action.iconBaseColor;
+    }
+  }
+
+  shouldShowPlateActions(plate) {
+    if (plate.active) return true;
+    if (this.hoveredHit?.type === "plate" && this.hoveredHit.id === plate.id) return true;
+    if (this.pressedHit?.type === "plate" && this.pressedHit.id === plate.id) return true;
+    if (this.hoveredHit?.type === "plate-action" && this.hoveredHit.plateId === plate.id) return true;
+    if (this.pressedHit?.type === "plate-action" && this.pressedHit.plateId === plate.id) return true;
+    return false;
+  }
+
+  drawGizmo(mvp) {
+    if (!this.meshes.gizmo) return;
+    const gl = this.gl;
+    const hoveredAction = this.hoveredHit?.type === "gizmo" ? this.hoveredHit.action : null;
+    const activeAction = this.activeGizmoAction;
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.CULL_FACE);
+    for (const feature of this.meshes.gizmo.features) {
+      if (activeAction && feature.action !== activeAction) continue;
+      const state = activeAction || hoveredAction
+        ? (feature.action === (activeAction || hoveredAction) ? "bright" : "dim")
+        : "normal";
+      const mesh = activeAction === feature.action && feature.kind === "rotate" && feature.activeMesh
+        ? feature.activeMesh
+        : feature.mesh;
+      mesh.color = gizmoColor(feature.axis, state);
+      drawMesh(gl, this.program, mesh, mvp, this.clipZ);
+    }
+    gl.enable(gl.CULL_FACE);
+    gl.enable(gl.DEPTH_TEST);
   }
 
   pickAt(clientX, clientY, additive, options = {}) {
     const hit = this.hitAt(clientX, clientY, options);
-    if (hit && this.onScenePick) {
-      this.onScenePick({ type: hit.type, id: hit.id, plateId: hit.plateId, additive });
+    if (this.onScenePick) {
+      this.onScenePick(hit
+        ? { type: hit.type, id: hit.id, plateId: hit.plateId, action: hit.action, additive }
+        : { type: "background", additive });
     }
   }
 
@@ -2285,24 +3892,31 @@ class Viewer {
     const x = clientX - rect.left;
     const y = clientY - rect.top;
     return this.pickRects
-      .filter((item) => !skipModels || item.type !== "model")
+      .filter((item) => !skipModels || !["model", "gizmo"].includes(item.type))
       .filter((item) => x >= item.left && x <= item.right && y >= item.top && y <= item.bottom)
-      .sort((a, b) => (a.type === "model" ? -1 : 1) - (b.type === "model" ? -1 : 1) || a.area - b.area)[0];
+      .sort((a, b) => hitPriority(a) - hitPriority(b) || a.area - b.area)[0];
   }
 
   updatePickRects(mvp) {
     this.pickRects = this.pickables.map((item) => {
-      const points = boundsCorners(item.bounds).map((point) => projectPoint(point, mvp, this.canvas));
+      const sourcePoints = item.pickPoints || boundsCorners(item.bounds);
+      const points = sourcePoints.map((point) => projectPoint(point, mvp, this.canvas));
       const visible = points.filter(Boolean);
       if (!visible.length) return null;
       const xs = visible.map((point) => point[0]);
       const ys = visible.map((point) => point[1]);
-      const left = Math.min(...xs);
-      const right = Math.max(...xs);
-      const top = Math.min(...ys);
-      const bottom = Math.max(...ys);
+      const padding = item.pickPadding || 0;
+      const left = Math.min(...xs) - padding;
+      const right = Math.max(...xs) + padding;
+      const top = Math.min(...ys) - padding;
+      const bottom = Math.max(...ys) + padding;
       return { ...item, left, right, top, bottom, area: Math.max(1, (right - left) * (bottom - top)) };
     }).filter(Boolean);
+  }
+
+  projectWorldPoint(point) {
+    if (!this.lastMvp) return null;
+    return projectPoint(point, this.lastMvp, this.canvas);
   }
 }
 
@@ -2314,26 +3928,340 @@ function combinedSceneBed(plates) {
   return { x: maxX, y: maxY, z: maxZ };
 }
 
-function makeBedGeometry(bed, origin = { x: 0, y: 0 }) {
-  const ox = origin.x || 0;
-  const oy = origin.y || 0;
-  const v = new Float32Array([ox, oy, 0, ox + bed.x, oy, 0, ox + bed.x, oy + bed.y, 0, ox, oy, 0, ox + bed.x, oy + bed.y, 0, ox, oy + bed.y, 0]);
-  const n = new Float32Array(v.length);
-  for (let i = 2; i < n.length; i += 3) n[i] = 1;
-  return { vertices: v, normals: n };
+function makeBedGeometry(bed, origin = { x: 0, y: 0 }, visual = {}) {
+  const path = roundedRectPath(0, 0, bed.x, bed.y, plateCornerRadius(bed), 10);
+  const center = plateVisualPoint(bed.x / 2, bed.y / 2, bed, origin, visual);
+  const vertices = [];
+  const normals = [];
+  for (let i = 0; i < path.length; i++) {
+    const next = (i + 1) % path.length;
+    const a = plateVisualPoint(path[i][0], path[i][1], bed, origin, visual);
+    const b = plateVisualPoint(path[next][0], path[next][1], bed, origin, visual);
+    pushTri(vertices, normals, center, a, b, [0, 0, 1], [0, 0, 1], [0, 0, 1]);
+  }
+  return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
 }
 
-function makeGridGeometry(bed, origin = { x: 0, y: 0 }) {
+function makeGridGeometry(bed, origin = { x: 0, y: 0 }, visual = {}) {
   const values = [];
-  const ox = origin.x || 0;
-  const oy = origin.y || 0;
+  const radius = plateCornerRadius(bed);
   const step = Math.max(5, Math.round(Math.max(bed.x, bed.y) / 16));
-  for (let x = 0; x <= bed.x + 0.01; x += step) values.push(ox + x, oy, 0.03, ox + x, oy + bed.y, 0.03);
-  for (let y = 0; y <= bed.y + 0.01; y += step) values.push(ox, oy + y, 0.03, ox + bed.x, oy + y, 0.03);
+  const gridVisual = { ...visual, z: (visual?.z || 0) + 0.045 };
+  for (let x = 0; x <= bed.x + 0.01; x += step) {
+    const xLocal = Math.min(x, bed.x);
+    const [y0, y1] = roundedRectVerticalSpan(xLocal, bed, radius);
+    if (y1 > y0) values.push(...plateVisualPoint(xLocal, y0, bed, origin, gridVisual), ...plateVisualPoint(xLocal, y1, bed, origin, gridVisual));
+  }
+  for (let y = 0; y <= bed.y + 0.01; y += step) {
+    const yLocal = Math.min(y, bed.y);
+    const [x0, x1] = roundedRectHorizontalSpan(yLocal, bed, radius);
+    if (x1 > x0) values.push(...plateVisualPoint(x0, yLocal, bed, origin, gridVisual), ...plateVisualPoint(x1, yLocal, bed, origin, gridVisual));
+  }
   const vertices = new Float32Array(values);
   const normals = new Float32Array(vertices.length);
   for (let i = 2; i < normals.length; i += 3) normals[i] = 1;
   return { vertices, normals };
+}
+
+function makeRoundedPlateBorderGeometry(bed, origin = { x: 0, y: 0 }, visual = {}) {
+  const border = plateBorderWidth(bed);
+  const radius = plateCornerRadius(bed);
+  const outer = roundedRectPath(-border, -border, bed.x + border, bed.y + border, radius + border, 7);
+  const inner = roundedRectPath(0, 0, bed.x, bed.y, radius, 7);
+  const vertices = [];
+  const normals = [];
+  const borderVisual = { ...visual, z: (visual?.z || 0) + 0.16 };
+  for (let i = 0; i < outer.length; i++) {
+    const next = (i + 1) % outer.length;
+    const a = plateVisualPoint(outer[i][0], outer[i][1], bed, origin, borderVisual);
+    const b = plateVisualPoint(outer[next][0], outer[next][1], bed, origin, borderVisual);
+    const c = plateVisualPoint(inner[next][0], inner[next][1], bed, origin, borderVisual);
+    const d = plateVisualPoint(inner[i][0], inner[i][1], bed, origin, borderVisual);
+    pushTri(vertices, normals, a, b, c, [0, 0, 1], [0, 0, 1], [0, 0, 1]);
+    pushTri(vertices, normals, a, c, d, [0, 0, 1], [0, 0, 1], [0, 0, 1]);
+  }
+  return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
+}
+
+function plateBorderWidth(bed) {
+  return Math.max(2.2, Math.min(bed.x, bed.y) * 0.018);
+}
+
+function plateCornerRadius(bed) {
+  return Math.max(6, Math.min(bed.x, bed.y) * 0.06);
+}
+
+function roundedRectVerticalSpan(x, bed, radius) {
+  let y0 = 0;
+  let y1 = bed.y;
+  if (x < radius) {
+    const cut = roundedRectCut(radius - x, radius);
+    y0 = Math.max(y0, cut);
+    y1 = Math.min(y1, bed.y - cut);
+  } else if (x > bed.x - radius) {
+    const cut = roundedRectCut(x - (bed.x - radius), radius);
+    y0 = Math.max(y0, cut);
+    y1 = Math.min(y1, bed.y - cut);
+  }
+  return [y0, y1];
+}
+
+function roundedRectHorizontalSpan(y, bed, radius) {
+  let x0 = 0;
+  let x1 = bed.x;
+  if (y < radius) {
+    const cut = roundedRectCut(radius - y, radius);
+    x0 = Math.max(x0, cut);
+    x1 = Math.min(x1, bed.x - cut);
+  } else if (y > bed.y - radius) {
+    const cut = roundedRectCut(y - (bed.y - radius), radius);
+    x0 = Math.max(x0, cut);
+    x1 = Math.min(x1, bed.x - cut);
+  }
+  return [x0, x1];
+}
+
+function roundedRectCut(distanceFromCornerCenter, radius) {
+  return radius - Math.sqrt(Math.max(0, radius * radius - distanceFromCornerCenter * distanceFromCornerCenter));
+}
+
+function roundedRectPath(x0, y0, x1, y1, radius, segments) {
+  const r = Math.min(radius, Math.abs(x1 - x0) / 2, Math.abs(y1 - y0) / 2);
+  const corners = [
+    { cx: x1 - r, cy: y0 + r, start: -Math.PI / 2, end: 0 },
+    { cx: x1 - r, cy: y1 - r, start: 0, end: Math.PI / 2 },
+    { cx: x0 + r, cy: y1 - r, start: Math.PI / 2, end: Math.PI },
+    { cx: x0 + r, cy: y0 + r, start: Math.PI, end: Math.PI * 1.5 }
+  ];
+  const points = [];
+  for (const corner of corners) {
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments;
+      const angle = corner.start + (corner.end - corner.start) * t;
+      points.push([corner.cx + Math.cos(angle) * r, corner.cy + Math.sin(angle) * r]);
+    }
+  }
+  return points;
+}
+
+function makePlatePlusGeometry(bed, origin = { x: 0, y: 0 }) {
+  const size = Math.max(14, Math.min(bed.x, bed.y) * 0.16);
+  const thick = Math.max(3, size * 0.22);
+  const cx = bed.x / 2;
+  const cy = bed.y / 2;
+  return combineGeometry([
+    makeLocalRectGeometry(cx - size / 2, cy - thick / 2, cx + size / 2, cy + thick / 2, bed, origin, 0.78),
+    makeLocalRectGeometry(cx - thick / 2, cy - size / 2, cx + thick / 2, cy + size / 2, bed, origin, 0.98)
+  ]);
+}
+
+function makePlatePlusPadGeometry(bed, origin = { x: 0, y: 0 }) {
+  const rect = platePlusPadRect(bed);
+  return makeLocalRoundedRectGeometry(rect, bed, origin, { z: 0 }, 0.34);
+}
+
+function makePlatePlusOutlineGeometry(bed, origin = { x: 0, y: 0 }) {
+  const rect = platePlusPadRect(bed);
+  rect.outlineWidth = Math.max(2, Math.min(bed.x, bed.y) * 0.018);
+  return makeLocalRoundedRectBorderGeometry(rect, bed, origin, { z: 0 }, 0.54);
+}
+
+function platePlusPadRect(bed) {
+  const size = Math.max(22, Math.min(bed.x, bed.y) * 0.28);
+  const cx = bed.x / 2;
+  const cy = bed.y / 2;
+  return {
+    x0: cx - size / 2,
+    y0: cy - size / 2,
+    x1: cx + size / 2,
+    y1: cy + size / 2,
+    radius: Math.max(4, size * 0.18)
+  };
+}
+
+function makeBuildPlateActionMeshes(gl, plate) {
+  const layout = plateActionLayout(plate.bed);
+  return ["add", "delete"].map((action) => {
+    const layers = buildPlateActionLayers(action);
+    const padGeometry = makeLocalRoundedRectGeometry(layout[action], plate.bed, plate.origin, plate.visual, layers.pad);
+    const outlineGeometry = makeLocalRoundedRectBorderGeometry(layout[action], plate.bed, plate.origin, plate.visual, layers.outline);
+    const iconGeometry = action === "add"
+      ? makePlateActionPlusIconGeometry(layout[action], plate.bed, plate.origin, plate.visual, layers)
+      : makePlateActionTrashIconGeometry(layout[action], plate.bed, plate.origin, plate.visual, layers);
+    return {
+      action,
+      bounds: localRectBounds(expandRect(layout[action], layout.outlineWidth || 2), plate.bed, plate.origin, plate.visual, layers.pad, 10),
+      padBaseColor: action === "delete" ? [0.28, 0.14, 0.15, 1] : [0.16, 0.25, 0.34, 1],
+      outlineBaseColor: [0.42, 0.67, 0.95, 1],
+      iconBaseColor: action === "delete" ? [1.0, 0.55, 0.55, 1] : [0.78, 0.9, 1.0, 1],
+      pad: makeMesh(gl, padGeometry, action === "delete" ? [0.28, 0.14, 0.15, 1] : [0.16, 0.25, 0.34, 1], gl.TRIANGLES),
+      outline: makeMesh(gl, outlineGeometry, [0.42, 0.67, 0.95, 1], gl.TRIANGLES),
+      icon: makeMesh(gl, iconGeometry, action === "delete" ? [1.0, 0.55, 0.55, 1] : [0.78, 0.9, 1.0, 1], gl.TRIANGLES)
+    };
+  });
+}
+
+function buildPlateActionLayers(action) {
+  const z = action === "delete" ? 0.16 : 0;
+  return {
+    pad: 3.2 + z,
+    outline: 3.62 + z,
+    iconA: 5.15 + z,
+    iconB: 5.58 + z,
+    iconC: 6.02 + z
+  };
+}
+
+function plateActionLayout(bed) {
+  const size = clamp(Math.min(bed.x, bed.y) * 0.15, 16, 28);
+  const outlineWidth = Math.max(2.4, size * 0.16);
+  const plateGap = Math.max(3.4, size * 0.32);
+  const buttonGap = Math.max(3.2, size * 0.28) + outlineWidth * 2;
+  const x0 = bed.x + plateBorderWidth(bed) + plateGap + outlineWidth;
+  const x1 = x0 + size;
+  const addY1 = bed.y - plateBorderWidth(bed) - plateGap - outlineWidth;
+  const addY0 = addY1 - size;
+  const deleteY1 = addY0 - buttonGap;
+  const deleteY0 = deleteY1 - size;
+  return {
+    add: { x0, y0: addY0, x1, y1: addY1, radius: size * 0.22, outlineWidth },
+    delete: { x0, y0: deleteY0, x1, y1: deleteY1, radius: size * 0.22, outlineWidth },
+    outlineWidth
+  };
+}
+
+function makePlateActionPlusIconGeometry(rect, bed, origin, visual, layers) {
+  const size = Math.min(rect.x1 - rect.x0, rect.y1 - rect.y0);
+  const thick = size * 0.18;
+  const cx = (rect.x0 + rect.x1) / 2;
+  const cy = (rect.y0 + rect.y1) / 2;
+  return combineGeometry([
+    makeVisualLocalRectGeometry(cx - size * 0.28, cy - thick / 2, cx + size * 0.28, cy + thick / 2, bed, origin, visual, layers.iconA),
+    makeVisualLocalRectGeometry(cx - thick / 2, cy - size * 0.28, cx + thick / 2, cy + size * 0.28, bed, origin, visual, layers.iconB)
+  ]);
+}
+
+function makePlateActionTrashIconGeometry(rect, bed, origin, visual, layers) {
+  const size = Math.min(rect.x1 - rect.x0, rect.y1 - rect.y0);
+  const cx = (rect.x0 + rect.x1) / 2;
+  const cy = (rect.y0 + rect.y1) / 2;
+  return combineGeometry([
+    makeVisualLocalRectGeometry(cx - size * 0.24, cy - size * 0.18, cx + size * 0.24, cy + size * 0.20, bed, origin, visual, layers.iconA),
+    makeVisualLocalRectGeometry(cx - size * 0.30, cy + size * 0.25, cx + size * 0.30, cy + size * 0.34, bed, origin, visual, layers.iconB),
+    makeVisualLocalRectGeometry(cx - size * 0.12, cy + size * 0.36, cx + size * 0.12, cy + size * 0.43, bed, origin, visual, layers.iconC)
+  ]);
+}
+
+function makeLocalRoundedRectGeometry(rect, bed, origin, visual, zOffset) {
+  const path = roundedRectPath(rect.x0, rect.y0, rect.x1, rect.y1, rect.radius || 0, 5);
+  const center = plateVisualPoint((rect.x0 + rect.x1) / 2, (rect.y0 + rect.y1) / 2, bed, origin, { ...visual, z: (visual?.z || 0) + zOffset });
+  const vertices = [];
+  const normals = [];
+  const localVisual = { ...visual, z: (visual?.z || 0) + zOffset };
+  for (let i = 0; i < path.length; i++) {
+    const next = (i + 1) % path.length;
+    const a = plateVisualPoint(path[i][0], path[i][1], bed, origin, localVisual);
+    const b = plateVisualPoint(path[next][0], path[next][1], bed, origin, localVisual);
+    pushTri(vertices, normals, center, a, b, [0, 0, 1], [0, 0, 1], [0, 0, 1]);
+  }
+  return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
+}
+
+function makeLocalRoundedRectBorderGeometry(rect, bed, origin, visual, zOffset) {
+  const width = rect.outlineWidth || Math.max(1.6, Math.min(rect.x1 - rect.x0, rect.y1 - rect.y0) * 0.16);
+  const outerRect = expandRect(rect, width);
+  const innerRadius = rect.radius || 0;
+  const outerRadius = innerRadius + width;
+  const outer = roundedRectPath(outerRect.x0, outerRect.y0, outerRect.x1, outerRect.y1, outerRadius, 5);
+  const inner = roundedRectPath(rect.x0, rect.y0, rect.x1, rect.y1, innerRadius, 5);
+  const vertices = [];
+  const normals = [];
+  const localVisual = { ...visual, z: (visual?.z || 0) + zOffset };
+  for (let i = 0; i < outer.length; i++) {
+    const next = (i + 1) % outer.length;
+    const a = plateVisualPoint(outer[i][0], outer[i][1], bed, origin, localVisual);
+    const b = plateVisualPoint(outer[next][0], outer[next][1], bed, origin, localVisual);
+    const c = plateVisualPoint(inner[next][0], inner[next][1], bed, origin, localVisual);
+    const d = plateVisualPoint(inner[i][0], inner[i][1], bed, origin, localVisual);
+    pushTri(vertices, normals, a, b, c, [0, 0, 1], [0, 0, 1], [0, 0, 1]);
+    pushTri(vertices, normals, a, c, d, [0, 0, 1], [0, 0, 1], [0, 0, 1]);
+  }
+  return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
+}
+
+function expandRect(rect, amount) {
+  return {
+    x0: rect.x0 - amount,
+    y0: rect.y0 - amount,
+    x1: rect.x1 + amount,
+    y1: rect.y1 + amount,
+    radius: (rect.radius || 0) + amount
+  };
+}
+
+function makeVisualLocalRectGeometry(x0, y0, x1, y1, bed, origin, visual, zOffset) {
+  const localVisual = { ...visual, z: (visual?.z || 0) + zOffset };
+  const vertices = new Float32Array([
+    ...plateVisualPoint(x0, y0, bed, origin, localVisual),
+    ...plateVisualPoint(x1, y0, bed, origin, localVisual),
+    ...plateVisualPoint(x1, y1, bed, origin, localVisual),
+    ...plateVisualPoint(x0, y0, bed, origin, localVisual),
+    ...plateVisualPoint(x1, y1, bed, origin, localVisual),
+    ...plateVisualPoint(x0, y1, bed, origin, localVisual)
+  ]);
+  const normals = new Float32Array(vertices.length);
+  for (let i = 2; i < normals.length; i += 3) normals[i] = 1;
+  return { vertices, normals };
+}
+
+function localRectBounds(rect, bed, origin, visual, zOffset, zPadding = 0) {
+  const localVisual = { ...visual, z: (visual?.z || 0) + zOffset };
+  const points = [
+    plateVisualPoint(rect.x0, rect.y0, bed, origin, localVisual),
+    plateVisualPoint(rect.x1, rect.y0, bed, origin, localVisual),
+    plateVisualPoint(rect.x1, rect.y1, bed, origin, localVisual),
+    plateVisualPoint(rect.x0, rect.y1, bed, origin, localVisual)
+  ];
+  const xs = points.map((point) => point[0]);
+  const ys = points.map((point) => point[1]);
+  const zs = points.map((point) => point[2]);
+  return {
+    minX: Math.min(...xs),
+    minY: Math.min(...ys),
+    minZ: Math.min(...zs) - 0.5,
+    maxX: Math.max(...xs),
+    maxY: Math.max(...ys),
+    maxZ: Math.max(...zs) + zPadding
+  };
+}
+
+function makeLocalRectGeometry(x0, y0, x1, y1, bed, origin, z) {
+  const visual = { z };
+  const vertices = new Float32Array([
+    ...plateVisualPoint(x0, y0, bed, origin, visual),
+    ...plateVisualPoint(x1, y0, bed, origin, visual),
+    ...plateVisualPoint(x1, y1, bed, origin, visual),
+    ...plateVisualPoint(x0, y0, bed, origin, visual),
+    ...plateVisualPoint(x1, y1, bed, origin, visual),
+    ...plateVisualPoint(x0, y1, bed, origin, visual)
+  ]);
+  const normals = new Float32Array(vertices.length);
+  for (let i = 2; i < normals.length; i += 3) normals[i] = 1;
+  return { vertices, normals };
+}
+
+function plateVisualPoint(x, y, bed, origin = { x: 0, y: 0 }, visual = {}) {
+  const ox = origin.x || 0;
+  const oy = origin.y || 0;
+  const centerX = ox + bed.x / 2;
+  const centerY = oy + bed.y / 2;
+  const scaleX = visual.scaleX || 1;
+  const scaleY = visual.scaleY || 1;
+  return [
+    centerX + (ox + x - centerX) * scaleX,
+    centerY + (oy + y - centerY) * scaleY,
+    visual.z || 0
+  ];
 }
 
 function makeClipPlaneGeometry(plate, z) {
@@ -2519,12 +4447,300 @@ function combineGeometry(items) {
   return { vertices, normals };
 }
 
+const GIZMO_ARC_START = Math.PI * 15 / 180;
+const GIZMO_ARC_END = Math.PI * 75 / 180;
+const GIZMO_ARC_SWEEP = GIZMO_ARC_END - GIZMO_ARC_START;
+
+function makeTransformGizmo(gl, gizmo) {
+  const moveLength = gizmo.length;
+  const arcRadius = gizmo.length * 0.82;
+  const stroke = Math.max(1.1, gizmo.radius * 3.6);
+  const specs = [
+    { action: "move-x", axis: "x", kind: "move" },
+    { action: "move-y", axis: "y", kind: "move" },
+    { action: "move-z", axis: "z", kind: "move" },
+    { action: "move-yz", axis: "x", kind: "plane" },
+    { action: "move-xz", axis: "y", kind: "plane" },
+    { action: "move-xy", axis: "z", kind: "plane" },
+    { action: "rotate-x", axis: "x", kind: "rotate" },
+    { action: "rotate-y", axis: "y", kind: "rotate" },
+    { action: "rotate-z", axis: "z", kind: "rotate" }
+  ];
+  return {
+    features: specs.map((spec) => {
+      const geometry = spec.kind === "move"
+        ? makeGizmoMoveGeometry(gizmo.center, spec.axis, moveLength, stroke)
+        : spec.kind === "plane"
+          ? makeGizmoPlaneSquareGeometry(gizmo.center, spec.axis, moveLength, stroke)
+          : makeGizmoArcGeometry(gizmo.center, spec.axis, arcRadius, stroke * 0.58);
+      const activeGeometry = spec.kind === "rotate"
+        ? makeGizmoArcGeometry(gizmo.center, spec.axis, arcRadius, stroke * 0.58, { fullCircle: true })
+        : null;
+      const points = gizmoFeaturePoints(gizmo.center, spec, moveLength, arcRadius, stroke);
+      return {
+        ...spec,
+        bounds: boundsFromPoints(points, Math.max(4, stroke * 3.2)),
+        pickPoints: points,
+        pickPadding: spec.kind === "plane" ? Math.max(4, stroke * 1.8) : Math.max(6, stroke * 2.4),
+        mesh: makeMesh(gl, geometry, gizmoColor(spec.axis, "normal"), gl.TRIANGLES, { unlit: true }),
+        activeMesh: activeGeometry ? makeMesh(gl, activeGeometry, gizmoColor(spec.axis, "normal"), gl.TRIANGLES, { unlit: true }) : null
+      };
+    })
+  };
+}
+
+function makeGizmoMoveGeometry(center, axis, lengthValue, stroke) {
+  const vertices = [];
+  const normals = [];
+  const direction = gizmoAxisDirection(axis);
+  const normal = gizmoMovePlaneNormal(axis);
+  const lateral = normalize(cross(normal, direction));
+  const startAlong = stroke * 1.1;
+  const shaftEndAlong = lengthValue * 0.72;
+  const tipAlong = lengthValue;
+  const halfStroke = stroke * 0.5;
+  const headHalf = stroke * 1.45;
+  const shoulder = Math.min(stroke * 0.72, (headHalf - halfStroke) * 0.6, (tipAlong - shaftEndAlong) * 0.24);
+  const toPoint = (along, side) => add(center, add(scaleVec(direction, along), scaleVec(lateral, side)));
+  const path = [
+    toPoint(tipAlong, 0),
+    toPoint(shaftEndAlong + shoulder * 0.78, headHalf - shoulder * 0.18),
+    toPoint(shaftEndAlong + shoulder * 0.28, headHalf - shoulder * 0.58),
+    toPoint(shaftEndAlong, headHalf - shoulder),
+    toPoint(shaftEndAlong, halfStroke)
+  ];
+  const capSegments = 9;
+  for (let i = 0; i <= capSegments; i++) {
+    const angle = Math.PI / 2 + (i / capSegments) * Math.PI;
+    path.push(toPoint(startAlong + Math.cos(angle) * halfStroke, Math.sin(angle) * halfStroke));
+  }
+  path.push(
+    toPoint(shaftEndAlong, -halfStroke),
+    toPoint(shaftEndAlong, -headHalf + shoulder),
+    toPoint(shaftEndAlong + shoulder * 0.28, -headHalf + shoulder * 0.58),
+    toPoint(shaftEndAlong + shoulder * 0.78, -headHalf + shoulder * 0.18)
+  );
+  pushFlatPolygon(vertices, normals, path, normal);
+  return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
+}
+
+function makeGizmoArcGeometry(center, axis, radius, stroke, { fullCircle = false } = {}) {
+  const vertices = [];
+  const normals = [];
+  const normal = gizmoAxisDirection(axis);
+  const [u, v] = gizmoArcBasis(axis);
+  const innerRadius = Math.max(0.1, radius - stroke * 0.5);
+  const outerRadius = radius + stroke * 0.5;
+  const startAngle = fullCircle ? 0 : GIZMO_ARC_START;
+  const endAngle = fullCircle ? Math.PI * 2 : GIZMO_ARC_END;
+  const segments = fullCircle ? 72 : 18;
+  for (let i = 0; i < segments; i++) {
+    const a0 = startAngle + (i / segments) * (endAngle - startAngle);
+    const a1 = startAngle + ((i + 1) / segments) * (endAngle - startAngle);
+    pushFlatQuad(
+      vertices,
+      normals,
+      gizmoArcPoint(center, u, v, innerRadius, a0),
+      gizmoArcPoint(center, u, v, outerRadius, a0),
+      gizmoArcPoint(center, u, v, outerRadius, a1),
+      gizmoArcPoint(center, u, v, innerRadius, a1),
+      normal
+    );
+  }
+  if (!fullCircle) {
+    addGizmoArcCap(vertices, normals, center, u, v, radius, stroke, startAngle, -1, normal);
+    addGizmoArcCap(vertices, normals, center, u, v, radius, stroke, endAngle, 1, normal);
+  }
+  return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
+}
+
+function addGizmoArcCap(vertices, normals, center, u, v, radius, stroke, angle, tangentSign, normal) {
+  const capCenter = gizmoArcPoint(center, u, v, radius, angle);
+  const radial = normalize(add(scaleVec(u, Math.cos(angle)), scaleVec(v, Math.sin(angle))));
+  const tangent = normalize(add(scaleVec(u, -Math.sin(angle)), scaleVec(v, Math.cos(angle))));
+  const halfStroke = stroke * 0.5;
+  const points = [];
+  const segments = 8;
+  for (let i = 0; i <= segments; i++) {
+    const theta = (i / segments) * Math.PI;
+    points.push(add(
+      capCenter,
+      add(
+        scaleVec(radial, Math.cos(theta) * halfStroke),
+        scaleVec(tangent, Math.sin(theta) * halfStroke * tangentSign)
+      )
+    ));
+  }
+  for (let i = 0; i < points.length - 1; i++) {
+    pushFlatTriangle(vertices, normals, capCenter, points[i], points[i + 1], normal);
+  }
+}
+
+function makeGizmoPlaneSquareGeometry(center, lockedAxis, lengthValue, stroke) {
+  const vertices = [];
+  const normals = [];
+  const { squareCenter, u, v, halfSize, radius, normal } = gizmoPlaneSquareMetrics(center, lockedAxis, lengthValue, stroke);
+  const path = roundedRectPath(-halfSize, -halfSize, halfSize, halfSize, radius, 5);
+  for (let i = 0; i < path.length; i++) {
+    const next = (i + 1) % path.length;
+    pushFlatTriangle(
+      vertices,
+      normals,
+      squareCenter,
+      add(squareCenter, add(scaleVec(u, path[i][0]), scaleVec(v, path[i][1]))),
+      add(squareCenter, add(scaleVec(u, path[next][0]), scaleVec(v, path[next][1]))),
+      normal
+    );
+  }
+  return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
+}
+
+function gizmoFeaturePoints(center, spec, moveLength, arcRadius, stroke) {
+  if (spec.kind === "move") {
+    return [center, add(center, scaleVec(gizmoAxisDirection(spec.axis), moveLength))];
+  }
+  if (spec.kind === "plane") {
+    return gizmoPlaneSquareCorners(center, spec.axis, moveLength, stroke);
+  }
+  return gizmoArcPoints(center, spec.axis, arcRadius, 10);
+}
+
+function gizmoPlaneSquareCorners(center, lockedAxis, lengthValue, stroke) {
+  const { squareCenter, u, v, halfSize } = gizmoPlaneSquareMetrics(center, lockedAxis, lengthValue, stroke);
+  return [
+    add(squareCenter, add(scaleVec(u, -halfSize), scaleVec(v, -halfSize))),
+    add(squareCenter, add(scaleVec(u, halfSize), scaleVec(v, -halfSize))),
+    add(squareCenter, add(scaleVec(u, halfSize), scaleVec(v, halfSize))),
+    add(squareCenter, add(scaleVec(u, -halfSize), scaleVec(v, halfSize)))
+  ];
+}
+
+function gizmoPlaneSquareMetrics(center, lockedAxis, lengthValue, stroke) {
+  const [u, v] = gizmoPlaneAxes(lockedAxis);
+  const halfSize = Math.max(stroke * 1.125, lengthValue * 0.0525);
+  const gap = Math.max(stroke * 0.35, lengthValue * 0.018);
+  const offset = stroke * 1.1 + halfSize + gap;
+  const squareCenter = add(center, add(scaleVec(u, offset), scaleVec(v, offset)));
+  return {
+    squareCenter,
+    u,
+    v,
+    halfSize,
+    radius: halfSize * 0.28,
+    normal: gizmoAxisDirection(lockedAxis)
+  };
+}
+
+function gizmoArcPoint(center, u, v, radius, angle) {
+  return add(center, add(scaleVec(u, Math.cos(angle) * radius), scaleVec(v, Math.sin(angle) * radius)));
+}
+
+function gizmoArcPoints(center, axis, radius, segments) {
+  const [u, v] = gizmoArcBasis(axis);
+  const points = [];
+  for (let i = 0; i <= segments; i++) {
+    const angle = GIZMO_ARC_START + (i / segments) * GIZMO_ARC_SWEEP;
+    points.push(gizmoArcPoint(center, u, v, radius, angle));
+  }
+  return points;
+}
+
+function gizmoAxisDirection(axis) {
+  if (axis === "x") return [1, 0, 0];
+  if (axis === "y") return [0, 1, 0];
+  return [0, 0, 1];
+}
+
+function gizmoArcBasis(axis) {
+  if (axis === "x") return [[0, 1, 0], [0, 0, 1]];
+  if (axis === "y") return [[1, 0, 0], [0, 0, 1]];
+  return [[1, 0, 0], [0, 1, 0]];
+}
+
+function gizmoPlaneAxes(lockedAxis) {
+  if (lockedAxis === "x") return [[0, 1, 0], [0, 0, 1]];
+  if (lockedAxis === "y") return [[1, 0, 0], [0, 0, 1]];
+  return [[1, 0, 0], [0, 1, 0]];
+}
+
+function gizmoMovePlaneNormal(axis) {
+  return axis === "z" ? [0, 1, 0] : [0, 0, 1];
+}
+
+function pushFlatQuad(vertices, normals, a, b, c, d, normal) {
+  pushTri(vertices, normals, a, b, c, normal, normal, normal);
+  pushTri(vertices, normals, a, c, d, normal, normal, normal);
+}
+
+function pushFlatTriangle(vertices, normals, a, b, c, normal) {
+  pushTri(vertices, normals, a, b, c, normal, normal, normal);
+}
+
+function pushFlatPolygon(vertices, normals, points, normal) {
+  if (points.length < 3) return;
+  const center = points.reduce((sum, point) => add(sum, point), [0, 0, 0]).map((value) => value / points.length);
+  for (let i = 0; i < points.length; i++) {
+    pushFlatTriangle(vertices, normals, center, points[i], points[(i + 1) % points.length], normal);
+  }
+}
+
+function gizmoColor(axis, state) {
+  const palette = {
+    x: {
+      normal: [0.75, 0.16, 0.16, 0.5],
+      bright: [1.0, 0.22, 0.22, 0.5],
+      dim: [0.5, 0.09, 0.09, 0.5]
+    },
+    y: {
+      normal: [0.16, 0.75, 0.16, 0.5],
+      bright: [0.22, 1.0, 0.22, 0.5],
+      dim: [0.09, 0.5, 0.09, 0.5]
+    },
+    z: {
+      normal: [0.18, 0.34, 0.75, 0.5],
+      bright: [0.26, 0.5, 1.0, 0.5],
+      dim: [0.10, 0.18, 0.5, 0.5]
+    }
+  };
+  return palette[axis]?.[state] || [0.75, 0.75, 0.75, 0.5];
+}
+
+function boundsFromPoints(points, padding) {
+  const xs = points.map((point) => point[0]);
+  const ys = points.map((point) => point[1]);
+  const zs = points.map((point) => point[2]);
+  return {
+    minX: Math.min(...xs) - padding,
+    minY: Math.min(...ys) - padding,
+    minZ: Math.min(...zs) - padding,
+    maxX: Math.max(...xs) + padding,
+    maxY: Math.max(...ys) + padding,
+    maxZ: Math.max(...zs) + padding
+  };
+}
+
+function hitPriority(item) {
+  if (item.type === "gizmo") return 0;
+  if (item.type === "plate-action") return 1;
+  if (item.type === "model") return 2;
+  if (item.type === "add-plate") return 3;
+  if (item.type === "plate") return 4;
+  return 9;
+}
+
 function makeMesh(gl, geometry, color, mode, options = {}) {
   const vao = {
     count: geometry.vertices.length / 3,
     color,
     mode,
     clip: !!options.clip,
+    offset: options.offset || [0, 0, 0],
+    modelOrigin: options.modelOrigin || [0, 0, 0],
+    modelRotation: options.modelRotation || [0, 0, 0],
+    modelScale: options.modelScale || 1,
+    scale: options.scale || [1, 1, 1],
+    scaleOrigin: options.scaleOrigin || [0, 0, 0],
+    unlit: !!options.unlit,
     positions: gl.createBuffer(),
     normals: gl.createBuffer()
   };
@@ -2540,13 +4756,34 @@ function createProgram(gl) {
     attribute vec3 aPosition;
     attribute vec3 aNormal;
     uniform mat4 uMvp;
+    uniform vec3 uOffset;
+    uniform vec3 uModelOrigin;
+    uniform vec3 uModelRotation;
+    uniform float uModelScale;
+    uniform vec3 uScale;
+    uniform vec3 uScaleOrigin;
     varying float vLight;
     varying float vZ;
+    vec3 rotateModel(vec3 p) {
+      float cx = cos(uModelRotation.x);
+      float sx = sin(uModelRotation.x);
+      p.yz = vec2(p.y * cx - p.z * sx, p.y * sx + p.z * cx);
+      float cy = cos(uModelRotation.y);
+      float sy = sin(uModelRotation.y);
+      p.xz = vec2(p.x * cy + p.z * sy, -p.x * sy + p.z * cy);
+      float cz = cos(uModelRotation.z);
+      float sz = sin(uModelRotation.z);
+      p.xy = vec2(p.x * cz - p.y * sz, p.x * sz + p.y * cz);
+      return p;
+    }
     void main() {
+      vec3 local = (aPosition - uModelOrigin) * uModelScale;
+      vec3 transformed = rotateModel(local) + uModelOrigin;
+      vec3 position = ((transformed - uScaleOrigin) * uScale) + uScaleOrigin + uOffset;
       vec3 light = normalize(vec3(0.35, -0.45, 0.82));
-      vLight = max(0.25, dot(normalize(aNormal), light));
-      vZ = aPosition.z;
-      gl_Position = uMvp * vec4(aPosition, 1.0);
+      vLight = max(0.25, dot(normalize(rotateModel(aNormal)), light));
+      vZ = position.z;
+      gl_Position = uMvp * vec4(position, 1.0);
     }
   `;
   const fs = `
@@ -2554,11 +4791,13 @@ function createProgram(gl) {
     uniform vec4 uColor;
     uniform float uClipZ;
     uniform bool uUseClip;
+    uniform bool uUnlit;
     varying float vLight;
     varying float vZ;
     void main() {
       if (uUseClip && vZ > uClipZ) discard;
-      gl_FragColor = vec4(uColor.rgb * vLight, uColor.a);
+      float light = uUnlit ? 1.0 : vLight;
+      gl_FragColor = vec4(uColor.rgb * light, uColor.a);
     }
   `;
   const program = gl.createProgram();
@@ -2571,9 +4810,16 @@ function createProgram(gl) {
     aPosition: gl.getAttribLocation(program, "aPosition"),
     aNormal: gl.getAttribLocation(program, "aNormal"),
     uMvp: gl.getUniformLocation(program, "uMvp"),
+    uOffset: gl.getUniformLocation(program, "uOffset"),
+    uModelOrigin: gl.getUniformLocation(program, "uModelOrigin"),
+    uModelRotation: gl.getUniformLocation(program, "uModelRotation"),
+    uModelScale: gl.getUniformLocation(program, "uModelScale"),
+    uScale: gl.getUniformLocation(program, "uScale"),
+    uScaleOrigin: gl.getUniformLocation(program, "uScaleOrigin"),
     uColor: gl.getUniformLocation(program, "uColor"),
     uClipZ: gl.getUniformLocation(program, "uClipZ"),
-    uUseClip: gl.getUniformLocation(program, "uUseClip")
+    uUseClip: gl.getUniformLocation(program, "uUseClip"),
+    uUnlit: gl.getUniformLocation(program, "uUnlit")
   };
 }
 
@@ -2588,9 +4834,16 @@ function shader(gl, type, source) {
 function drawMesh(gl, program, mesh, mvp, clipZ = 0) {
   gl.useProgram(program.handle);
   gl.uniformMatrix4fv(program.uMvp, false, mvp);
+  gl.uniform3fv(program.uOffset, mesh.offset || [0, 0, 0]);
+  gl.uniform3fv(program.uModelOrigin, mesh.modelOrigin || [0, 0, 0]);
+  gl.uniform3fv(program.uModelRotation, mesh.modelRotation || [0, 0, 0]);
+  gl.uniform1f(program.uModelScale, mesh.modelScale || 1);
+  gl.uniform3fv(program.uScale, mesh.scale || [1, 1, 1]);
+  gl.uniform3fv(program.uScaleOrigin, mesh.scaleOrigin || [0, 0, 0]);
   gl.uniform4fv(program.uColor, mesh.color);
   gl.uniform1f(program.uClipZ, clipZ);
   gl.uniform1i(program.uUseClip, mesh.clip ? 1 : 0);
+  gl.uniform1i(program.uUnlit, mesh.unlit ? 1 : 0);
   gl.bindBuffer(gl.ARRAY_BUFFER, mesh.positions);
   gl.enableVertexAttribArray(program.aPosition);
   gl.vertexAttribPointer(program.aPosition, 3, gl.FLOAT, false, 0, 0);
@@ -2651,9 +4904,10 @@ function transformPoint(point, matrix) {
 function projectPoint(point, matrix, canvas) {
   const clip = transformPoint(point, matrix);
   if (!clip) return null;
+  const rect = canvas.getBoundingClientRect();
   return [
-    (clip[0] * 0.5 + 0.5) * canvas.clientWidth,
-    (1 - (clip[1] * 0.5 + 0.5)) * canvas.clientHeight,
+    (clip[0] * 0.5 + 0.5) * rect.width,
+    (1 - (clip[1] * 0.5 + 0.5)) * rect.height,
     clip[2]
   ];
 }
@@ -2709,6 +4963,9 @@ function normalize(a) {
 }
 
 init().catch((error) => {
-  const logEl = $("log");
-  if (logEl) logEl.textContent += `Startup failed: ${error.message}\n`;
+  const toast = $("viewerToast");
+  if (toast) {
+    toast.textContent = `Startup failed: ${error.message}`;
+    toast.hidden = false;
+  }
 });

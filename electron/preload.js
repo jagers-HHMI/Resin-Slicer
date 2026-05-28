@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld("slicer", {
   saveProfile: (kind, defaultName, content) => ipcRenderer.invoke("dialog:save-profile", kind, defaultName, content),
   pathForFile: (file) => webUtils.getPathForFile(file),
   readFile: (filePath) => ipcRenderer.invoke("file:read", filePath),
+  readFileProgress: (filePath, jobId) => ipcRenderer.invoke("file:read-progress", { filePath, jobId }),
   uvtoolsPrinters: () => ipcRenderer.invoke("uvtools:list-printers"),
   uvtoolsPrinter: (printerPath) => ipcRenderer.invoke("uvtools:read-printer", printerPath),
   profiles: () => ipcRenderer.invoke("bridge:profiles"),
@@ -16,6 +17,11 @@ contextBridge.exposeInMainWorld("slicer", {
     const listener = (_event, message) => callback(message);
     ipcRenderer.on("slice:progress", listener);
     return () => ipcRenderer.removeListener("slice:progress", listener);
+  },
+  onFileReadProgress: (callback) => {
+    const listener = (_event, message) => callback(message);
+    ipcRenderer.on("file:read-progress", listener);
+    return () => ipcRenderer.removeListener("file:read-progress", listener);
   },
   onAppPrompt: (callback) => {
     const listener = (_event, payload) => callback(payload);

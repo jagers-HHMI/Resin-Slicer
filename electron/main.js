@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
 const { spawn } = require("child_process");
 const fsSync = require("fs");
 const fs = require("fs/promises");
+const { createReadStream } = require("fs");
 const path = require("path");
 
 const repoRoot = path.resolve(__dirname, "..");
@@ -131,6 +132,39 @@ ipcMain.handle("dialog:save-profile", async (_event, kind, defaultName, content)
 ipcMain.handle("file:read", async (_event, filePath) => {
   const data = await fs.readFile(filePath);
   return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+});
+
+ipcMain.handle("file:read-progress", async (event, payload) => {
+  const filePath = String(payload?.filePath || "");
+  const jobId = String(payload?.jobId || "");
+  const stat = await fs.stat(filePath);
+  const total = stat.size;
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let loaded = 0;
+    const stream = createReadStream(filePath);
+    stream.on("data", (chunk) => {
+      chunks.push(chunk);
+      loaded += chunk.length;
+      event.sender.send("file:read-progress", {
+        jobId,
+        loaded,
+        total,
+        progress: total ? loaded / total : 1
+      });
+    });
+    stream.on("error", reject);
+    stream.on("end", () => {
+      const data = Buffer.concat(chunks);
+      event.sender.send("file:read-progress", {
+        jobId,
+        loaded: total,
+        total,
+        progress: 1
+      });
+      resolve(data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength));
+    });
+  });
 });
 
 ipcMain.handle("uvtools:list-printers", async () => {
