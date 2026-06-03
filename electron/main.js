@@ -75,9 +75,10 @@ ipcMain.handle("dialog:open-stl", async () => {
     title: "Open Mesh",
     properties: ["openFile", "multiSelections"],
     filters: [
-      { name: "Mesh Files", extensions: ["stl", "obj"] },
+      { name: "Mesh Files", extensions: ["stl", "obj", "stp", "step"] },
       { name: "STL Mesh", extensions: ["stl"] },
       { name: "OBJ Mesh", extensions: ["obj"] },
+      { name: "STEP CAD", extensions: ["stp", "step"] },
       { name: "All Files", extensions: ["*"] }
     ]
   });
@@ -182,6 +183,12 @@ ipcMain.handle("file:read-progress", async (event, payload) => {
   });
 });
 
+ipcMain.handle("step:read-mesh", async (_event, filePath) => {
+  const stlPath = await convertStepToStl(filePath);
+  const data = await fs.readFile(stlPath);
+  return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+});
+
 ipcMain.handle("uvtools:list-printers", async () => {
   const response = await fetch(uvtoolsPrinterApiUrl, {
     headers: { "User-Agent": "Resin-Slicer" }
@@ -236,6 +243,14 @@ function pythonExecutable() {
   const bundled = path.resolve(__dirname, "..", "..", "..", "python", "python.exe");
   if (fsSync.existsSync(bundled)) return bundled;
   return process.env.PYTHON || "python";
+}
+
+function stepPythonExecutable() {
+  const configured = process.env.RESIN_SLICER_STEP_PYTHON;
+  if (configured && fsSync.existsSync(configured)) return configured;
+  const skillPython = path.join(app.getPath("home"), ".codex", "skills", "cad", ".venv", "Scripts", "python.exe");
+  if (fsSync.existsSync(skillPython)) return skillPython;
+  return pythonExecutable();
 }
 
 function profileKindLabel(kind) {
@@ -339,7 +354,7 @@ function escapeHtml(value) {
 function runBridge(command, payload, onMessage) {
   return new Promise((resolve, reject) => {
     const child = spawn(
-      pythonExecutable(),
+      payloadHasStepMesh(payload) ? stepPythonExecutable() : pythonExecutable(),
       ["-m", "resin_slicer.electron_bridge", command],
       { cwd: repoRoot, stdio: ["pipe", "pipe", "pipe"] }
     );
@@ -387,4 +402,47 @@ function runBridge(command, payload, onMessage) {
       }
     }
   });
+}
+
+function convertStepToStl(filePath) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      stepPythonExecutable(),
+      ["-m", "resin_slicer.step", String(filePath || "")],
+      { cwd: repoRoot, stdio: ["ignore", "pipe", "pipe"] }
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `STEP conversion exited with code ${code}`));
+        return;
+      }
+      try {
+        const payload = JSON.parse(stdout.trim());
+        if (!payload.outputPath) throw new Error("STEP converter returned no output path");
+        resolve(payload.outputPath);
+      } catch (error) {
+        reject(new Error(stderr || error.message));
+      }
+    });
+  });
+}
+
+function payloadHasStepMesh(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  if (isStepMeshPath(payload.inputPath)) return true;
+  const models = Array.isArray(payload.models) ? payload.models : [];
+  return models.some((model) => isStepMeshPath(model?.inputPath || model?.path));
+}
+
+function isStepMeshPath(filePath) {
+  return /\.(stp|step)$/i.test(String(filePath || ""));
 }

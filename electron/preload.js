@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld("slicer", {
   pathForFile: (file) => webUtils.getPathForFile(file),
   readFile: (filePath) => ipcRenderer.invoke("file:read", filePath),
   readFileProgress: (filePath, jobId) => ipcRenderer.invoke("file:read-progress", { filePath, jobId }),
+  readStepMesh: (filePath) => ipcRenderer.invoke("step:read-mesh", filePath),
   uvtoolsPrinters: () => ipcRenderer.invoke("uvtools:list-printers"),
   uvtoolsPrinter: (printerPath) => ipcRenderer.invoke("uvtools:read-printer", printerPath),
   profiles: () => ipcRenderer.invoke("bridge:profiles"),

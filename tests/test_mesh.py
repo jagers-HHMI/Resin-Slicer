@@ -1,8 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from resin_slicer.mesh import load_mesh, load_obj
+from resin_slicer.mesh import Mesh, load_mesh, load_obj
 
 
 class MeshLoadTests(unittest.TestCase):
@@ -47,12 +48,35 @@ class MeshLoadTests(unittest.TestCase):
 
             self.assertEqual(len(load_mesh(path).triangles), 1)
 
+    def test_load_mesh_dispatches_step_extension_through_tessellation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            step_path = Path(tmp) / "part.stp"
+            stl_path = Path(tmp) / "part.stl"
+            step_path.write_text("ISO-10303-21;\nEND-ISO-10303-21;\n", encoding="ascii")
+            _write_ascii_stl(stl_path, Mesh((((0, 0, 0), (1, 0, 0), (0, 1, 0)),)))
+
+            with patch("resin_slicer.step.step_to_stl_path", return_value=stl_path):
+                self.assertEqual(len(load_mesh(step_path).triangles), 1)
+
 
 def _load_obj_text(text: str):
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "part.obj"
         path.write_text(text, encoding="utf-8")
         return load_obj(path)
+
+
+def _write_ascii_stl(path: Path, mesh: Mesh) -> None:
+    lines = ["solid test"]
+    for triangle in mesh.triangles:
+        lines.append("facet normal 0 0 0")
+        lines.append("outer loop")
+        for x, y, z in triangle:
+            lines.append(f"vertex {x} {y} {z}")
+        lines.append("endloop")
+        lines.append("endfacet")
+    lines.append("endsolid test")
+    path.write_text("\n".join(lines), encoding="ascii")
 
 
 if __name__ == "__main__":

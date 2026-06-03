@@ -73,13 +73,21 @@ def load_obj(path: str | Path) -> Mesh:
     return _load_obj(Path(path).read_text(encoding="utf-8", errors="replace"))
 
 
+def load_step(path: str | Path) -> Mesh:
+    from .step import step_to_stl_path
+
+    return load_stl(step_to_stl_path(path))
+
+
 def load_mesh(path: str | Path) -> Mesh:
     suffix = Path(path).suffix.lower()
     if suffix == ".obj":
         return load_obj(path)
     if suffix == ".stl":
         return load_stl(path)
-    raise MeshError(f"unsupported mesh format {suffix or '<none>'}; expected .stl or .obj")
+    if suffix in {".stp", ".step"}:
+        return load_step(path)
+    raise MeshError(f"unsupported mesh format {suffix or '<none>'}; expected .stl, .obj, .stp, or .step")
 
 
 def _looks_like_binary_stl(payload: bytes) -> bool:

@@ -2616,7 +2616,7 @@ async function loadStlPaths(paths, { append = false, sound = append ? "drop" : "
   const resolvedTargetPlateId = initialTargetPlate.id;
   const nextPaths = normalizeStlPaths(paths);
   if (!nextPaths.length) {
-    logAndPrompt("No Mesh Files", "Choose or drop at least one STL or OBJ file.");
+    logAndPrompt("No Mesh Files", "Choose or drop at least one STL, OBJ, STP, or STEP file.");
     return;
   }
 
@@ -2661,9 +2661,15 @@ async function loadSingleMeshPath(path, { importJobId, append, sound, targetPlat
       updateLoadProgressItem(progress.id, 0.04 + (message.progress || 0) * 0.68, `Reading ${percent}%`);
     });
     log(`Loading ${path}`);
-    const raw = window.slicer.readFileProgress
-      ? await window.slicer.readFileProgress(path, readJobId)
-      : await window.slicer.readFile(path);
+    let raw;
+    if (isStepMeshPath(path)) {
+      updateLoadProgressItem(progress.id, 0.08, "Tessellating STEP");
+      raw = await window.slicer.readStepMesh(path);
+    } else {
+      raw = window.slicer.readFileProgress
+        ? await window.slicer.readFileProgress(path, readJobId)
+        : await window.slicer.readFile(path);
+    }
     fileReadProgressHandlers.delete(readJobId);
 
     updateLoadProgressItem(progress.id, 0.78, "Parsing");
@@ -2870,7 +2876,7 @@ async function handleDrop(event) {
     .map((file) => window.slicer.pathForFile ? window.slicer.pathForFile(file) : file.path)
     .filter(isSupportedMeshPath);
   if (!paths.length) {
-    logAndPrompt("Unsupported Drop", "Drop one or more STL or OBJ files into the viewer.");
+    logAndPrompt("Unsupported Drop", "Drop one or more STL, OBJ, STP, or STEP files into the viewer.");
     return;
   }
   await loadStlPaths(paths, { append: true, sound: "drop", targetPlateId });
@@ -2908,7 +2914,11 @@ function fileName(path) {
 }
 
 function isSupportedMeshPath(path) {
-  return /\.(stl|obj)$/i.test(path || "");
+  return /\.(stl|obj|stp|step)$/i.test(path || "");
+}
+
+function isStepMeshPath(path) {
+  return /\.(stp|step)$/i.test(path || "");
 }
 
 async function importProfile(kind) {
@@ -3043,7 +3053,7 @@ function platesWithModels() {
 
 function ensureReady(requireOutput, requireActivePlateObjects = true) {
   if (!models.length) {
-    logAndPrompt("No Mesh Loaded", "Open or drop at least one STL or OBJ first.");
+    logAndPrompt("No Mesh Loaded", "Open or drop at least one STL, OBJ, STP, or STEP first.");
     return false;
   }
   if (requireOutput && !$("outputPath").value.trim()) {
@@ -3558,8 +3568,6 @@ function buildScene({ skipDerivedGeometry = false } = {}) {
   const active = activePlate();
   const modelItems = [];
   const selectionBoxes = [];
-  const outOfBoundsBoxes = [];
-  const outOfBoundsSpills = [];
   const gizmoModel = widgetModel();
   let transformGizmo = null;
 
@@ -3574,6 +3582,7 @@ function buildScene({ skipDerivedGeometry = false } = {}) {
     const bounds = offsetBounds(localBounds, offset);
     const isActive = plate.id === active.id;
     const selected = selectedModelIds.has(model.id);
+    const outOfBounds = boundsOutsidePlate(bounds, plate);
     modelItems.push({
       id: model.id,
       plateId: plate.id,
@@ -3586,16 +3595,11 @@ function buildScene({ skipDerivedGeometry = false } = {}) {
       scale: [visual.scaleX, visual.scaleY, visual.scaleZ],
       scaleOrigin: boundsCenter(localBounds),
       bounds,
+      plateClipBox: plateClipBox(plate),
+      outOfBounds,
       color: isActive ? (selected ? [0.3, 0.78, 0.95, 1] : [0.26, 0.72, 0.86, 1]) : [0.44, 0.48, 0.52, 1]
     });
     if (selected) selectionBoxes.push(bounds);
-    if (isActive && !skipDerivedGeometry) {
-      const indicator = outOfBoundsIndicatorGeometry(model, plate, bounds);
-      if (indicator) {
-        if (indicator.box) outOfBoundsBoxes.push(indicator.box);
-        if (indicator.spill) outOfBoundsSpills.push(indicator.spill);
-      }
-    }
   }
 
   if (gizmoModel && selectedModelIds.size) {
@@ -3631,8 +3635,6 @@ function buildScene({ skipDerivedGeometry = false } = {}) {
     nextPlate: nextBuildPlatePreview(),
     models: modelItems,
     selectionBoxes,
-    outOfBoundsBoxes,
-    outOfBoundsSpills,
     supports: skipDerivedGeometry ? null : offsetSupports(active.supports, active.origin),
     supportBraces: skipDerivedGeometry ? null : offsetBraces(active.supportBraces, active.origin),
     supportRaft: skipDerivedGeometry ? null : offsetSupportRaft(active.supportRaft, active.origin),
@@ -3987,42 +3989,13 @@ function boundsOutsidePlate(bounds, plate) {
   return bounds.minX < plate.origin.x || bounds.maxX > maxX || bounds.minY < plate.origin.y || bounds.maxY > maxY;
 }
 
-function outOfBoundsIndicatorGeometry(model, plate, bounds = modelWorldBounds(model)) {
-  const maxX = plate.origin.x + (plate.settings.printer.sizeX || 120);
-  const maxY = plate.origin.y + (plate.settings.printer.sizeY || 67.5);
-  if (!boundsOutsidePlate(bounds, plate)) return null;
+function plateClipBox(plate) {
   return {
-    box: makeSelectionBoxGeometry([bounds]),
-    spill: outOfBoundsFootprintGeometry(bounds, {
-      minX: plate.origin.x,
-      minY: plate.origin.y,
-      maxX,
-      maxY,
-      z: 0.38
-    })
+    minX: plate.origin.x,
+    minY: plate.origin.y,
+    maxX: plate.origin.x + (plate.settings.printer.sizeX || 120),
+    maxY: plate.origin.y + (plate.settings.printer.sizeY || 67.5)
   };
-}
-
-function outOfBoundsFootprintGeometry(bounds, plateBounds) {
-  const parts = [];
-  const z = plateBounds.z;
-  const clampedY0 = clamp(bounds.minY, plateBounds.minY, plateBounds.maxY);
-  const clampedY1 = clamp(bounds.maxY, plateBounds.minY, plateBounds.maxY);
-  if (bounds.minX < plateBounds.minX && clampedY1 > clampedY0) {
-    parts.push(makeWorldRectGeometry(bounds.minX, clampedY0, plateBounds.minX, clampedY1, z));
-  }
-  if (bounds.maxX > plateBounds.maxX && clampedY1 > clampedY0) {
-    parts.push(makeWorldRectGeometry(plateBounds.maxX, clampedY0, bounds.maxX, clampedY1, z));
-  }
-  const clampedX0 = clamp(bounds.minX, plateBounds.minX, plateBounds.maxX);
-  const clampedX1 = clamp(bounds.maxX, plateBounds.minX, plateBounds.maxX);
-  if (bounds.minY < plateBounds.minY && clampedX1 > clampedX0) {
-    parts.push(makeWorldRectGeometry(clampedX0, bounds.minY, clampedX1, plateBounds.minY, z));
-  }
-  if (bounds.maxY > plateBounds.maxY && clampedX1 > clampedX0) {
-    parts.push(makeWorldRectGeometry(clampedX0, plateBounds.maxY, clampedX1, bounds.maxY, z));
-  }
-  return combineGeometry(parts);
 }
 
 function makeWorldRectGeometry(x0, y0, x1, y1, z) {
@@ -4575,7 +4548,10 @@ class Viewer {
         mode = "model";
       }
       this.pressedHit = isLeft && hit && (hit.type === "plate" || hit.type === "add-plate" || hit.type === "plate-action") ? hit : null;
-      this.drag = { x: event.clientX, y: event.clientY, mode, moved: false, action: mode === "gizmo" ? this.activeGizmoAction : null };
+      const dragPlaneZ = mode === "model"
+        ? (hit?.bounds ? boundsCenter(hit.bounds)[2] : (this.activePartFocus?.[2] || 0))
+        : 0;
+      this.drag = { x: event.clientX, y: event.clientY, mode, moved: false, action: mode === "gizmo" ? this.activeGizmoAction : null, planeZ: dragPlaneZ };
       this.pointerStart = { x: event.clientX, y: event.clientY, additive, hit, clickable: isLeft && mode !== "gizmo" };
       if (mode === "model" && this.onScenePick) {
         this.onScenePick({ type: "model", id: hit.id, plateId: hit.plateId, additive, dragStart: true });
@@ -4587,16 +4563,19 @@ class Viewer {
         return;
       }
       event.preventDefault();
-      const dx = event.clientX - this.drag.x;
-      const dy = event.clientY - this.drag.y;
+      const fromX = this.drag.x;
+      const fromY = this.drag.y;
+      const dx = event.clientX - fromX;
+      const dy = event.clientY - fromY;
       const mode = this.drag.mode;
       const action = this.drag.action;
+      const planeZ = this.drag.planeZ || 0;
       const totalDx = this.pointerStart ? event.clientX - this.pointerStart.x : dx;
       const totalDy = this.pointerStart ? event.clientY - this.pointerStart.y : dy;
       const moved = this.drag.moved || Math.hypot(dx, dy) > 0.2 || Math.hypot(totalDx, totalDy) > 0.2;
-      this.drag = { x: event.clientX, y: event.clientY, mode, moved, action };
+      this.drag = { x: event.clientX, y: event.clientY, mode, moved, action, planeZ };
       if (mode === "model") {
-        const delta = this.screenDeltaToBuildPlane(dx, dy);
+        const delta = this.screenDragDeltaOnPlane(fromX, fromY, event.clientX, event.clientY, planeZ);
         if (this.onModelDrag && (Math.abs(delta.x) > 0.0001 || Math.abs(delta.y) > 0.0001)) {
           this.onModelDrag(delta);
         }
@@ -4755,6 +4734,19 @@ class Viewer {
     const t = dot(sub(planePoint, ray.origin), planeNormal) / denom;
     if (!Number.isFinite(t) || (rejectBehind && t < 0)) return null;
     return add(ray.origin, scaleVec(ray.direction, t));
+  }
+
+  screenDragDeltaOnPlane(fromX, fromY, toX, toY, planeZ = 0) {
+    const options = { rejectBehind: this.projectionMode !== "orthographic" };
+    const planePoint = [0, 0, Number.isFinite(planeZ) ? planeZ : 0];
+    const planeNormal = [0, 0, 1];
+    const fromPoint = this.intersectScreenPlane(fromX, fromY, planePoint, planeNormal, options);
+    const toPoint = this.intersectScreenPlane(toX, toY, planePoint, planeNormal, options);
+    if (!fromPoint || !toPoint) return { x: 0, y: 0 };
+    return {
+      x: toPoint[0] - fromPoint[0],
+      y: toPoint[1] - fromPoint[1]
+    };
   }
 
   pointOnBuildPlane(clientX, clientY) {
@@ -5047,6 +5039,8 @@ class Viewer {
         id: item.id,
         plateId: item.plateId,
         bounds: item.bounds,
+        plateClipBox: item.plateClipBox,
+        outOfBounds: !!item.outOfBounds,
         mesh: cached.mesh
       };
     });
@@ -5055,14 +5049,6 @@ class Viewer {
     }
     this.meshes.selection = scene.selectionBoxes.length
       ? makeMesh(this.gl, makeSelectionBoxGeometry(scene.selectionBoxes), [1.0, 0.86, 0.26, 1], this.gl.LINES)
-      : null;
-    const outOfBoundsSpill = combineGeometry(scene.outOfBoundsSpills);
-    const outOfBoundsBoxes = combineGeometry(scene.outOfBoundsBoxes);
-    this.meshes.outOfBoundsSpill = outOfBoundsSpill
-      ? makeMesh(this.gl, outOfBoundsSpill, [1.0, 0.08, 0.05, 0.28], this.gl.TRIANGLES, { unlit: true })
-      : null;
-    this.meshes.outOfBoundsBox = outOfBoundsBoxes
-      ? makeMesh(this.gl, outOfBoundsBoxes, [1.0, 0.14, 0.10, 1], this.gl.LINES, { unlit: true })
       : null;
     this.meshes.supports = makeMesh(this.gl, makeSupportGeometry(scene.supports, scene.supportBraces), [1.0, 0.63, 0.18, 1], this.gl.TRIANGLES);
     this.meshes.supportRaft = scene.supportRaft
@@ -5201,10 +5187,8 @@ class Viewer {
     if (this.meshes.supportRaft) this.drawTransparentMesh(this.meshes.supportRaft, mvp);
     if (this.meshes.supports) drawMesh(gl, this.program, this.meshes.supports, mvp, this.clipZ);
     for (const item of this.meshes.models || []) {
-      drawMesh(gl, this.program, item.mesh, mvp, this.clipZ);
+      this.drawModelItem(item, mvp);
     }
-    if (this.meshes.outOfBoundsSpill) this.drawTransparentMesh(this.meshes.outOfBoundsSpill, mvp);
-    if (this.meshes.outOfBoundsBox) drawMesh(gl, this.program, this.meshes.outOfBoundsBox, mvp, this.clipZ);
     if (this.meshes.clipPlane) this.drawClipPlane(mvp);
     if (this.meshes.layerLines) drawMesh(gl, this.program, this.meshes.layerLines, mvp, this.clipZ);
     if (this.meshes.selection) drawMesh(gl, this.program, this.meshes.selection, mvp, this.clipZ);
@@ -5245,6 +5229,26 @@ class Viewer {
     drawMesh(gl, this.program, mesh, mvp, this.clipZ);
     gl.enable(gl.CULL_FACE);
     gl.depthMask(true);
+  }
+
+  drawModelItem(item, mvp) {
+    if (!item.outOfBounds || !item.plateClipBox) {
+      item.mesh.boxClip = null;
+      drawMesh(this.gl, this.program, item.mesh, mvp, this.clipZ);
+      return;
+    }
+    const originalColor = item.mesh.color;
+    const originalBoxClip = item.mesh.boxClip;
+    const originalUnlit = item.mesh.unlit;
+    item.mesh.boxClip = { ...item.plateClipBox, mode: "inside" };
+    drawMesh(this.gl, this.program, item.mesh, mvp, this.clipZ);
+    item.mesh.color = [1.0, 0.04, 0.03, 1];
+    item.mesh.unlit = true;
+    item.mesh.boxClip = { ...item.plateClipBox, mode: "outside" };
+    drawMesh(this.gl, this.program, item.mesh, mvp, this.clipZ);
+    item.mesh.color = originalColor;
+    item.mesh.unlit = originalUnlit;
+    item.mesh.boxClip = originalBoxClip || null;
   }
 
   drawClipPlane(mvp) {
@@ -6153,24 +6157,51 @@ function makeGizmoArcGeometry(center, axis, radius, stroke, { fullCircle = false
   const vertices = [];
   const normals = [];
   const [u, v] = gizmoArcBasis(axis);
+  const normal = gizmoAxisDirection(axis);
+  const halfWidth = Math.max(0.05, stroke);
+  const innerRadius = Math.max(0.01, radius - halfWidth);
+  const outerRadius = radius + halfWidth;
   const startAngle = fullCircle ? 0 : GIZMO_ARC_START;
   const endAngle = fullCircle ? Math.PI * 2 : GIZMO_ARC_END;
-  const segments = fullCircle ? 96 : 24;
+  const segments = fullCircle ? 128 : 32;
   for (let i = 0; i < segments; i++) {
     const a0 = startAngle + (i / segments) * (endAngle - startAngle);
     const a1 = startAngle + ((i + 1) / segments) * (endAngle - startAngle);
-    addGizmoTaperedSegment(
+    pushFlatQuad(
       vertices,
       normals,
-      gizmoArcPoint(center, u, v, radius, a0),
-      gizmoArcPoint(center, u, v, radius, a1),
-      stroke,
-      stroke,
-      10,
-      { capStart: !fullCircle && i === 0, capEnd: !fullCircle && i === segments - 1 }
+      gizmoArcPoint(center, u, v, outerRadius, a0),
+      gizmoArcPoint(center, u, v, outerRadius, a1),
+      gizmoArcPoint(center, u, v, innerRadius, a1),
+      gizmoArcPoint(center, u, v, innerRadius, a0),
+      normal
     );
   }
+  if (!fullCircle) {
+    addGizmoArcCap(vertices, normals, center, u, v, radius, startAngle, halfWidth, normal, -1);
+    addGizmoArcCap(vertices, normals, center, u, v, radius, endAngle, halfWidth, normal, 1);
+  }
   return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
+}
+
+function addGizmoArcCap(vertices, normals, center, u, v, radius, angle, halfWidth, normal, tangentSign) {
+  const capCenter = gizmoArcPoint(center, u, v, radius, angle);
+  const radial = normalize(add(scaleVec(u, Math.cos(angle)), scaleVec(v, Math.sin(angle))));
+  const tangent = normalize(add(scaleVec(u, -Math.sin(angle)), scaleVec(v, Math.cos(angle))));
+  const capSegments = 12;
+  for (let i = 0; i < capSegments; i++) {
+    const a0 = (i / capSegments) * Math.PI;
+    const a1 = ((i + 1) / capSegments) * Math.PI;
+    const p0 = add(capCenter, add(
+      scaleVec(radial, Math.cos(a0) * halfWidth),
+      scaleVec(tangent, Math.sin(a0) * halfWidth * tangentSign)
+    ));
+    const p1 = add(capCenter, add(
+      scaleVec(radial, Math.cos(a1) * halfWidth),
+      scaleVec(tangent, Math.sin(a1) * halfWidth * tangentSign)
+    ));
+    pushFlatTriangle(vertices, normals, capCenter, p0, p1, normal);
+  }
 }
 
 function makeGizmoPlaneSquareGeometry(center, lockedAxis, lengthValue, stroke) {
@@ -6379,6 +6410,7 @@ function makeMesh(gl, geometry, color, mode, options = {}) {
     modelScale: options.modelScale || 1,
     scale: options.scale || [1, 1, 1],
     scaleOrigin: options.scaleOrigin || [0, 0, 0],
+    boxClip: options.boxClip || null,
     unlit: !!options.unlit,
     positions: gl.createBuffer(),
     normals: gl.createBuffer()
@@ -6403,6 +6435,7 @@ function createProgram(gl) {
     uniform vec3 uScaleOrigin;
     varying float vLight;
     varying float vZ;
+    varying vec3 vWorld;
     vec3 rotateModel(vec3 p) {
       float cx = cos(uModelRotation.x);
       float sx = sin(uModelRotation.x);
@@ -6422,19 +6455,32 @@ function createProgram(gl) {
       vec3 light = normalize(vec3(0.35, -0.45, 0.82));
       vLight = max(0.25, dot(normalize(rotateModel(aNormal)), light));
       vZ = position.z;
+      vWorld = position;
       gl_Position = uMvp * vec4(position, 1.0);
     }
   `;
   const fs = `
-    precision mediump float;
+    precision highp float;
     uniform vec4 uColor;
     uniform float uClipZ;
     uniform bool uUseClip;
+    uniform bool uUseBoxClip;
+    uniform int uBoxClipMode;
+    uniform vec2 uBoxClipMin;
+    uniform vec2 uBoxClipMax;
     uniform bool uUnlit;
     varying float vLight;
     varying float vZ;
+    varying vec3 vWorld;
     void main() {
       if (uUseClip && vZ > uClipZ) discard;
+      if (uUseBoxClip) {
+        bool insideBox = vWorld.x >= uBoxClipMin.x
+          && vWorld.x <= uBoxClipMax.x
+          && vWorld.y >= uBoxClipMin.y
+          && vWorld.y <= uBoxClipMax.y;
+        if ((uBoxClipMode == 0 && !insideBox) || (uBoxClipMode == 1 && insideBox)) discard;
+      }
       float light = uUnlit ? 1.0 : vLight;
       gl_FragColor = vec4(uColor.rgb * light, uColor.a);
     }
@@ -6458,6 +6504,10 @@ function createProgram(gl) {
     uColor: gl.getUniformLocation(program, "uColor"),
     uClipZ: gl.getUniformLocation(program, "uClipZ"),
     uUseClip: gl.getUniformLocation(program, "uUseClip"),
+    uUseBoxClip: gl.getUniformLocation(program, "uUseBoxClip"),
+    uBoxClipMode: gl.getUniformLocation(program, "uBoxClipMode"),
+    uBoxClipMin: gl.getUniformLocation(program, "uBoxClipMin"),
+    uBoxClipMax: gl.getUniformLocation(program, "uBoxClipMax"),
     uUnlit: gl.getUniformLocation(program, "uUnlit")
   };
 }
@@ -6482,6 +6532,11 @@ function drawMesh(gl, program, mesh, mvp, clipZ = 0) {
   gl.uniform4fv(program.uColor, mesh.color);
   gl.uniform1f(program.uClipZ, clipZ);
   gl.uniform1i(program.uUseClip, mesh.clip ? 1 : 0);
+  const boxClip = mesh.boxClip || null;
+  gl.uniform1i(program.uUseBoxClip, boxClip ? 1 : 0);
+  gl.uniform1i(program.uBoxClipMode, boxClip?.mode === "outside" ? 1 : 0);
+  gl.uniform2fv(program.uBoxClipMin, boxClip ? [boxClip.minX, boxClip.minY] : [0, 0]);
+  gl.uniform2fv(program.uBoxClipMax, boxClip ? [boxClip.maxX, boxClip.maxY] : [0, 0]);
   gl.uniform1i(program.uUnlit, mesh.unlit ? 1 : 0);
   gl.bindBuffer(gl.ARRAY_BUFFER, mesh.positions);
   gl.enableVertexAttribArray(program.aPosition);

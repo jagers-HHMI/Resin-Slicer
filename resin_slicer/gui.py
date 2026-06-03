@@ -173,7 +173,13 @@ class SlicerGui(tk.Tk):
 
     def _browse_input(self) -> None:
         filename = filedialog.askopenfilename(
-            filetypes=[("Mesh files", "*.stl *.obj"), ("STL files", "*.stl"), ("OBJ files", "*.obj"), ("All files", "*.*")]
+            filetypes=[
+                ("Mesh files", "*.stl *.obj *.stp *.step"),
+                ("STL files", "*.stl"),
+                ("OBJ files", "*.obj"),
+                ("STEP files", "*.stp *.step"),
+                ("All files", "*.*"),
+            ]
         )
         if not filename:
             return
@@ -210,7 +216,7 @@ class SlicerGui(tk.Tk):
         input_text = self.input_var.get().strip()
         output_text = self.output_var.get().strip()
         if not input_text:
-            raise SlicerError("choose an input STL or OBJ file")
+            raise SlicerError("choose an input STL, OBJ, STEP, or STP file")
         if not output_text:
             raise SlicerError("choose an output file")
         return GuiOptions(
