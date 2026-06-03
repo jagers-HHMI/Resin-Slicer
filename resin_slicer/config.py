@@ -126,11 +126,16 @@ class SupportConfig:
     post_radius_mm: float = 0.28
     tip_radius_mm: float = 0.18
     tip_type: str = "cone"
+    spherical_contact_enabled: bool = False
+    spherical_contact_diameter_mm: float = 0.6
+    spherical_contact_inset_mm: float = 0.05
     tip_length_mm: float = 0.8
-    tip_angle_deg: float = 25.0
     foot_radius_mm: float = 0.8
     bed_interface: str = "raft"
     raft_margin_mm: float = 0.6
+    raft_chamfer_width_mm: float = 0.4
+    raft_chamfer_angle_deg: float = 45.0
+    bed_interface_thickness_mm: float = 0.35
     raft_layers: int = 4
     brace_enabled: bool = True
     brace_radius_mm: float = 0.18
@@ -162,10 +167,12 @@ class SupportConfig:
             raise ConfigError("primary_max_extra_per_island cannot be negative")
         if self.tip_type not in {"cone", "sphere", "cylinder"}:
             raise ConfigError("tip_type must be one of: cone, sphere, cylinder")
+        if self.spherical_contact_diameter_mm <= 0:
+            raise ConfigError("spherical_contact_diameter_mm must be positive")
+        if self.spherical_contact_inset_mm < 0:
+            raise ConfigError("spherical_contact_inset_mm cannot be negative")
         if self.bed_interface not in {"none", "feet", "raft", "skate"}:
             raise ConfigError("bed_interface must be one of: none, feet, raft, skate")
-        if not 0 <= self.tip_angle_deg < 80:
-            raise ConfigError("tip_angle_deg must be between 0 and 80 degrees")
         if not 0 <= self.max_support_angle_deg < 80:
             raise ConfigError("max_support_angle_deg must be between 0 and 80 degrees")
         for name in (
@@ -185,6 +192,12 @@ class SupportConfig:
                 raise ConfigError(f"{name} must be positive")
         if self.raft_margin_mm < 0:
             raise ConfigError("raft_margin_mm cannot be negative")
+        if self.raft_chamfer_width_mm < 0:
+            raise ConfigError("raft_chamfer_width_mm cannot be negative")
+        if not 0 < self.raft_chamfer_angle_deg < 90:
+            raise ConfigError("raft_chamfer_angle_deg must be between 0 and 90 degrees")
+        if self.bed_interface_thickness_mm <= 0:
+            raise ConfigError("bed_interface_thickness_mm must be positive")
         if self.collision_clearance_mm < 0:
             raise ConfigError("collision_clearance_mm cannot be negative")
         if self.raft_layers < 0:

@@ -70,7 +70,7 @@ def slice_to_file(
     if progress:
         progress(f"prepared mesh: {prepared.layer_count} layers")
 
-    support_plan = SupportPlan((), 0, 0, 0, 0)
+    support_plan = SupportPlan((), 0, 0, 0, 0.0, 0)
     if support_config.enabled:
         if progress:
             progress("planning supports")

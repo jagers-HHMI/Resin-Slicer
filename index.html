@@ -69,10 +69,52 @@
               </div>
             </section>
           </div>
+          <div class="topbar-menu">
+            <button id="settingsButton" class="topbar-menu-button" type="button" data-topbar-menu-button="settingsTopbarMenu" aria-expanded="false">Settings</button>
+            <section id="settingsTopbarMenu" class="topbar-menu-panel settings-menu" hidden>
+              <section class="settings-menu-section">
+                <h2>View</h2>
+                <button id="fitViewButton" type="button">Fit View</button>
+                <label class="check"><input id="projectionToggle" type="checkbox"> Orthographic projection</label>
+                <label>Navigation
+                  <select id="navigationMode">
+                    <option value="turntable">Turntable orbit</option>
+                    <option value="trackball">Trackball orbit</option>
+                    <option value="selection">Orbit around selection</option>
+                    <option value="cursor">Orbit around cursor</option>
+                  </select>
+                </label>
+              </section>
+              <section class="settings-menu-section">
+                <h2>Sound</h2>
+                <label class="check"><input id="soundEnabled" type="checkbox" checked> Audio feedback</label>
+                <label>Volume <input id="soundVolume" type="range" min="0" max="1" step="0.05" value="0.55"></label>
+              </section>
+            </section>
+          </div>
         </nav>
 
         <section class="viewer-shell">
           <canvas id="viewer"></canvas>
+          <div id="viewCube" class="view-cube" aria-hidden="true">
+            <div class="view-cube-object">
+              <span class="view-cube-face face-front">Front</span>
+              <span class="view-cube-face face-back">Back</span>
+              <span class="view-cube-face face-left">Left</span>
+              <span class="view-cube-face face-right">Right</span>
+              <span class="view-cube-face face-top">Top</span>
+              <span class="view-cube-face face-bottom">Bottom</span>
+            </div>
+          </div>
+          <div class="clip-scrubber" aria-label="Layer clipping controls">
+            <input id="clipHeight" class="vertical-range" type="range" min="1" max="3200" step="1" value="3200" aria-label="Layer">
+            <div class="clip-step-buttons">
+              <button id="clipLayerUp" type="button" aria-label="Step layer up">&#9650;</button>
+              <button id="clipLayerDown" type="button" aria-label="Step layer down">&#9660;</button>
+            </div>
+            <label>Layer <input id="clipHeightValue" type="number" min="1" step="1" value="3200"></label>
+            <label class="check"><input id="clipEnabled" type="checkbox"> Clip view</label>
+          </div>
           <div class="viewer-status">
             <span id="meshStatus">No mesh loaded</span>
             <span id="supportStatus">Supports not generated</span>
@@ -103,34 +145,13 @@
             <button id="saveButton" type="button">Choose Output</button>
           </div>
           <label>Output <input id="outputPath"></label>
-          <label class="check"><input id="supportsEnabled" type="checkbox" checked> Generate supports</label>
         </section>
 
         <section class="actions right-menu-section" data-right-menu-section="job">
-          <button id="previewButton" type="button">Preview Supports</button>
+          <button id="saveProjectButton" type="button">Save Project</button>
           <button id="sliceButton" class="primary" type="button">Slice</button>
           <button id="sliceAllButton" type="button">Slice All</button>
           <button id="saveAllButton" type="button">Save All</button>
-        </section>
-
-        <section id="menuSound" class="group sound-panel right-menu-section" data-right-menu-section="sound">
-          <h2>Sound</h2>
-          <div class="row">
-            <label class="check"><input id="soundEnabled" type="checkbox" checked> Audio feedback</label>
-            <label>Volume <input id="soundVolume" type="range" min="0" max="1" step="0.05" value="0.55"></label>
-          </div>
-        </section>
-
-        <section id="menuView" class="group workspace-panel right-menu-section" data-right-menu-section="view">
-          <h2>View</h2>
-          <button id="fitViewButton" type="button">Fit View</button>
-          <label>Height
-            <input id="clipHeight" type="range" min="0" max="160" step="0.05" value="160">
-          </label>
-          <div class="row">
-            <label>Plane mm <input id="clipHeightValue" type="number" step="0.05" value="160"></label>
-            <label class="check"><input id="clipEnabled" type="checkbox"> Clip view</label>
-          </div>
         </section>
 
         <div class="settings-stack">
@@ -148,29 +169,40 @@
               <label>Move Z <input id="translateZ" type="number" step="0.01" value="0.00"></label>
             </div>
             <label>Scale <input id="scale" type="number" step="0.01" value="1.00"></label>
-            <label>Drop offset <input id="dropOffset" type="number" min="0" step="0.01" value="0.05"></label>
+            <label>Vertical offset <input id="dropOffset" type="number" min="0" step="0.01" value="0.05"></label>
             <label class="check"><input id="centerModel" type="checkbox" checked> Center on build plate</label>
           </details>
+
+          <section id="menuSupportActions" class="group support-toolbar right-menu-section" data-right-menu-section="support-basics">
+            <h2>Supports</h2>
+            <button id="previewButton" class="primary" type="button">Generate Supports</button>
+            <label class="check"><input id="supportsEnabled" type="checkbox" checked> Enable supports</label>
+            <div class="preset-row">
+              <button type="button" data-support-preset="light">Light</button>
+              <button class="active" type="button" data-support-preset="normal">Normal</button>
+              <button type="button" data-support-preset="heavy">Heavy</button>
+            </div>
+            <div class="preset-row">
+              <button id="importSupportButton" type="button">Import Supports</button>
+              <button id="exportSupportButton" type="button">Export Supports</button>
+            </div>
+          </section>
 
           <details id="menuSupportBasics" class="group right-menu-section" data-right-menu-section="support-basics">
             <summary>
               <span>Support Basics</span>
               <small>Lift, overhang, spacing</small>
             </summary>
-            <div class="preset-row">
-              <button id="importSupportButton" type="button">Import Supports</button>
-              <button id="exportSupportButton" type="button">Export Supports</button>
-            </div>
             <div class="grid two">
               <label>Lift mm <input id="modelLift" type="number" step="0.1" value="5"></label>
               <label>Overhang deg <input id="overhangAngle" type="number" step="1" value="45"></label>
               <label>Spacing mm <input id="supportSpacing" type="number" step="0.1" value="3"></label>
               <label class="check"><input id="primarySupportsEnabled" type="checkbox"> Primary extras</label>
               <label>Primary density <input id="primaryDensityMultiplier" type="number" step="0.1" value="2"></label>
-              <label>Primary radius <input id="primaryAreaRadius" type="number" step="0.1" value="4"></label>
+              <label>Primary diameter <input id="primaryAreaDiameter" type="number" step="0.1" value="8"></label>
               <label>Max primary extra <input id="primaryMaxExtra" type="number" step="1" value="8"></label>
-              <label>Post radius <input id="postRadius" type="number" step="0.01" value="0.28"></label>
-              <label>Tip radius <input id="tipRadius" type="number" step="0.01" value="0.18"></label>
+              <label>Post diameter <input id="postDiameter" type="number" step="0.01" value="0.56"></label>
+              <label>Tip diameter <input id="tipDiameter" type="number" step="0.01" value="0.36"></label>
               <label>Tip type
                 <select id="tipType">
                   <option value="cone">Cone</option>
@@ -178,18 +210,22 @@
                   <option value="cylinder">Cylinder</option>
                 </select>
               </label>
+              <label class="check"><input id="sphericalContactEnabled" type="checkbox"> Spherical contact</label>
+              <div id="sphericalContactFields" class="grid two nested-fields" hidden>
+                <label>Sphere diameter <input id="sphericalContactDiameter" type="number" min="0.01" step="0.01" value="0.6"></label>
+                <label>Inset <span id="sphericalContactInsetValue">50%</span><input id="sphericalContactInsetPercent" type="range" min="5" max="95" step="1" value="50"></label>
+              </div>
             </div>
           </details>
 
-          <details id="menuTipBed" class="group right-menu-section" data-right-menu-section="tip-bed">
+          <details id="menuTipBed" class="group right-menu-section" data-right-menu-section="support-basics">
             <summary>
               <span>Tip And Bed</span>
               <small>Contact shape and base interface</small>
             </summary>
             <div class="grid two">
               <label>Tip length <input id="tipLength" type="number" step="0.1" value="0.8"></label>
-              <label>Tip angle <input id="tipAngle" type="number" step="1" value="25"></label>
-              <label>Foot radius <input id="footRadius" type="number" step="0.01" value="0.8"></label>
+              <label>Foot diameter <input id="footDiameter" type="number" step="0.01" value="1.6"></label>
               <label>Bed interface
                 <select id="bedInterface">
                   <option value="raft">Raft</option>
@@ -198,11 +234,14 @@
                   <option value="none">None</option>
                 </select>
               </label>
-              <label>Raft margin <input id="raftMargin" type="number" step="0.1" value="0.6"></label>
+              <label>Raft offset <input id="raftOffset" type="number" min="0" step="0.1" value="0.6"></label>
+              <label>Raft chamfer width <input id="raftChamferWidth" type="number" min="0" step="0.05" value="0.4"></label>
+              <label>Raft chamfer angle <input id="raftChamferAngle" type="number" min="1" max="89" step="1" value="45"></label>
+              <label>Bed interface thickness <input id="bedInterfaceThickness" type="number" min="0.01" step="0.01" value="0.35"></label>
             </div>
           </details>
 
-          <details id="menuSupportAccess" class="group right-menu-section" data-right-menu-section="support-access">
+          <details id="menuSupportAccess" class="group right-menu-section" data-right-menu-section="support-basics">
             <summary>
               <span>Support Access</span>
               <small>Clearance, reach, enforcers</small>
@@ -217,15 +256,15 @@
             </div>
           </details>
 
-          <details id="menuBracing" class="group right-menu-section" data-right-menu-section="bracing">
+          <details id="menuBracing" class="group right-menu-section" data-right-menu-section="support-basics">
             <summary>
               <span>Bracing</span>
               <small>Cross-support structure</small>
             </summary>
             <div class="grid two">
               <label class="check"><input id="braceEnabled" type="checkbox" checked> Cross braces</label>
-              <label>Brace radius <input id="braceRadius" type="number" step="0.01" value="0.18"></label>
-              <label>Brace height <input id="braceHeight" type="number" step="0.1" value="3"></label>
+              <label>Brace diameter <input id="braceDiameter" type="number" step="0.01" value="0.36"></label>
+              <label>Brace start height <input id="braceHeight" type="number" step="0.1" value="3"></label>
               <label>Brace distance <input id="braceDistance" type="number" step="0.5" value="8"></label>
             </div>
           </details>
@@ -235,13 +274,8 @@
       <button id="showLeftPanelButton" class="panel-tab left-restore" type="button">Parts</button>
       <div id="rightMenuRail" class="right-menu-rail" aria-label="Settings menu tabs">
         <button class="right-menu-tab active" type="button" data-right-menu="job">Job</button>
-        <button class="right-menu-tab" type="button" data-right-menu="sound">Sound</button>
-        <button class="right-menu-tab" type="button" data-right-menu="view">View</button>
         <button class="right-menu-tab" type="button" data-right-menu="placement">Placement</button>
         <button class="right-menu-tab" type="button" data-right-menu="support-basics">Supports</button>
-        <button class="right-menu-tab" type="button" data-right-menu="tip-bed">Tip Bed</button>
-        <button class="right-menu-tab" type="button" data-right-menu="support-access">Access</button>
-        <button class="right-menu-tab" type="button" data-right-menu="bracing">Bracing</button>
       </div>
     </main>
     <div id="promptOverlay" class="prompt-overlay" hidden>

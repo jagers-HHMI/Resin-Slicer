@@ -28,9 +28,9 @@ class GuiOptions:
     bottom_layers: int
     supports_enabled: bool
     support_spacing: float
-    support_radius: float
-    tip_radius: float
-    foot_radius: float
+    support_diameter: float
+    tip_diameter: float
+    foot_diameter: float
     model_lift: float
     overhang_angle: float
     rotate_x: float
@@ -61,9 +61,9 @@ class SlicerGui(tk.Tk):
         self.bottom_layers_var = tk.StringVar()
         self.supports_var = tk.BooleanVar(value=True)
         self.support_spacing_var = tk.StringVar(value="3.0")
-        self.support_radius_var = tk.StringVar(value="0.28")
-        self.tip_radius_var = tk.StringVar(value="0.18")
-        self.foot_radius_var = tk.StringVar(value="0.8")
+        self.support_diameter_var = tk.StringVar(value="0.56")
+        self.tip_diameter_var = tk.StringVar(value="0.36")
+        self.foot_diameter_var = tk.StringVar(value="1.6")
         self.model_lift_var = tk.StringVar(value="5.0")
         self.overhang_angle_var = tk.StringVar(value="45")
         self.rotate_x_var = tk.StringVar(value="0")
@@ -130,9 +130,9 @@ class SlicerGui(tk.Tk):
             supports.columnconfigure(col, weight=1)
         ttk.Checkbutton(supports, text="Generate supports", variable=self.supports_var).grid(row=0, column=0, sticky="w")
         self._entry(supports, 0, 1, "Model lift", self.model_lift_var)
-        self._entry(supports, 1, 0, "Post radius", self.support_radius_var)
-        self._entry(supports, 1, 2, "Tip radius", self.tip_radius_var)
-        self._entry(supports, 2, 0, "Foot radius", self.foot_radius_var)
+        self._entry(supports, 1, 0, "Post diameter", self.support_diameter_var)
+        self._entry(supports, 1, 2, "Tip diameter", self.tip_diameter_var)
+        self._entry(supports, 2, 0, "Foot diameter", self.foot_diameter_var)
         self._entry(supports, 2, 2, "Spacing", self.support_spacing_var)
         self._entry(supports, 3, 0, "Overhang angle", self.overhang_angle_var)
 
@@ -226,9 +226,9 @@ class SlicerGui(tk.Tk):
             bottom_layers=_int(self.bottom_layers_var.get(), "bottom layers"),
             supports_enabled=self.supports_var.get(),
             support_spacing=_float(self.support_spacing_var.get(), "support spacing"),
-            support_radius=_float(self.support_radius_var.get(), "support radius"),
-            tip_radius=_float(self.tip_radius_var.get(), "tip radius"),
-            foot_radius=_float(self.foot_radius_var.get(), "foot radius"),
+            support_diameter=_float(self.support_diameter_var.get(), "support diameter"),
+            tip_diameter=_float(self.tip_diameter_var.get(), "tip diameter"),
+            foot_diameter=_float(self.foot_diameter_var.get(), "foot diameter"),
             model_lift=_float(self.model_lift_var.get(), "model lift"),
             overhang_angle=_float(self.overhang_angle_var.get(), "overhang angle"),
             rotate_x=_float(self.rotate_x_var.get(), "rotate X"),
@@ -260,9 +260,9 @@ class SlicerGui(tk.Tk):
                 model_lift_mm=options.model_lift,
                 overhang_angle_deg=options.overhang_angle,
                 support_spacing_mm=options.support_spacing,
-                post_radius_mm=options.support_radius,
-                tip_radius_mm=options.tip_radius,
-                foot_radius_mm=options.foot_radius,
+                post_radius_mm=options.support_diameter * 0.5,
+                tip_radius_mm=options.tip_diameter * 0.5,
+                foot_radius_mm=options.foot_diameter * 0.5,
             )
             transform = MeshTransform(
                 rotate_x_deg=options.rotate_x,

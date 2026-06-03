@@ -97,6 +97,21 @@ ipcMain.handle("dialog:save-output", async (_event, format) => {
   return result.canceled ? null : result.filePath;
 });
 
+ipcMain.handle("dialog:save-project", async (_event, defaultName, content) => {
+  const safeName = String(defaultName || "resin-slicer-project.json").replace(/[\\/:*?"<>|]+/g, "-");
+  const result = await dialog.showSaveDialog({
+    title: "Save project",
+    defaultPath: safeName.endsWith(".json") ? safeName : `${safeName}.json`,
+    filters: [
+      { name: "Resin Slicer Project", extensions: ["json"] },
+      { name: "All Files", extensions: ["*"] }
+    ]
+  });
+  if (result.canceled || !result.filePath) return null;
+  await fs.writeFile(result.filePath, String(content || ""), "utf8");
+  return result.filePath;
+});
+
 ipcMain.handle("dialog:open-profile", async (_event, kind) => {
   const result = await dialog.showOpenDialog({
     title: `Import ${profileKindLabel(kind)} profile`,

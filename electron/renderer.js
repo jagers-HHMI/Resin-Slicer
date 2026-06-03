@@ -6,12 +6,13 @@ const fields = [
   "liftDistance", "liftSpeed", "retractDistance", "retractSpeed",
   "waitAfterRetract", "resinDensity", "lightPwm", "bottomLightPwm",
   "rotateX", "rotateY", "rotateZ", "translateX", "translateY", "translateZ",
-  "scale", "modelLift", "overhangAngle", "supportSpacing", "postRadius",
-  "primaryDensityMultiplier", "primaryAreaRadius", "primaryMaxExtra",
-  "tipRadius", "tipType", "tipLength", "tipAngle", "footRadius",
-  "bedInterface", "raftMargin", "collisionClearance", "maxBaseReach",
+  "scale", "modelLift", "overhangAngle", "supportSpacing", "postDiameter",
+  "primaryDensityMultiplier", "primaryAreaDiameter", "primaryMaxExtra",
+  "tipDiameter", "tipType", "sphericalContactDiameter", "sphericalContactInsetPercent",
+  "tipLength", "footDiameter",
+  "bedInterface", "raftOffset", "raftChamferWidth", "raftChamferAngle", "bedInterfaceThickness", "collisionClearance", "maxBaseReach",
   "maxSupportAngle", "enforcerReach", "enforcerMinDrop",
-  "braceRadius", "braceHeight", "braceDistance"
+  "braceDiameter", "braceHeight", "braceDistance"
 ];
 
 const placementFields = new Set(["rotateX", "rotateY", "rotateZ", "translateX", "translateY", "translateZ", "scale"]);
@@ -45,6 +46,10 @@ const soundStorageKeys = {
   enabled: "resinSlicer.soundEnabled",
   volume: "resinSlicer.soundVolume"
 };
+const viewStorageKeys = {
+  projection: "resinSlicer.projectionMode",
+  navigation: "resinSlicer.navigationMode"
+};
 const soundPreloadIds = [
   "click-soft", "click-crisp", "toggle-on", "toggle-off", "confirm", "success",
   "warning", "error", "modal-open", "modal-close", "drawer-open", "drawer-close",
@@ -72,9 +77,113 @@ const fallbackSoundEntries = {
   "focus-ring": { file: "sounds/focus-ring.wav", recommendedVolume: 0.55, loop: false }
 };
 
+const supportPresets = {
+  light: {
+    supportsEnabled: true,
+    modelLift: 4,
+    overhangAngle: 42,
+    supportSpacing: 4,
+    primarySupportsEnabled: false,
+    primaryDensityMultiplier: 1.6,
+    primaryAreaDiameter: 6,
+    primaryMaxExtra: 4,
+    postDiameter: 0.42,
+    tipDiameter: 0.26,
+    tipType: "cone",
+    sphericalContactEnabled: false,
+    sphericalContactDiameter: 0.45,
+    sphericalContactInsetPercent: 50,
+    tipLength: 0.65,
+    footDiameter: 1.1,
+    bedInterface: "feet",
+    raftOffset: 0.45,
+    raftChamferWidth: 0.25,
+    raftChamferAngle: 45,
+    bedInterfaceThickness: 0.25,
+    collisionClearance: 0.06,
+    maxBaseReach: 40,
+    maxSupportAngle: 40,
+    enforcersEnabled: false,
+    enforcerReach: 8,
+    enforcerMinDrop: 1,
+    braceEnabled: false,
+    braceDiameter: 0.26,
+    braceHeight: 2.5,
+    braceDistance: 7
+  },
+  normal: {
+    supportsEnabled: true,
+    modelLift: 5,
+    overhangAngle: 45,
+    supportSpacing: 3,
+    primarySupportsEnabled: false,
+    primaryDensityMultiplier: 2,
+    primaryAreaDiameter: 8,
+    primaryMaxExtra: 8,
+    postDiameter: 0.56,
+    tipDiameter: 0.36,
+    tipType: "cone",
+    sphericalContactEnabled: false,
+    sphericalContactDiameter: 0.6,
+    sphericalContactInsetPercent: 50,
+    tipLength: 0.8,
+    footDiameter: 1.6,
+    bedInterface: "raft",
+    raftOffset: 0.6,
+    raftChamferWidth: 0.4,
+    raftChamferAngle: 45,
+    bedInterfaceThickness: 0.35,
+    collisionClearance: 0.08,
+    maxBaseReach: 45,
+    maxSupportAngle: 35,
+    enforcersEnabled: false,
+    enforcerReach: 10,
+    enforcerMinDrop: 1,
+    braceEnabled: true,
+    braceDiameter: 0.36,
+    braceHeight: 3,
+    braceDistance: 8
+  },
+  heavy: {
+    supportsEnabled: true,
+    modelLift: 6,
+    overhangAngle: 50,
+    supportSpacing: 2,
+    primarySupportsEnabled: true,
+    primaryDensityMultiplier: 2.4,
+    primaryAreaDiameter: 10,
+    primaryMaxExtra: 12,
+    postDiameter: 0.78,
+    tipDiameter: 0.5,
+    tipType: "cone",
+    sphericalContactEnabled: false,
+    sphericalContactDiameter: 0.8,
+    sphericalContactInsetPercent: 50,
+    tipLength: 1,
+    footDiameter: 2.2,
+    bedInterface: "raft",
+    raftOffset: 0.9,
+    raftChamferWidth: 0.6,
+    raftChamferAngle: 45,
+    bedInterfaceThickness: 0.5,
+    collisionClearance: 0.1,
+    maxBaseReach: 50,
+    maxSupportAngle: 30,
+    enforcersEnabled: true,
+    enforcerReach: 12,
+    enforcerMinDrop: 1,
+    braceEnabled: true,
+    braceDiameter: 0.5,
+    braceHeight: 3.5,
+    braceDistance: 10
+  }
+};
+
 async function init() {
   viewer = new Viewer($("viewer"));
+  viewer.onFrame = updateViewCube;
   initSounds();
+  initViewControls();
   $("openButton").addEventListener("click", openStl);
   $("saveButton").addEventListener("click", chooseOutput);
   $("importMachineButton").addEventListener("click", browseMachineProfile);
@@ -84,6 +193,10 @@ async function init() {
   $("exportResinButton").addEventListener("click", () => exportProfile("resin"));
   $("importSupportButton").addEventListener("click", () => importProfile("support"));
   $("exportSupportButton").addEventListener("click", () => exportProfile("support"));
+  for (const button of document.querySelectorAll("[data-support-preset]")) {
+    button.addEventListener("click", () => applySupportPreset(button.dataset.supportPreset));
+  }
+  $("saveProjectButton").addEventListener("click", saveProject);
   $("addBuildPlateButton").addEventListener("click", addBuildPlate);
   $("fitViewButton").addEventListener("click", () => {
     viewer.recenter();
@@ -93,38 +206,45 @@ async function init() {
   $("moveToActivePlateButton").addEventListener("click", moveSelectedModelsToActivePlate);
   $("clipEnabled").addEventListener("change", () => {
     activePlate().clipEnabled = $("clipEnabled").checked;
+    snapPlateClipHeightToLayer(activePlate());
+    updatePlateControls(activePlate());
     updateScene();
   });
-  $("clipHeight").addEventListener("input", () => setActivePlateClipHeight(Number($("clipHeight").value)));
+  $("clipHeight").addEventListener("input", () => setActivePlateClipLayer(Number($("clipHeight").value)));
   $("clipHeight").addEventListener("wheel", stepClipHeightFromWheel, { passive: false });
   $("clipHeightValue").addEventListener("wheel", stepClipHeightFromWheel, { passive: false });
-  $("clipHeightValue").addEventListener("change", () => setActivePlateClipHeight(Number($("clipHeightValue").value)));
+  $("clipHeightValue").addEventListener("change", () => setActivePlateClipLayer(Number($("clipHeightValue").value)));
   $("clipHeightValue").addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
-      setActivePlateClipHeight(Number($("clipHeightValue").value));
+      setActivePlateClipLayer(Number($("clipHeightValue").value));
       $("clipHeightValue").blur();
     }
   });
+  $("clipLayerUp").addEventListener("click", () => stepActiveClipLayer(1));
+  $("clipLayerDown").addEventListener("click", () => stepActiveClipLayer(-1));
   $("previewButton").addEventListener("click", generatePreview);
   $("sliceButton").addEventListener("click", slice);
   $("sliceAllButton").addEventListener("click", sliceAll);
   $("saveAllButton").addEventListener("click", saveAll);
   $("profile").addEventListener("change", () => {
     loadProfileDefaults();
-    writeActivePlateSettingsFromForm();
+    applyCurrentMachineProfileToAllBuildPlates();
     syncSceneSettingCommits();
     updateScene();
   });
   $("format").addEventListener("change", () => {
     if (models.length && !$("outputPath").value) setDefaultOutput();
   });
-  for (const id of ["centerModel", "supportsEnabled", "primarySupportsEnabled", "enforcersEnabled", "braceEnabled"]) {
+  for (const id of ["centerModel", "supportsEnabled", "primarySupportsEnabled", "sphericalContactEnabled", "enforcersEnabled", "braceEnabled"]) {
     $(id).addEventListener("change", () => {
+      if (id === "sphericalContactEnabled") syncSphericalContactFields();
       writeActivePlateSettingsFromForm();
       updateScene();
     });
   }
+  $("sphericalContactInsetPercent").addEventListener("input", syncSphericalContactFields);
+  syncSphericalContactFields();
   bindSceneSettingUpdates();
   bindPanelToggles();
   bindTopbarMenus();
@@ -134,6 +254,7 @@ async function init() {
   initUvtoolsDialog();
   initGlobalShortcuts();
   viewer.onScenePick = handleScenePick;
+  viewer.onSceneDoubleClick = handleSceneDoubleClick;
   viewer.onModelDrag = handleModelDrag;
   viewer.onModelDragEnd = handleModelDragEnd;
   viewer.onGizmoDrag = handleGizmoDrag;
@@ -221,13 +342,14 @@ function bindSceneSettingUpdates() {
   dropOffset.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {
       event.preventDefault();
-      normalizePlacementField(dropOffset);
+      commitDropOffsetField(dropOffset);
       dropOffset.blur();
     }
   });
-  dropOffset.addEventListener("blur", () => normalizePlacementField(dropOffset));
-  dropOffset.addEventListener("change", () => normalizePlacementField(dropOffset));
-  normalizePlacementField(dropOffset);
+  dropOffset.addEventListener("blur", () => commitDropOffsetField(dropOffset));
+  dropOffset.addEventListener("change", () => commitDropOffsetField(dropOffset));
+  normalizeDropOffsetField(dropOffset);
+  dropOffset.dataset.sceneCommittedValue = dropOffset.value;
   syncSceneSettingCommits();
 }
 
@@ -260,6 +382,22 @@ function fieldValue(field) {
 
 function normalizePlacementField(field) {
   const value = roundPlacementValue(Number(field.value));
+  field.value = formatPlacementValue(value);
+  return field.value;
+}
+
+function commitDropOffsetField(field) {
+  const value = normalizeDropOffsetField(field);
+  if (value === field.dataset.sceneCommittedValue) return;
+  field.dataset.sceneCommittedValue = value;
+  const snapped = snapSelectedModelsToDropOffset();
+  if (!snapped) return;
+  updatePlacementFieldsFromSelection();
+  updateScene();
+}
+
+function normalizeDropOffsetField(field) {
+  const value = Math.max(0, roundPlacementValue(Number(field.value)));
   field.value = formatPlacementValue(value);
   return field.value;
 }
@@ -326,7 +464,7 @@ function closeTopbarMenus() {
 function resizeViewerThroughPanelTransition() {
   const startedAt = performance.now();
   const tick = () => {
-    viewer.resize({ recenter: true });
+    viewer.resize({ recenter: false });
     if (performance.now() - startedAt < 320) requestAnimationFrame(tick);
   };
   requestAnimationFrame(tick);
@@ -436,6 +574,62 @@ function initSounds() {
       soundInitError = error;
       log(`Sound unavailable: ${error.message}`);
     });
+}
+
+function initViewControls() {
+  const storedProjection = localStorageValue(viewStorageKeys.projection, "perspective");
+  const storedNavigation = localStorageValue(viewStorageKeys.navigation, "turntable");
+  $("projectionToggle").checked = storedProjection === "orthographic";
+  $("navigationMode").value = ["turntable", "trackball", "selection", "cursor"].includes(storedNavigation)
+    ? storedNavigation
+    : "turntable";
+  viewer.setProjectionMode($("projectionToggle").checked ? "orthographic" : "perspective");
+  viewer.setNavigationMode($("navigationMode").value);
+  $("projectionToggle").addEventListener("change", () => {
+    const mode = $("projectionToggle").checked ? "orthographic" : "perspective";
+    viewer.setProjectionMode(mode);
+    storeValue(viewStorageKeys.projection, mode);
+    playSound($("projectionToggle").checked ? "toggle-on" : "toggle-off");
+  });
+  $("navigationMode").addEventListener("change", () => {
+    viewer.setNavigationMode($("navigationMode").value);
+    storeValue(viewStorageKeys.navigation, $("navigationMode").value);
+    playSound("click-soft");
+  });
+}
+
+function updateViewCube() {
+  const cube = document.querySelector("#viewCube .view-cube-object");
+  if (!cube || !viewer) return;
+  cube.style.transform = viewCubeMatrix(viewer.cameraState());
+}
+
+function viewCubeMatrix({ right, up, zAxis }) {
+  const cssUp = scaleVec(up, -1);
+  const localAxes = [
+    [1, 0, 0],
+    [0, 0, -1],
+    [0, 1, 0]
+  ];
+  const values = localAxes.flatMap((axis) => [
+    dot(axis, right),
+    dot(axis, cssUp),
+    dot(axis, zAxis),
+    0
+  ]);
+  return `matrix3d(${[...values, 0, 0, 0, 1].map((value) => cleanMatrixValue(value)).join(",")})`;
+}
+
+function cleanMatrixValue(value) {
+  return Math.abs(value) < 1e-8 ? 0 : Number(value.toFixed(8));
+}
+
+function localStorageValue(key, fallback) {
+  try {
+    return localStorage.getItem(key) || fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 async function createSoundKitPlayer(enabled, volume) {
@@ -606,16 +800,21 @@ function buildPlateSettingsFromForm() {
       spacing: number("supportSpacing"),
       primarySupportsEnabled: $("primarySupportsEnabled").checked,
       primaryDensityMultiplier: number("primaryDensityMultiplier"),
-      primaryAreaRadius: number("primaryAreaRadius"),
+      primaryAreaDiameter: number("primaryAreaDiameter"),
       primaryMaxExtra: intNumber("primaryMaxExtra"),
-      postRadius: number("postRadius"),
-      tipRadius: number("tipRadius"),
+      postDiameter: number("postDiameter"),
+      tipDiameter: number("tipDiameter"),
       tipType: $("tipType").value,
+      sphericalContactEnabled: $("sphericalContactEnabled").checked,
+      sphericalContactDiameter: number("sphericalContactDiameter"),
+      sphericalContactInsetPercent: number("sphericalContactInsetPercent"),
       tipLength: number("tipLength"),
-      tipAngle: number("tipAngle"),
-      footRadius: number("footRadius"),
+      footDiameter: number("footDiameter"),
       bedInterface: $("bedInterface").value,
-      raftMargin: number("raftMargin"),
+      raftOffset: number("raftOffset"),
+      raftChamferWidth: number("raftChamferWidth"),
+      raftChamferAngle: number("raftChamferAngle"),
+      bedInterfaceThickness: number("bedInterfaceThickness"),
       collisionClearance: number("collisionClearance"),
       maxBaseReach: number("maxBaseReach"),
       maxSupportAngle: number("maxSupportAngle"),
@@ -623,7 +822,7 @@ function buildPlateSettingsFromForm() {
       enforcerReach: number("enforcerReach"),
       enforcerMinDrop: number("enforcerMinDrop"),
       braceEnabled: $("braceEnabled").checked,
-      braceRadius: number("braceRadius"),
+      braceDiameter: number("braceDiameter"),
       braceHeight: number("braceHeight"),
       braceDistance: number("braceDistance")
     }
@@ -637,9 +836,33 @@ function cloneSettings(settings) {
 function writeActivePlateSettingsFromForm() {
   const plate = activePlate();
   plate.settings = cloneSettings(buildPlateSettingsFromForm());
-  plate.clipHeight = clamp(plate.clipHeight, 0, plate.settings.printer.sizeZ || 160);
+  snapPlateClipHeightToLayer(plate);
   updatePlateControls(plate);
   renderBuildPlateList();
+}
+
+function settingsValue(settings, key, fallback) {
+  const value = settings?.[key];
+  return value === undefined || value === null || value === "" ? fallback : value;
+}
+
+function diameterSetting(settings, diameterKey, radiusKey, fallbackDiameter) {
+  const diameter = Number(settings?.[diameterKey]);
+  if (Number.isFinite(diameter)) return diameter;
+  const radius = Number(settings?.[radiusKey]);
+  if (Number.isFinite(radius)) return radius * 2;
+  return fallbackDiameter;
+}
+
+function insetPercentSetting(support) {
+  const percent = Number(support?.sphericalContactInsetPercent);
+  if (Number.isFinite(percent)) return clamp(percent, 5, 95);
+  const insetMm = Number(support?.sphericalContactInset);
+  const diameterMm = Number(support?.sphericalContactDiameter);
+  if (Number.isFinite(insetMm) && Number.isFinite(diameterMm) && diameterMm > 0) {
+    return clamp(Math.round((insetMm / diameterMm) * 100), 5, 95);
+  }
+  return 50;
 }
 
 function applyBuildPlateSettingsToForm(plate) {
@@ -674,16 +897,21 @@ function applyBuildPlateSettingsToForm(plate) {
   $("supportSpacing").value = support.spacing;
   $("primarySupportsEnabled").checked = !!support.primarySupportsEnabled;
   $("primaryDensityMultiplier").value = support.primaryDensityMultiplier;
-  $("primaryAreaRadius").value = support.primaryAreaRadius;
+  $("primaryAreaDiameter").value = diameterSetting(support, "primaryAreaDiameter", "primaryAreaRadius", 8);
   $("primaryMaxExtra").value = support.primaryMaxExtra;
-  $("postRadius").value = support.postRadius;
-  $("tipRadius").value = support.tipRadius;
+  $("postDiameter").value = diameterSetting(support, "postDiameter", "postRadius", 0.56);
+  $("tipDiameter").value = diameterSetting(support, "tipDiameter", "tipRadius", 0.36);
   $("tipType").value = support.tipType;
+  $("sphericalContactEnabled").checked = !!support.sphericalContactEnabled;
+  $("sphericalContactDiameter").value = support.sphericalContactDiameter ?? 0.6;
+  $("sphericalContactInsetPercent").value = insetPercentSetting(support);
   $("tipLength").value = support.tipLength;
-  $("tipAngle").value = support.tipAngle;
-  $("footRadius").value = support.footRadius;
+  $("footDiameter").value = diameterSetting(support, "footDiameter", "footRadius", 1.6);
   $("bedInterface").value = support.bedInterface;
-  $("raftMargin").value = support.raftMargin;
+  $("raftOffset").value = settingsValue(support, "raftOffset", settingsValue(support, "raftMargin", 0.6));
+  $("raftChamferWidth").value = settingsValue(support, "raftChamferWidth", settingsValue(support, "raft_chamfer_width_mm", 0.4));
+  $("raftChamferAngle").value = settingsValue(support, "raftChamferAngle", settingsValue(support, "raft_chamfer_angle_deg", 45));
+  $("bedInterfaceThickness").value = settingsValue(support, "bedInterfaceThickness", 0.35);
   $("collisionClearance").value = support.collisionClearance;
   $("maxBaseReach").value = support.maxBaseReach;
   $("maxSupportAngle").value = support.maxSupportAngle;
@@ -691,19 +919,65 @@ function applyBuildPlateSettingsToForm(plate) {
   $("enforcerReach").value = support.enforcerReach;
   $("enforcerMinDrop").value = support.enforcerMinDrop;
   $("braceEnabled").checked = !!support.braceEnabled;
-  $("braceRadius").value = support.braceRadius;
+  $("braceDiameter").value = diameterSetting(support, "braceDiameter", "braceRadius", 0.36);
   $("braceHeight").value = support.braceHeight;
   $("braceDistance").value = support.braceDistance;
+  syncSphericalContactFields();
   updatePlacementFieldsFromSelection();
   updatePlateControls(plate);
   syncSceneSettingCommits();
 }
 
+function syncSphericalContactFields() {
+  const fields = $("sphericalContactFields");
+  if (!fields) return;
+  fields.hidden = !$("sphericalContactEnabled").checked;
+  const value = clamp(Math.round(number("sphericalContactInsetPercent")), 5, 95);
+  $("sphericalContactInsetPercent").value = value;
+  $("sphericalContactInsetValue").textContent = `${value}%`;
+}
+
+function applySupportPreset(name) {
+  const preset = supportPresets[name];
+  if (!preset) return;
+  for (const [id, value] of Object.entries(preset)) {
+    const field = $(id);
+    if (!field) continue;
+    if (field.type === "checkbox") {
+      field.checked = Boolean(value);
+    } else {
+      field.value = value;
+    }
+  }
+  for (const button of document.querySelectorAll("[data-support-preset]")) {
+    button.classList.toggle("active", button.dataset.supportPreset === name);
+  }
+  syncSphericalContactFields();
+  const plate = activePlate();
+  writeActivePlateSettingsFromForm();
+  plate.supports = [];
+  plate.supportBraces = [];
+  plate.layersGenerated = false;
+  $("supportStatus").textContent = "Supports not generated";
+  syncSceneSettingCommits();
+  updateScene();
+  log(`${titleCase(name)} support preset applied`);
+  playSound("click-soft");
+}
+
+function titleCase(value) {
+  return String(value || "").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
 function updatePlateControls(plate) {
-  const maxZ = plate.settings.printer.sizeZ || 160;
-  $("clipHeight").max = maxZ;
-  $("clipHeight").value = clamp(plate.clipHeight, 0, maxZ);
-  $("clipHeightValue").value = Number($("clipHeight").value).toFixed(2);
+  const maxLayer = plateMaxLayer(plate);
+  const layer = clipHeightToLayer(plate, plate.clipHeight);
+  $("clipHeight").min = 1;
+  $("clipHeight").max = maxLayer;
+  $("clipHeight").value = layer;
+  $("clipHeightValue").min = 1;
+  $("clipHeightValue").max = maxLayer;
+  $("clipHeightValue").value = layer;
   $("clipEnabled").checked = !!plate.clipEnabled;
 }
 
@@ -724,8 +998,8 @@ function addBuildPlate(options = {}) {
   lastSelectedModelId = null;
   applyBuildPlateSettingsToForm(plate);
   updateScene();
+  viewer.zoomToFitBuildPlateIfNeeded(plate);
   animateBuildPlateDrop(plate);
-  viewer.recenter();
   playSound("confirm");
 }
 
@@ -795,10 +1069,28 @@ function setActiveBuildPlate(id, { loadSettings = true, sound = true } = {}) {
   if (sound) playSound("focus-ring");
 }
 
-function updateBuildPlateLayout() {
+function applyCurrentMachineProfileToAllBuildPlates() {
+  ensureInitialBuildPlate();
+  const nextSettings = buildPlateSettingsFromForm();
+  for (const plate of buildPlates) {
+    plate.settings.profile = nextSettings.profile;
+    plate.settings.centerModel = nextSettings.centerModel;
+    plate.settings.printer = cloneSettings(nextSettings.printer);
+    snapPlateClipHeightToLayer(plate);
+  }
+  updateBuildPlateLayout({ force: true });
+  applyBuildPlateSettingsToForm(activePlate());
+  renderWorkspaceLists();
+}
+
+function updateBuildPlateLayout({ force = false } = {}) {
   buildPlates.forEach((plate) => {
     if (!Number.isFinite(plate.layoutSlot) || !isFiniteOrigin(plate.origin)) {
       placeBuildPlateInSpiral(plate);
+    } else if (force) {
+      plate.origin = buildPlateOriginForSlot(plate.layoutSlot, plate);
+    } else {
+      plate.origin = buildPlateOriginForSlot(plate.layoutSlot, plate);
     }
   });
 }
@@ -962,10 +1254,17 @@ function renderLeftTree() {
     toggle.type = "button";
     toggle.className = "plate-toggle";
     toggle.innerHTML = `<span class="plate-title"><strong>${plateIndex + 1}. ${escapeText(plate.name)}</strong><small>${plateModels.length} part${plateModels.length === 1 ? "" : "s"}</small></span>`;
-    toggle.addEventListener("click", () => {
+    toggle.addEventListener("click", (event) => {
+      if (event.detail > 1) return;
       expandedPlateId = expandedPlateId === plate.id ? null : plate.id;
       setActiveBuildPlate(plate.id);
       renderLeftTree();
+    });
+    toggle.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setActiveBuildPlate(plate.id);
+      centerViewOnBuildPlate(plate.id);
     });
     label.appendChild(toggle);
     if (plate.id === activePlateId) {
@@ -1012,6 +1311,12 @@ function renderLeftTree() {
         part.className = `part-item${selectedModelIds.has(model.id) ? " selected" : ""}`;
         part.innerHTML = `${modelIndex + 1}. ${escapeText(model.name)}<small>${escapeText(fileName(model.path))}</small>`;
         part.addEventListener("click", (event) => selectModel(model.id, { additive: event.ctrlKey || event.metaKey || event.shiftKey }));
+        part.addEventListener("dblclick", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          selectModel(model.id, { additive: event.ctrlKey || event.metaKey || event.shiftKey });
+          centerViewOnModel(model.id);
+        });
         part.addEventListener("dragstart", (event) => startPartListDrag(event, model.id));
         const deleteButton = document.createElement("button");
         deleteButton.type = "button";
@@ -1057,6 +1362,7 @@ function dropModelsOnPlate(event, plateId) {
   const moving = models.filter((model) => ids.includes(model.id));
   if (!moving.length) return;
   for (const model of moving) model.plateId = target.id;
+  snapModelsToDropOffset(moving);
   activePlateId = target.id;
   expandedPlateId = target.id;
   applyBuildPlateSettingsToForm(target);
@@ -1450,7 +1756,6 @@ function handleScenePick(hit) {
     const clickedActivePlate = hit.id === activePlateId;
     const clearedSelection = clearModelSelection({ renderListsNow: false, updateSceneNow: false });
     setActiveBuildPlate(hit.id);
-    centerViewOnBuildPlate(hit.id);
     if (clickedActivePlate && clearedSelection) {
       renderWorkspaceLists();
       updateScene();
@@ -1462,10 +1767,30 @@ function handleScenePick(hit) {
   }
 }
 
+function handleSceneDoubleClick(hit) {
+  if (!hit) return;
+  if (hit.type === "model") {
+    selectModel(hit.id);
+    centerViewOnModel(hit.id);
+  } else if (hit.type === "plate") {
+    setActiveBuildPlate(hit.id);
+    centerViewOnBuildPlate(hit.id);
+  } else if (hit.type === "plate-action") {
+    setActiveBuildPlate(hit.plateId);
+    centerViewOnBuildPlate(hit.plateId);
+  }
+}
+
 function centerViewOnBuildPlate(plateId) {
   const plate = buildPlates.find((item) => item.id === plateId);
   if (!plate) return;
   viewer.centerOnBuildPlate(plate);
+}
+
+function centerViewOnModel(modelId) {
+  const model = models.find((item) => item.id === modelId);
+  if (!model) return;
+  viewer.centerOnBounds(modelWorldBounds(model));
 }
 
 function handleModelDrag(drag) {
@@ -1482,18 +1807,16 @@ function handleModelDrag(drag) {
 function handleModelDragEnd() {
   const selection = selectedModels();
   if (!selection.length) return;
+  snapModelsToDropOffset(selection);
   invalidateGeneratedLayersForSelection(selection);
   updatePlacementFieldsFromSelection();
   renderWorkspaceLists();
   updateScene();
 }
 
-function handleGizmoDragEnd(drag = {}) {
+function handleGizmoDragEnd() {
   const selection = selectedModels();
   if (!selection.length) return;
-  if (drag.action?.startsWith("rotate-")) {
-    for (const model of selection) dropModelToBuildPlate(model, { exact: true });
-  }
   handleModelDragEnd();
 }
 
@@ -1502,9 +1825,9 @@ function handleGizmoDrag(drag) {
   if (!selection.length) return;
   const planeDelta = viewer.screenDeltaToBuildPlane(drag.dx, drag.dy);
   const zDelta = -drag.dy * Math.max(0.02, viewer.distance * 0.0015);
-  const rotationDelta = (drag.dx - drag.dy) * 0.35;
   const translatesModel = drag.action.startsWith("move-");
   const rotatesModel = drag.action.startsWith("rotate-");
+  const rotationDelta = rotatesModel ? viewer.gizmoRotationDelta(drag) : 0;
   for (const model of selection) {
     if (drag.action === "move-x") model.transform.translateX += planeDelta.x;
     if (drag.action === "move-y") model.transform.translateY += planeDelta.y;
@@ -1521,10 +1844,9 @@ function handleGizmoDrag(drag) {
       model.transform.translateY += planeDelta.y;
       model.transform.translateZ += zDelta;
     }
-    if (drag.action === "rotate-x") model.transform.rotateX += rotationDelta;
-    if (drag.action === "rotate-y") model.transform.rotateY += rotationDelta;
-    if (drag.action === "rotate-z") model.transform.rotateZ += rotationDelta;
-    if (rotatesModel) dropModelToBuildPlate(model);
+    if (drag.action === "rotate-x") applyGlobalRotationToTransform(model.transform, "x", rotationDelta);
+    if (drag.action === "rotate-y") applyGlobalRotationToTransform(model.transform, "y", -rotationDelta);
+    if (drag.action === "rotate-z") applyGlobalRotationToTransform(model.transform, "z", rotationDelta);
     if (translatesModel) maybeMoveModelToPlateByCentroid(model);
   }
   requestSceneUpdate({ renderLists: false, updateStatus: false, skipDerivedGeometry: true });
@@ -1532,6 +1854,19 @@ function handleGizmoDrag(drag) {
 
 function selectedModels() {
   return models.filter((model) => selectedModelIds.has(model.id));
+}
+
+function snapSelectedModelsToDropOffset() {
+  const selection = selectedModels();
+  if (!selection.length) return false;
+  snapModelsToDropOffset(selection);
+  invalidateGeneratedLayersForSelection(selection);
+  renderWorkspaceLists();
+  return true;
+}
+
+function snapModelsToDropOffset(items) {
+  for (const model of items) dropModelToBuildPlate(model, { exact: true });
 }
 
 function normalizeLastSelectedModel() {
@@ -1551,6 +1886,11 @@ function applyPlacementFieldToSelected(fieldId) {
   const value = roundPlacementValue(number(fieldId));
   $(fieldId).value = formatPlacementValue(value);
   const rotatesModel = key === "rotateX" || key === "rotateY" || key === "rotateZ";
+  const transformsModel = key === "translateX"
+    || key === "translateY"
+    || key === "translateZ"
+    || key === "scale"
+    || rotatesModel;
   for (const model of selection) {
     if (key === "translateX" || key === "translateY" || key === "translateZ") {
       model.transform[key] = value;
@@ -1559,15 +1899,12 @@ function applyPlacementFieldToSelected(fieldId) {
     } else {
       model.transform[key] = value;
     }
-    if (rotatesModel) {
-      dropModelToBuildPlate(model, { exact: true });
-    } else {
-      maybeMoveModelToPlateByCentroid(model);
-    }
+    maybeMoveModelToPlateByCentroid(model);
   }
+  if (transformsModel) snapModelsToDropOffset(selection);
   invalidateGeneratedLayersForSelection(selection);
   renderWorkspaceLists();
-  if (rotatesModel) updatePlacementFieldsFromSelection();
+  if (transformsModel) updatePlacementFieldsFromSelection();
 }
 
 function placementKey(fieldId) {
@@ -1732,6 +2069,7 @@ function moveSelectedModelsToActivePlate() {
     model.transform.translateX = centroid[0] - plate.origin.x - local[0];
     model.transform.translateY = centroid[1] - plate.origin.y - local[1];
   }
+  snapModelsToDropOffset(selection);
   expandedPlateId = plate.id;
   renderWorkspaceLists();
   updateScene();
@@ -1896,6 +2234,66 @@ async function chooseOutput() {
   }
 }
 
+async function saveProject() {
+  try {
+    writeActivePlateSettingsFromForm();
+    playSound("click-soft");
+    const content = JSON.stringify(buildProjectSnapshot(), null, 2);
+    const path = await window.slicer.saveProject(projectFileName(), content);
+    if (!path) {
+      log("Save project canceled.");
+      return;
+    }
+    log(`Saved project: ${path}`);
+    playSound("save");
+  } catch (error) {
+    log(`Save project failed: ${error.message}`);
+    showErrorPrompt("Save Project Failed", error);
+  }
+}
+
+function buildProjectSnapshot() {
+  return {
+    schema: "resin-slicer-project",
+    version: 1,
+    savedAt: new Date().toISOString(),
+    format: $("format").value,
+    outputPath: $("outputPath").value.trim(),
+    activePlateId,
+    expandedPlateId,
+    nextBuildPlateId,
+    nextModelId,
+    selectedModelIds: [...selectedModelIds],
+    lastSelectedModelId,
+    buildPlates: buildPlates.map((plate) => ({
+      id: plate.id,
+      name: plate.name,
+      origin: cloneSettings(plate.origin),
+      layoutSlot: plate.layoutSlot,
+      clipHeight: plate.clipHeight,
+      clipEnabled: !!plate.clipEnabled,
+      layersGenerated: !!plate.layersGenerated,
+      settings: cloneSettings(plate.settings),
+      supports: cloneSettings(plate.supports || []),
+      supportBraces: cloneSettings(plate.supportBraces || [])
+    })),
+    models: models.map((model) => ({
+      id: model.id,
+      plateId: model.plateId,
+      name: model.name,
+      path: model.path,
+      transform: cloneSettings(model.transform)
+    }))
+  };
+}
+
+function projectFileName() {
+  const outputPath = $("outputPath").value.trim();
+  if (outputPath) return `${safeFileStem(fileName(outputPath).replace(/\.[^.]+$/, ""))}-project.json`;
+  if (models.length) return `${safeFileStem(fileName(models[0].path).replace(/\.[^.]+$/, ""))}-project.json`;
+  return "resin-slicer-project.json";
+}
+
 function setDefaultOutput() {
   const ext = $("format").value;
   if (!models.length || $("outputPath").value) return;
@@ -2039,19 +2437,19 @@ async function generatePreview() {
   const plate = activePlate();
   playSound("click-crisp");
   setBusy(true);
-  log(`Generating support preview for ${plate.name}...`);
+  log(`Generating supports for ${plate.name}...`);
   try {
     const result = await window.slicer.preview(collectPayloadForPlate(plate));
     plate.supports = result.supports || [];
     plate.supportBraces = result.braces || [];
     plate.layersGenerated = true;
-    $("supportStatus").textContent = `${plate.supports.length.toLocaleString()} supports previewed`;
+    $("supportStatus").textContent = `${plate.supports.length.toLocaleString()} supports generated`;
     updateScene();
-    log(`Preview ${plate.name}: ${result.layers} layers, ${plate.supports.length} supports, ${plate.supportBraces.length} braces`);
+    log(`Generated ${plate.name}: ${result.layers} layers, ${plate.supports.length} supports, ${plate.supportBraces.length} braces`);
     playSound("success");
   } catch (error) {
-    log(`Preview failed: ${error.message}`);
-    showErrorPrompt("Preview Failed", error);
+    log(`Generate supports failed: ${error.message}`);
+    showErrorPrompt("Generate Supports Failed", error);
   } finally {
     setBusy(false);
   }
@@ -2282,16 +2680,21 @@ function applySupportProfile(flat) {
   changed += applyNumberValue("supportSpacing", flat, ["supportSpacing", "spacing", "support_spacing_mm"]);
   changed += applyCheckedValue("primarySupportsEnabled", flat, ["primarySupportsEnabled", "primary_supports_enabled"]);
   changed += applyNumberValue("primaryDensityMultiplier", flat, ["primaryDensityMultiplier", "primary_density_multiplier"]);
-  changed += applyNumberValue("primaryAreaRadius", flat, ["primaryAreaRadius", "primary_area_radius_mm"]);
+  changed += applyDiameterValue("primaryAreaDiameter", flat, ["primaryAreaDiameter", "primary_area_diameter_mm"], ["primaryAreaRadius", "primary_area_radius_mm"]);
   changed += applyNumberValue("primaryMaxExtra", flat, ["primaryMaxExtra", "primary_max_extra_per_island"], Math.round);
-  changed += applyNumberValue("postRadius", flat, ["postRadius", "supportRadius", "post_radius_mm"]);
-  changed += applyNumberValue("tipRadius", flat, ["tipRadius", "contactRadius", "tip_radius_mm"]);
+  changed += applyDiameterValue("postDiameter", flat, ["postDiameter", "supportDiameter", "post_diameter_mm"], ["postRadius", "supportRadius", "post_radius_mm"]);
+  changed += applyDiameterValue("tipDiameter", flat, ["tipDiameter", "contactDiameter", "tip_diameter_mm"], ["tipRadius", "contactRadius", "tip_radius_mm"]);
   changed += applySelectValue("tipType", flat, ["tipType", "tip_type"], ["cone", "sphere", "cylinder"]);
+  changed += applyCheckedValue("sphericalContactEnabled", flat, ["sphericalContactEnabled", "spherical_contact_enabled"]);
+  changed += applyNumberValue("sphericalContactDiameter", flat, ["sphericalContactDiameter", "spherical_contact_diameter_mm", "contactSphereDiameter", "contact_sphere_diameter_mm"]);
+  changed += applyInsetPercentValue(flat);
   changed += applyNumberValue("tipLength", flat, ["tipLength", "tip_length_mm"]);
-  changed += applyNumberValue("tipAngle", flat, ["tipAngle", "tip_angle_deg"]);
-  changed += applyNumberValue("footRadius", flat, ["footRadius", "foot_radius_mm"]);
+  changed += applyDiameterValue("footDiameter", flat, ["footDiameter", "foot_diameter_mm"], ["footRadius", "foot_radius_mm"]);
   changed += applySelectValue("bedInterface", flat, ["bedInterface", "bed_interface"], ["none", "feet", "raft", "skate"]);
-  changed += applyNumberValue("raftMargin", flat, ["raftMargin", "raft_margin_mm"]);
+  changed += applyNumberValue("raftOffset", flat, ["raftOffset", "raft_offset_mm", "raftMargin", "raft_margin_mm"]);
+  changed += applyNumberValue("raftChamferWidth", flat, ["raftChamferWidth", "raft_chamfer_width_mm"]);
+  changed += applyNumberValue("raftChamferAngle", flat, ["raftChamferAngle", "raft_chamfer_angle_deg"]);
+  changed += applyNumberValue("bedInterfaceThickness", flat, ["bedInterfaceThickness", "bed_interface_thickness_mm"]);
   changed += applyNumberValue("collisionClearance", flat, ["collisionClearance", "collision_clearance_mm", "pathClearance"]);
   changed += applyNumberValue("maxBaseReach", flat, ["maxBaseReach", "max_base_reach_mm"]);
   changed += applyNumberValue("maxSupportAngle", flat, ["maxSupportAngle", "max_support_angle_deg"]);
@@ -2299,9 +2702,10 @@ function applySupportProfile(flat) {
   changed += applyNumberValue("enforcerReach", flat, ["enforcerReach", "enforcer_reach_mm"]);
   changed += applyNumberValue("enforcerMinDrop", flat, ["enforcerMinDrop", "enforcer_min_drop_mm"]);
   changed += applyCheckedValue("braceEnabled", flat, ["braceEnabled", "brace_enabled"]);
-  changed += applyNumberValue("braceRadius", flat, ["braceRadius", "brace_radius_mm"]);
+  changed += applyDiameterValue("braceDiameter", flat, ["braceDiameter", "brace_diameter_mm"], ["braceRadius", "brace_radius_mm"]);
   changed += applyNumberValue("braceHeight", flat, ["braceHeight", "brace_height_mm"]);
   changed += applyNumberValue("braceDistance", flat, ["braceDistance", "brace_max_distance_mm"]);
+  syncSphericalContactFields();
   return changed;
 }
 
@@ -2317,6 +2721,45 @@ function applyNumberValue(id, flat, keys, transform = (value) => value) {
   const numberValue = importedNumber(value);
   if (!Number.isFinite(numberValue)) return 0;
   $(id).value = transform(numberValue);
+  return 1;
+}
+
+function applyDiameterValue(id, flat, diameterKeys, radiusKeys) {
+  const diameterValue = profileValue(flat, diameterKeys);
+  const diameter = importedNumber(diameterValue);
+  if (Number.isFinite(diameter)) {
+    $(id).value = diameter;
+    return 1;
+  }
+  const radiusValue = profileValue(flat, radiusKeys);
+  const radius = importedNumber(radiusValue);
+  if (!Number.isFinite(radius)) return 0;
+  $(id).value = radius * 2;
+  return 1;
+}
+
+function applyInsetPercentValue(flat) {
+  const percentValue = profileValue(flat, [
+    "sphericalContactInsetPercent",
+    "spherical_contact_inset_percent",
+    "contactSphereInsetPercent",
+    "contact_sphere_inset_percent"
+  ]);
+  const percent = importedNumber(percentValue);
+  if (Number.isFinite(percent)) {
+    $("sphericalContactInsetPercent").value = clamp(Math.round(percent), 5, 95);
+    return 1;
+  }
+  const insetValue = profileValue(flat, [
+    "sphericalContactInset",
+    "spherical_contact_inset_mm",
+    "contactSphereInset",
+    "contact_sphere_inset_mm"
+  ]);
+  const insetMm = importedNumber(insetValue);
+  const diameterMm = number("sphericalContactDiameter");
+  if (!Number.isFinite(insetMm) || diameterMm <= 0) return 0;
+  $("sphericalContactInsetPercent").value = clamp(Math.round((insetMm / diameterMm) * 100), 5, 95);
   return 1;
 }
 
@@ -2540,7 +2983,7 @@ function updateScene({ renderLists = true, updateStatus = true, skipDerivedGeome
     ? `${selectedModelIds.size.toLocaleString()} model${selectedModelIds.size === 1 ? "" : "s"} selected`
     : `${activeModels.length.toLocaleString()} object${activeModels.length === 1 ? "" : "s"} on ${active.name}`;
   if (active.layersGenerated) {
-    $("supportStatus").textContent = `${active.supports.length.toLocaleString()} supports previewed`;
+    $("supportStatus").textContent = `${active.supports.length.toLocaleString()} supports generated`;
   } else if (activeModels.some((model) => modelOutOfBounds(model, active))) {
     $("supportStatus").textContent = "Active plate has out-of-bounds geometry";
   } else {
@@ -2548,28 +2991,65 @@ function updateScene({ renderLists = true, updateStatus = true, skipDerivedGeome
   }
 }
 
-function setActivePlateClipHeight(value) {
+function setActivePlateClipLayer(value) {
   const plate = activePlate();
-  const maxZ = plate.settings.printer.sizeZ || 160;
+  const layer = clamp(Math.round(Number.isFinite(value) ? value : clipHeightToLayer(plate, plate.clipHeight)), 1, plateMaxLayer(plate));
   plate.clipEnabled = true;
-  plate.clipHeight = clamp(Number.isFinite(value) ? value : plate.clipHeight, 0, maxZ);
-  $("clipHeight").value = plate.clipHeight;
-  $("clipHeightValue").value = plate.clipHeight.toFixed(2);
+  plate.clipHeight = layerToClipHeight(plate, layer);
+  $("clipHeight").value = layer;
+  $("clipHeightValue").value = layer;
   $("clipEnabled").checked = true;
   updateScene();
 }
 
+function setActivePlateClipHeight(value) {
+  const plate = activePlate();
+  setActivePlateClipLayer(clipHeightToLayer(plate, value));
+}
+
+function stepActiveClipLayer(delta) {
+  const plate = activePlate();
+  setActivePlateClipLayer(clipHeightToLayer(plate, plate.clipHeight) + delta);
+}
+
 function stepClipHeightFromWheel(event) {
   event.preventDefault();
-  const step = event.shiftKey ? 1 : 0.05;
-  setActivePlateClipHeight(activePlate().clipHeight + (event.deltaY > 0 ? -step : step));
+  const step = event.shiftKey ? 10 : 1;
+  stepActiveClipLayer(event.deltaY > 0 ? -step : step);
+}
+
+function snapPlateClipHeightToLayer(plate) {
+  const maxZ = plate.settings.printer.sizeZ || 160;
+  const layer = clipHeightToLayer(plate, clamp(plate.clipHeight, 0, maxZ));
+  plate.clipHeight = layerToClipHeight(plate, layer);
+}
+
+function clipHeightToLayer(plate, height) {
+  const layerHeight = plateLayerHeight(plate);
+  const maxLayer = plateMaxLayer(plate);
+  return clamp(Math.round((Number.isFinite(height) ? height : layerHeight) / layerHeight), 1, maxLayer);
+}
+
+function layerToClipHeight(plate, layer) {
+  const maxZ = plate.settings.printer.sizeZ || 160;
+  return clamp(Math.round(layer) * plateLayerHeight(plate), plateLayerHeight(plate), maxZ);
+}
+
+function plateLayerHeight(plate) {
+  const value = Number(plate?.settings?.printer?.layerHeight);
+  return Number.isFinite(value) && value > 0 ? value : 0.05;
+}
+
+function plateMaxLayer(plate) {
+  return Math.max(1, Math.ceil((plate?.settings?.printer?.sizeZ || 160) / plateLayerHeight(plate)));
 }
 
 function buildScene({ skipDerivedGeometry = false } = {}) {
   const active = activePlate();
   const modelItems = [];
   const selectionBoxes = [];
-  const outOfBounds = [];
+  const outOfBoundsBoxes = [];
+  const outOfBoundsSpills = [];
   const gizmoModel = widgetModel();
   let transformGizmo = null;
 
@@ -2600,8 +3080,11 @@ function buildScene({ skipDerivedGeometry = false } = {}) {
     });
     if (selected) selectionBoxes.push(bounds);
     if (isActive && !skipDerivedGeometry) {
-      const redMesh = outOfBoundsMesh(model, plate);
-      if (redMesh) outOfBounds.push(redMesh);
+      const indicator = outOfBoundsIndicatorGeometry(model, plate, bounds);
+      if (indicator) {
+        if (indicator.box) outOfBoundsBoxes.push(indicator.box);
+        if (indicator.spill) outOfBoundsSpills.push(indicator.spill);
+      }
     }
   }
 
@@ -2638,7 +3121,8 @@ function buildScene({ skipDerivedGeometry = false } = {}) {
     nextPlate: nextBuildPlatePreview(),
     models: modelItems,
     selectionBoxes,
-    outOfBounds,
+    outOfBoundsBoxes,
+    outOfBoundsSpills,
     supports: skipDerivedGeometry ? null : offsetSupports(active.supports, active.origin),
     supportBraces: skipDerivedGeometry ? null : offsetBraces(active.supportBraces, active.origin),
     transformGizmo,
@@ -2652,7 +3136,8 @@ function buildScene({ skipDerivedGeometry = false } = {}) {
         depth: active.settings.printer.sizeY || 67.5
       },
       showLayer: active.layersGenerated,
-      layerLines: !skipDerivedGeometry && active.layersGenerated ? makeLayerLines(active, active.clipHeight) : null
+      layerLines: !skipDerivedGeometry && active.layersGenerated ? makeLayerLines(active, active.clipHeight) : null,
+      intersectionFill: !skipDerivedGeometry && active.clipEnabled ? makeClipIntersectionFill(active, active.clipHeight) : null
     }
   };
 }
@@ -2870,8 +3355,8 @@ function dropModelToBuildPlate(model, { exact = false } = {}) {
   const offset = reorientationDropOffset();
   const plate = buildPlates.find((item) => item.id === model.plateId);
   const bounds = exact
-    ? modelWorldBounds(model)
-    : offsetBounds(modelDisplayLocalBounds(model), modelWorldOffset(model, plate));
+    ? modelPlacementWorldBounds(model)
+    : offsetBounds(modelDisplayLocalBounds(model), modelPlacementOffset(model, plate));
   model.transform.translateZ += offset - bounds.minZ;
 }
 
@@ -2906,12 +3391,29 @@ function modelRotationRadians(transform) {
 }
 
 function modelWorldOffset(model, plate = buildPlates.find((item) => item.id === model.plateId)) {
+  const offset = modelPlacementOffset(model, plate);
+  offset[2] += modelLiftForPlate(plate);
+  return offset;
+}
+
+function modelPlacementOffset(model, plate = buildPlates.find((item) => item.id === model.plateId)) {
   const origin = plate ? plate.origin : { x: 0, y: 0 };
   return [
     origin.x + model.transform.translateX,
     origin.y + model.transform.translateY,
     model.transform.translateZ
   ];
+}
+
+function modelLiftForPlate(plate) {
+  const support = plate?.settings?.support;
+  if (!support?.enabled) return 0;
+  const lift = Number(support.modelLift);
+  return Math.max(0, Number.isFinite(lift) ? lift : 0);
+}
+
+function modelPlacementWorldBounds(model) {
+  return offsetBounds(modelRenderMesh(model).bounds, modelPlacementOffset(model));
 }
 
 function modelWorldBounds(model) {
@@ -2974,29 +3476,59 @@ function boundsOutsidePlate(bounds, plate) {
   return bounds.minX < plate.origin.x || bounds.maxX > maxX || bounds.minY < plate.origin.y || bounds.maxY > maxY;
 }
 
-function outOfBoundsMesh(model, plate) {
-  const world = modelWorldMesh(model);
-  const vertices = [];
-  const normals = [];
+function outOfBoundsIndicatorGeometry(model, plate, bounds = modelWorldBounds(model)) {
   const maxX = plate.origin.x + (plate.settings.printer.sizeX || 120);
   const maxY = plate.origin.y + (plate.settings.printer.sizeY || 67.5);
-  for (let i = 0; i < world.vertices.length; i += 9) {
-    let outside = false;
-    for (let j = 0; j < 9; j += 3) {
-      const x = world.vertices[i + j];
-      const y = world.vertices[i + j + 1];
-      outside = outside || x < plate.origin.x || x > maxX || y < plate.origin.y || y > maxY;
-    }
-    if (outside) {
-      for (let j = 0; j < 9; j++) vertices.push(world.vertices[i + j]);
-      for (let j = 0; j < 9; j++) normals.push(world.normals[i + j]);
-    }
-  }
-  if (!vertices.length) return null;
+  if (!boundsOutsidePlate(bounds, plate)) return null;
   return {
-    vertices: new Float32Array(vertices),
-    normals: new Float32Array(normals),
-    bounds: boundsFor(new Float32Array(vertices))
+    box: makeSelectionBoxGeometry([bounds]),
+    spill: outOfBoundsFootprintGeometry(bounds, {
+      minX: plate.origin.x,
+      minY: plate.origin.y,
+      maxX,
+      maxY,
+      z: 0.38
+    })
+  };
+}
+
+function outOfBoundsFootprintGeometry(bounds, plateBounds) {
+  const parts = [];
+  const z = plateBounds.z;
+  const clampedY0 = clamp(bounds.minY, plateBounds.minY, plateBounds.maxY);
+  const clampedY1 = clamp(bounds.maxY, plateBounds.minY, plateBounds.maxY);
+  if (bounds.minX < plateBounds.minX && clampedY1 > clampedY0) {
+    parts.push(makeWorldRectGeometry(bounds.minX, clampedY0, plateBounds.minX, clampedY1, z));
+  }
+  if (bounds.maxX > plateBounds.maxX && clampedY1 > clampedY0) {
+    parts.push(makeWorldRectGeometry(plateBounds.maxX, clampedY0, bounds.maxX, clampedY1, z));
+  }
+  const clampedX0 = clamp(bounds.minX, plateBounds.minX, plateBounds.maxX);
+  const clampedX1 = clamp(bounds.maxX, plateBounds.minX, plateBounds.maxX);
+  if (bounds.minY < plateBounds.minY && clampedX1 > clampedX0) {
+    parts.push(makeWorldRectGeometry(clampedX0, bounds.minY, clampedX1, plateBounds.minY, z));
+  }
+  if (bounds.maxY > plateBounds.maxY && clampedX1 > clampedX0) {
+    parts.push(makeWorldRectGeometry(clampedX0, plateBounds.maxY, clampedX1, bounds.maxY, z));
+  }
+  return combineGeometry(parts);
+}
+
+function makeWorldRectGeometry(x0, y0, x1, y1, z) {
+  const vertices = new Float32Array([
+    x0, y0, z,
+    x1, y0, z,
+    x1, y1, z,
+    x0, y0, z,
+    x1, y1, z,
+    x0, y1, z
+  ]);
+  const normals = new Float32Array(vertices.length);
+  for (let i = 2; i < normals.length; i += 3) normals[i] = 1;
+  return {
+    vertices,
+    normals,
+    bounds: boundsFor(vertices)
   };
 }
 
@@ -3137,6 +3669,7 @@ function nextFrame() {
 
 function setBusy(busy) {
   $("previewButton").disabled = busy;
+  $("saveProjectButton").disabled = busy;
   $("sliceButton").disabled = busy;
   $("sliceAllButton").disabled = busy;
   $("saveAllButton").disabled = busy;
@@ -3320,6 +3853,87 @@ function rotatePoint(point, angles) {
   return [x, y, z];
 }
 
+function applyGlobalRotationToTransform(transform, axis, deltaDegrees) {
+  if (!Number.isFinite(deltaDegrees) || Math.abs(deltaDegrees) < 0.000001) return;
+  const current = rotationMatrixFromEuler(
+    deg(transform.rotateX || 0),
+    deg(transform.rotateY || 0),
+    deg(transform.rotateZ || 0)
+  );
+  const delta = rotationMatrixAroundAxis(axis, deg(deltaDegrees));
+  const next = multiplyMatrix3(delta, current);
+  const euler = eulerFromRotationMatrix(next);
+  transform.rotateX = normalizeDegrees(radToDeg(euler[0]));
+  transform.rotateY = normalizeDegrees(radToDeg(euler[1]));
+  transform.rotateZ = normalizeDegrees(radToDeg(euler[2]));
+}
+
+function rotationMatrixFromEuler(rx, ry, rz) {
+  const sx = Math.sin(rx), cx = Math.cos(rx);
+  const sy = Math.sin(ry), cy = Math.cos(ry);
+  const sz = Math.sin(rz), cz = Math.cos(rz);
+  return [
+    [cz * cy, cz * sy * sx - sz * cx, cz * sy * cx + sz * sx],
+    [sz * cy, sz * sy * sx + cz * cx, sz * sy * cx - cz * sx],
+    [-sy, cy * sx, cy * cx]
+  ];
+}
+
+function rotationMatrixAroundAxis(axis, angle) {
+  const s = Math.sin(angle);
+  const c = Math.cos(angle);
+  if (axis === "x") {
+    return [
+      [1, 0, 0],
+      [0, c, -s],
+      [0, s, c]
+    ];
+  }
+  if (axis === "y") {
+    return [
+      [c, 0, s],
+      [0, 1, 0],
+      [-s, 0, c]
+    ];
+  }
+  return [
+    [c, -s, 0],
+    [s, c, 0],
+    [0, 0, 1]
+  ];
+}
+
+function multiplyMatrix3(a, b) {
+  const out = [];
+  for (let row = 0; row < 3; row++) {
+    out[row] = [];
+    for (let col = 0; col < 3; col++) {
+      out[row][col] = a[row][0] * b[0][col]
+        + a[row][1] * b[1][col]
+        + a[row][2] * b[2][col];
+    }
+  }
+  return out;
+}
+
+function eulerFromRotationMatrix(matrix) {
+  const sy = clamp(-matrix[2][0], -1, 1);
+  const ry = Math.asin(sy);
+  const cy = Math.cos(ry);
+  if (Math.abs(cy) > 0.000001) {
+    return [
+      Math.atan2(matrix[2][1], matrix[2][2]),
+      ry,
+      Math.atan2(matrix[1][0], matrix[0][0])
+    ];
+  }
+  return [
+    0,
+    ry,
+    Math.atan2(-matrix[0][1], matrix[1][1])
+  ];
+}
+
 function boundsFor(vertices) {
   const b = { minX: Infinity, minY: Infinity, minZ: Infinity, maxX: -Infinity, maxY: -Infinity, maxZ: -Infinity };
   for (let i = 0; i < vertices.length; i += 3) {
@@ -3343,12 +3957,17 @@ class Viewer {
     this.bed = { x: 120, y: 67.5, z: 160 };
     this.yaw = -0.65;
     this.pitch = 0.68;
+    this.roll = 0;
+    this.fov = deg(45);
+    this.projectionMode = "perspective";
+    this.navigationMode = "turntable";
     this.distance = 180;
     this.target = [60, 34, 20];
     this.drag = null;
     this.pickables = [];
     this.pickRects = [];
     this.onScenePick = null;
+    this.onSceneDoubleClick = null;
     this.onModelDrag = null;
     this.onModelDragEnd = null;
     this.onGizmoDrag = null;
@@ -3357,6 +3976,7 @@ class Viewer {
     this.hoveredHit = null;
     this.pressedHit = null;
     this.activeGizmoAction = null;
+    this.gizmoDragCenter = null;
     this.activePlateFocus = null;
     this.activePartFocus = null;
     this.lastMvp = null;
@@ -3374,7 +3994,7 @@ class Viewer {
       window.visualViewport.addEventListener("resize", () => this.scheduleResize({ recenter: true }));
     }
     if (window.ResizeObserver) {
-      this.resizeObserver = new ResizeObserver(() => this.scheduleResize({ recenter: true }));
+      this.resizeObserver = new ResizeObserver(() => this.scheduleResize({ recenter: false }));
       this.resizeObserver.observe(this.canvas);
     }
     this.canvas.addEventListener("contextmenu", (event) => event.preventDefault());
@@ -3388,13 +4008,14 @@ class Viewer {
       const isRight = event.button === 2;
       let mode = "press";
       if (isMiddle) {
-        this.centerOnOrbitFocus();
+        this.prepareOrbit(event, hit);
         mode = "orbit";
       } else if (isRight) {
         mode = "pan";
       } else if (isLeft && hit?.type === "gizmo") {
         mode = "gizmo";
         this.activeGizmoAction = hit.action;
+        this.gizmoDragCenter = this.activePartFocus ? [...this.activePartFocus] : null;
         this.setHoverHit(hit);
       } else if (isLeft && hit?.type === "model") {
         mode = "model";
@@ -3426,7 +4047,17 @@ class Viewer {
           this.onModelDrag(delta);
         }
       } else if (mode === "gizmo") {
-        if (this.onGizmoDrag) this.onGizmoDrag({ action: this.activeGizmoAction, dx, dy });
+        if (this.onGizmoDrag) {
+          this.onGizmoDrag({
+            action: this.activeGizmoAction,
+            dx,
+            dy,
+            fromX: event.clientX - dx,
+            fromY: event.clientY - dy,
+            toX: event.clientX,
+            toY: event.clientY
+          });
+        }
       } else if (mode === "pan") {
         this.pan(dx, dy);
       } else if (mode === "orbit") {
@@ -3448,6 +4079,7 @@ class Viewer {
       if (finishedDrag?.mode === "gizmo") {
         if (finishedDrag.moved && this.onGizmoDragEnd) this.onGizmoDragEnd({ action: finishedDrag.action || this.activeGizmoAction });
         this.activeGizmoAction = null;
+        this.gizmoDragCenter = null;
       }
       this.pressedHit = null;
       this.setHoverHit(this.hitAt(event.clientX, event.clientY));
@@ -3461,6 +4093,7 @@ class Viewer {
       if (this.drag?.mode === "gizmo") {
         if (this.drag.moved && this.onGizmoDragEnd) this.onGizmoDragEnd({ action: this.drag.action || this.activeGizmoAction });
         this.activeGizmoAction = null;
+        this.gizmoDragCenter = null;
       }
       this.pressedHit = null;
       this.drag = null;
@@ -3469,10 +4102,147 @@ class Viewer {
     this.canvas.addEventListener("pointerleave", () => {
       if (!this.drag) this.setHoverHit(null);
     });
+    this.canvas.addEventListener("dblclick", (event) => {
+      event.preventDefault();
+      if (this.onSceneDoubleClick) this.onSceneDoubleClick(this.hitAt(event.clientX, event.clientY));
+    });
     this.canvas.addEventListener("wheel", (event) => {
       event.preventDefault();
       this.distance = clamp(this.distance * (1 + event.deltaY * 0.001), 25, 1200);
     }, { passive: false });
+  }
+
+  setProjectionMode(mode) {
+    this.projectionMode = mode === "orthographic" ? "orthographic" : "perspective";
+    this.renderFrame();
+  }
+
+  setNavigationMode(mode) {
+    this.navigationMode = ["turntable", "trackball", "selection", "cursor"].includes(mode) ? mode : "turntable";
+    if (this.navigationMode !== "trackball") this.roll = 0;
+    this.renderFrame();
+  }
+
+  prepareOrbit(event, hit) {
+    if (this.navigationMode === "selection" && this.activePartFocus) {
+      this.target = [...this.activePartFocus];
+      return;
+    }
+    if (this.navigationMode === "cursor") {
+      const point = this.pointOnBuildPlane(event.clientX, event.clientY)
+        || (hit?.bounds ? boundsCenter(hit.bounds) : null);
+      if (point) this.target = point;
+    }
+  }
+
+  cameraState(distance = this.distance) {
+    const zAxis = normalize([
+      Math.cos(this.pitch) * Math.sin(this.yaw),
+      -Math.cos(this.pitch) * Math.cos(this.yaw),
+      Math.sin(this.pitch)
+    ]);
+    const eye = [
+      this.target[0] + distance * zAxis[0],
+      this.target[1] + distance * zAxis[1],
+      this.target[2] + distance * zAxis[2]
+    ];
+    let right = cross([0, 0, 1], zAxis);
+    right = length(right) < 0.0001 ? [1, 0, 0] : normalize(right);
+    let up = normalize(cross(zAxis, right));
+    if (this.roll) {
+      const c = Math.cos(this.roll);
+      const s = Math.sin(this.roll);
+      const rolledRight = add(scaleVec(right, c), scaleVec(up, s));
+      const rolledUp = add(scaleVec(up, c), scaleVec(right, -s));
+      right = normalize(rolledRight);
+      up = normalize(rolledUp);
+    }
+    return {
+      eye,
+      right,
+      up,
+      zAxis,
+      forward: scaleVec(zAxis, -1)
+    };
+  }
+
+  screenRay(clientX, clientY) {
+    const rect = this.canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+    const ndcY = 1 - ((clientY - rect.top) / rect.height) * 2;
+    const aspect = this.canvas.width / Math.max(1, this.canvas.height);
+    const { eye, forward, right, up } = this.cameraState();
+    const tanHalfFov = Math.tan(this.fov / 2);
+    const halfHeight = Math.max(1, this.distance * tanHalfFov);
+    if (this.projectionMode === "orthographic") {
+      return {
+        origin: add(
+          this.target,
+          add(scaleVec(right, ndcX * halfHeight * aspect), scaleVec(up, ndcY * halfHeight))
+        ),
+        direction: forward
+      };
+    }
+    return {
+      origin: eye,
+      direction: normalize(add(
+        forward,
+        add(scaleVec(right, ndcX * aspect * tanHalfFov), scaleVec(up, ndcY * tanHalfFov))
+      ))
+    };
+  }
+
+  intersectScreenPlane(clientX, clientY, planePoint, planeNormal, { rejectBehind = false } = {}) {
+    const ray = this.screenRay(clientX, clientY);
+    if (!ray) return null;
+    const denom = dot(planeNormal, ray.direction);
+    if (Math.abs(denom) < 0.00001) return null;
+    const t = dot(sub(planePoint, ray.origin), planeNormal) / denom;
+    if (!Number.isFinite(t) || (rejectBehind && t < 0)) return null;
+    return add(ray.origin, scaleVec(ray.direction, t));
+  }
+
+  pointOnBuildPlane(clientX, clientY) {
+    return this.intersectScreenPlane(clientX, clientY, [0, 0, 0], [0, 0, 1], {
+      rejectBehind: this.projectionMode !== "orthographic"
+    });
+  }
+
+  gizmoRotationDelta(drag) {
+    if (!drag?.action?.startsWith("rotate-")) return 0;
+    const center = this.gizmoDragCenter || this.activePartFocus;
+    if (!center) return 0;
+    const axis = drag.action.slice("rotate-".length);
+    const normal = gizmoAxisDirection(axis);
+    const [u, v] = gizmoArcBasis(axis);
+    const fromPoint = this.intersectScreenPlane(drag.fromX, drag.fromY, center, normal);
+    const toPoint = this.intersectScreenPlane(drag.toX, drag.toY, center, normal);
+    const fromAngle = fromPoint ? planeAngleAroundCenter(fromPoint, center, u, v) : null;
+    const toAngle = toPoint ? planeAngleAroundCenter(toPoint, center, u, v) : null;
+    if (fromAngle !== null && toAngle !== null) {
+      return clamp(radToDeg(normalizeAngle(toAngle - fromAngle)), -30, 30);
+    }
+    return this.screenAngleRotationDelta(drag, center, normal);
+  }
+
+  screenAngleRotationDelta(drag, center, axisNormal) {
+    const projected = this.projectWorldPoint(center);
+    if (!projected) return 0;
+    const from = this.canvasLocalPoint(drag.fromX, drag.fromY);
+    const to = this.canvasLocalPoint(drag.toX, drag.toY);
+    const fromAngle = Math.atan2(from.y - projected[1], from.x - projected[0]);
+    const toAngle = Math.atan2(to.y - projected[1], to.x - projected[0]);
+    const facing = dot(axisNormal, this.cameraState().zAxis) < 0 ? -1 : 1;
+    return clamp(radToDeg(normalizeAngle(toAngle - fromAngle)) * facing, -30, 30);
+  }
+
+  canvasLocalPoint(clientX, clientY) {
+    const rect = this.canvas.getBoundingClientRect();
+    return {
+      x: clientX - rect.left,
+      y: clientY - rect.top
+    };
   }
 
   setHoverHit(hit) {
@@ -3496,13 +4266,7 @@ class Viewer {
   }
 
   pan(dx, dy) {
-    const zAxis = normalize([
-      Math.cos(this.pitch) * Math.sin(this.yaw),
-      -Math.cos(this.pitch) * Math.cos(this.yaw),
-      Math.sin(this.pitch)
-    ]);
-    const right = normalize(cross([0, 0, 1], zAxis));
-    const up = normalize(cross(zAxis, right));
+    const { right, up } = this.cameraState();
     const scale = Math.max(0.02, this.distance * 0.0015);
     for (let i = 0; i < 3; i++) {
       this.target[i] += (-dx * right[i] + dy * up[i]) * scale;
@@ -3510,17 +4274,15 @@ class Viewer {
   }
 
   orbit(dx, dy) {
-    this.centerOnOrbitFocus();
-    this.yaw -= dx * 0.008;
-    this.pitch = clamp(this.pitch - dy * 0.006, deg(10), deg(82));
-  }
-
-  centerOnOrbitFocus() {
-    if (this.activePartFocus) {
-      this.target = [...this.activePartFocus];
-      return;
+    if (this.navigationMode === "trackball") {
+      this.yaw -= dx * 0.008;
+      this.pitch = clamp(this.pitch - dy * 0.007, deg(-84), deg(84));
+      this.roll = normalizeAngle(this.roll - dx * 0.003 + dy * 0.0015);
+    } else {
+      this.roll = 0;
+      this.yaw -= dx * 0.008;
+      this.pitch = clamp(this.pitch - dy * 0.006, deg(10), deg(82));
     }
-    if (this.activePlateFocus) this.target = [...this.activePlateFocus];
   }
 
   centerOnBuildPlate(plate) {
@@ -3532,14 +4294,101 @@ class Viewer {
     ];
   }
 
+  centerOnBounds(bounds) {
+    if (!bounds) return;
+    this.target = boundsCenter(bounds);
+    const span = Math.max(
+      bounds.maxX - bounds.minX,
+      bounds.maxY - bounds.minY,
+      bounds.maxZ - bounds.minZ,
+      20
+    );
+    this.distance = clamp(span * 2.4, 30, 1200);
+  }
+
+  zoomToFitBuildPlateIfNeeded(plate) {
+    const bed = {
+      x: plate?.settings?.printer?.sizeX || 120,
+      y: plate?.settings?.printer?.sizeY || 67.5,
+      z: plate?.settings?.printer?.sizeZ || 160
+    };
+    if (!plate?.origin || !Number.isFinite(plate.origin.x) || !Number.isFinite(plate.origin.y)) return false;
+    const border = plateBorderWidth(bed);
+    return this.zoomToFitBoundsIfNeeded({
+      minX: plate.origin.x - border,
+      minY: plate.origin.y - border,
+      minZ: 0,
+      maxX: plate.origin.x + bed.x + border,
+      maxY: plate.origin.y + bed.y + border,
+      maxZ: 0.2
+    });
+  }
+
+  zoomToFitBoundsIfNeeded(bounds, { margin = 36 } = {}) {
+    const rect = this.canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height || !bounds) return false;
+    const fitMargin = Math.max(0, Math.min(margin, rect.width * 0.18, rect.height * 0.18));
+    const originalDistance = this.distance;
+    const originalTarget = [...this.target];
+    if (this.boundsFitViewport(bounds, fitMargin, originalDistance)) return false;
+
+    const span = Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY, bounds.maxZ - bounds.minZ, 1);
+    const centerOffset = length(sub(boundsCenter(bounds), this.target));
+    const sceneSpan = Math.max(this.bed.x, this.bed.y, this.bed.z, span);
+    const maxDistance = Math.min(2800, Math.max(1200, originalDistance, centerOffset * 6 + span * 8, sceneSpan * 4));
+    let low = originalDistance;
+    let high = originalDistance;
+    let foundFit = false;
+    for (let i = 0; i < 24; i++) {
+      high = Math.min(maxDistance, high * 1.28 + 4);
+      if (this.boundsFitViewport(bounds, fitMargin, high)) {
+        foundFit = true;
+        break;
+      }
+      if (high >= maxDistance) break;
+    }
+    if (foundFit) {
+      for (let i = 0; i < 28; i++) {
+        const mid = (low + high) / 2;
+        if (this.boundsFitViewport(bounds, fitMargin, mid)) {
+          high = mid;
+        } else {
+          low = mid;
+        }
+      }
+    } else {
+      high = maxDistance;
+    }
+    this.target = originalTarget;
+    this.distance = Math.max(originalDistance, high);
+    this.renderFrame();
+    return this.distance > originalDistance + 0.001;
+  }
+
+  boundsFitViewport(bounds, margin, distance) {
+    const rect = this.canvas.getBoundingClientRect();
+    const points = boundsCorners(bounds).map((point) => projectPoint(point, this.mvpForDistance(distance), this.canvas));
+    if (points.some((point) => !point)) return false;
+    const xs = points.map((point) => point[0]);
+    const ys = points.map((point) => point[1]);
+    return Math.min(...xs) >= margin
+      && Math.max(...xs) <= rect.width - margin
+      && Math.min(...ys) >= margin
+      && Math.max(...ys) <= rect.height - margin;
+  }
+
+  mvpForDistance(distance = this.distance) {
+    const aspect = this.canvas.width / Math.max(1, this.canvas.height);
+    const halfHeight = Math.max(1, distance * Math.tan(this.fov / 2));
+    const projection = this.projectionMode === "orthographic"
+      ? orthographic(-halfHeight * aspect, halfHeight * aspect, -halfHeight, halfHeight, 0.1, 3000)
+      : perspective(this.fov, aspect, 0.1, 3000);
+    const { eye, up } = this.cameraState(distance);
+    return multiply(projection, lookAt(eye, this.target, up));
+  }
+
   screenDeltaToBuildPlane(dx, dy) {
-    const zAxis = normalize([
-      Math.cos(this.pitch) * Math.sin(this.yaw),
-      -Math.cos(this.pitch) * Math.cos(this.yaw),
-      Math.sin(this.pitch)
-    ]);
-    const right = normalize(cross([0, 0, 1], zAxis));
-    const up = normalize(cross(zAxis, right));
+    const { right, up } = this.cameraState();
     const scale = Math.max(0.02, this.distance * 0.0015);
     return {
       x: (dx * right[0] - dy * up[0]) * scale,
@@ -3653,14 +4502,22 @@ class Viewer {
     this.meshes.selection = scene.selectionBoxes.length
       ? makeMesh(this.gl, makeSelectionBoxGeometry(scene.selectionBoxes), [1.0, 0.86, 0.26, 1], this.gl.LINES)
       : null;
-    const redGeometry = combineGeometry(scene.outOfBounds);
-    this.meshes.outOfBounds = redGeometry
-      ? makeMesh(this.gl, redGeometry, [1.0, 0.16, 0.12, 1], this.gl.TRIANGLES, { clip: scene.clip.enabled })
+    const outOfBoundsSpill = combineGeometry(scene.outOfBoundsSpills);
+    const outOfBoundsBoxes = combineGeometry(scene.outOfBoundsBoxes);
+    this.meshes.outOfBoundsSpill = outOfBoundsSpill
+      ? makeMesh(this.gl, outOfBoundsSpill, [1.0, 0.08, 0.05, 0.28], this.gl.TRIANGLES, { unlit: true })
+      : null;
+    this.meshes.outOfBoundsBox = outOfBoundsBoxes
+      ? makeMesh(this.gl, outOfBoundsBoxes, [1.0, 0.14, 0.10, 1], this.gl.LINES, { unlit: true })
       : null;
     this.meshes.supports = makeMesh(this.gl, makeSupportGeometry(scene.supports, scene.supportBraces), [1.0, 0.63, 0.18, 1], this.gl.TRIANGLES);
-    this.meshes.clipPlane = scene.clip.enabled
-      ? makeMesh(this.gl, makeClipPlaneGeometry(scene.clip.plate, scene.clip.z), [0.82, 0.78, 0.28, 1], this.gl.TRIANGLES)
-      : null;
+    this.meshes.clipPlane = scene.clip.enabled ? {
+      surface: makeMesh(this.gl, makeClipPlaneSurfaceGeometry(scene.clip.plate, scene.clip.z), [1.0, 0.86, 0.16, 0.2], this.gl.TRIANGLES, { unlit: true }),
+      outline: makeMesh(this.gl, makeClipPlaneOutlineGeometry(scene.clip.plate, scene.clip.z), [1.0, 0.86, 0.16, 1], this.gl.TRIANGLES, { unlit: true }),
+      intersection: scene.clip.intersectionFill
+        ? makeMesh(this.gl, scene.clip.intersectionFill, [1.0, 0.92, 0.22, 0.78], this.gl.TRIANGLES, { unlit: true })
+        : null
+    } : null;
     this.meshes.layerLines = scene.clip.enabled && scene.clip.showLayer && scene.clip.layerLines
       ? makeMesh(this.gl, scene.clip.layerLines, [1.0, 0.95, 0.45, 1], this.gl.LINES)
       : null;
@@ -3671,7 +4528,8 @@ class Viewer {
       id: `${plate.id}:${action.action}`,
       plateId: plate.id,
       action: action.action,
-      bounds: action.bounds
+      bounds: action.bounds,
+      pickPoints: action.pickPoints
     })));
     const gizmoPickables = this.meshes.gizmo
       ? this.meshes.gizmo.features.map((feature) => ({
@@ -3712,7 +4570,6 @@ class Viewer {
         }
       }] : [])
     ];
-    this.distance = Math.max(this.distance, Math.max(this.bed.x, this.bed.y, this.bed.z) * 0.55);
   }
 
   recenter() {
@@ -3751,32 +4608,34 @@ class Viewer {
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
     const aspect = this.canvas.width / Math.max(1, this.canvas.height);
-    const projection = perspective(deg(45), aspect, 0.1, 3000);
-    const eye = [
-      this.target[0] + this.distance * Math.cos(this.pitch) * Math.sin(this.yaw),
-      this.target[1] - this.distance * Math.cos(this.pitch) * Math.cos(this.yaw),
-      this.target[2] + this.distance * Math.sin(this.pitch)
-    ];
-    const view = lookAt(eye, this.target, [0, 0, 1]);
+    const halfHeight = Math.max(1, this.distance * Math.tan(this.fov / 2));
+    const projection = this.projectionMode === "orthographic"
+      ? orthographic(-halfHeight * aspect, halfHeight * aspect, -halfHeight, halfHeight, 0.1, 3000)
+      : perspective(this.fov, aspect, 0.1, 3000);
+    const { eye, up } = this.cameraState();
+    const view = lookAt(eye, this.target, up);
     const mvp = multiply(projection, view);
     this.lastMvp = mvp;
+    const actionBillboard = this.plateActionBillboardFrame();
+    this.updatePlateActionBillboards(actionBillboard);
     this.updatePickRects(mvp);
+    const plateAlpha = this.isViewingBuildPlateUnderside() ? 0.5 : 1;
+    const deferPlateSurfaces = plateAlpha < 1;
 
     if (this.meshes.nextPlate) {
-      this.applyPlateInteractionColors(this.meshes.nextPlate, "add-plate");
-      drawMesh(gl, this.program, this.meshes.nextPlate.bed, mvp, this.clipZ);
-      drawMesh(gl, this.program, this.meshes.nextPlate.border, mvp, this.clipZ);
+      this.applyPlateInteractionColors(this.meshes.nextPlate, "add-plate", plateAlpha);
+      if (!deferPlateSurfaces) this.drawBuildPlateSurface(this.meshes.nextPlate, mvp);
       drawMesh(gl, this.program, this.meshes.nextPlate.plusPad, mvp, this.clipZ);
       drawMesh(gl, this.program, this.meshes.nextPlate.plusOutline, mvp, this.clipZ);
       drawMesh(gl, this.program, this.meshes.nextPlate.plus, mvp, this.clipZ);
     }
     for (const plate of this.meshes.plates || []) {
-      this.applyPlateInteractionColors(plate, "plate");
-      drawMesh(gl, this.program, plate.bed, mvp, this.clipZ);
-      drawMesh(gl, this.program, plate.border, mvp, this.clipZ);
+      this.applyPlateInteractionColors(plate, "plate", plateAlpha);
+      if (!deferPlateSurfaces) this.drawBuildPlateSurface(plate, mvp);
       if (!this.shouldShowPlateActions(plate)) continue;
       this.applyPlateActionColors(plate);
       for (const action of plate.actions || []) {
+        this.facePlateActionToCamera(action, actionBillboard.rotation);
         drawMesh(gl, this.program, action.pad, mvp, this.clipZ);
         drawMesh(gl, this.program, action.outline, mvp, this.clipZ);
         drawMesh(gl, this.program, action.icon, mvp, this.clipZ);
@@ -3786,10 +4645,12 @@ class Viewer {
     for (const item of this.meshes.models || []) {
       drawMesh(gl, this.program, item.mesh, mvp, this.clipZ);
     }
-    if (this.meshes.outOfBounds) drawMesh(gl, this.program, this.meshes.outOfBounds, mvp, this.clipZ);
-    if (this.meshes.clipPlane) drawMesh(gl, this.program, this.meshes.clipPlane, mvp, this.clipZ);
+    if (this.meshes.outOfBoundsSpill) this.drawTransparentMesh(this.meshes.outOfBoundsSpill, mvp);
+    if (this.meshes.outOfBoundsBox) drawMesh(gl, this.program, this.meshes.outOfBoundsBox, mvp, this.clipZ);
+    if (this.meshes.clipPlane) this.drawClipPlane(mvp);
     if (this.meshes.layerLines) drawMesh(gl, this.program, this.meshes.layerLines, mvp, this.clipZ);
     if (this.meshes.selection) drawMesh(gl, this.program, this.meshes.selection, mvp, this.clipZ);
+    if (deferPlateSurfaces) this.drawTransparentBuildPlateSurfaces(mvp);
     this.drawGizmo(mvp);
     if (this.onFrame) this.onFrame();
   }
@@ -3799,26 +4660,98 @@ class Viewer {
     requestAnimationFrame(() => this.draw());
   }
 
-  applyPlateInteractionColors(plate, type) {
+  isViewingBuildPlateUnderside() {
+    return this.cameraState().zAxis[2] < -0.05;
+  }
+
+  drawBuildPlateSurface(plate, mvp) {
+    const gl = this.gl;
+    gl.disable(gl.CULL_FACE);
+    drawMesh(gl, this.program, plate.bed, mvp, this.clipZ);
+    drawMesh(gl, this.program, plate.border, mvp, this.clipZ);
+    gl.enable(gl.CULL_FACE);
+  }
+
+  drawTransparentBuildPlateSurfaces(mvp) {
+    const gl = this.gl;
+    gl.depthMask(false);
+    if (this.meshes.nextPlate) this.drawBuildPlateSurface(this.meshes.nextPlate, mvp);
+    for (const plate of this.meshes.plates || []) this.drawBuildPlateSurface(plate, mvp);
+    gl.depthMask(true);
+  }
+
+  drawTransparentMesh(mesh, mvp) {
+    const gl = this.gl;
+    gl.depthMask(false);
+    gl.disable(gl.CULL_FACE);
+    drawMesh(gl, this.program, mesh, mvp, this.clipZ);
+    gl.enable(gl.CULL_FACE);
+    gl.depthMask(true);
+  }
+
+  drawClipPlane(mvp) {
+    const clip = this.meshes.clipPlane;
+    if (!clip) return;
+    const gl = this.gl;
+    gl.depthMask(false);
+    gl.disable(gl.CULL_FACE);
+    drawMesh(gl, this.program, clip.surface, mvp, this.clipZ);
+    if (clip.intersection) drawMesh(gl, this.program, clip.intersection, mvp, this.clipZ);
+    drawMesh(gl, this.program, clip.outline, mvp, this.clipZ);
+    gl.enable(gl.CULL_FACE);
+    gl.depthMask(true);
+  }
+
+  plateActionBillboardFrame() {
+    const { right, up, zAxis } = this.cameraState();
+    const matrix = [
+      [right[0], up[0], zAxis[0]],
+      [right[1], up[1], zAxis[1]],
+      [right[2], up[2], zAxis[2]]
+    ];
+    return {
+      right,
+      up,
+      rotation: eulerFromRotationMatrix(matrix)
+    };
+  }
+
+  updatePlateActionBillboards(frame) {
+    for (const plate of this.meshes.plates || []) {
+      for (const action of plate.actions || []) {
+        action.pickPoints.length = 0;
+        action.pickPoints.push(...billboardRectCorners(action.billboardOrigin, frame.right, frame.up, action.pickWidth, action.pickHeight));
+      }
+    }
+  }
+
+  facePlateActionToCamera(action, rotation) {
+    for (const mesh of [action.pad, action.outline, action.icon]) {
+      mesh.modelOrigin = action.billboardOrigin;
+      mesh.modelRotation = rotation;
+    }
+  }
+
+  applyPlateInteractionColors(plate, type, surfaceAlpha = 1) {
     const pressed = this.pressedHit?.type === type && this.pressedHit.id === plate.id;
     const hovered = this.hoveredHit?.type === type && this.hoveredHit.id === plate.id;
     if (type === "add-plate") {
-      plate.bed.color = pressed ? [0.06, 0.34, 0.18, 1] : hovered ? [0.12, 0.16, 0.16, 1] : [0.09, 0.125, 0.15, 1];
-      plate.border.color = pressed ? [0.18, 0.92, 0.42, 1] : hovered ? [1.0, 0.86, 0.22, 1] : [0.24, 0.34, 0.4, 1];
+      plate.bed.color = withAlpha(pressed ? [0.06, 0.34, 0.18, 1] : hovered ? [0.12, 0.16, 0.16, 1] : [0.09, 0.125, 0.15, 1], surfaceAlpha);
+      plate.border.color = withAlpha(pressed ? [0.18, 0.92, 0.42, 1] : hovered ? [1.0, 0.86, 0.22, 1] : [0.24, 0.34, 0.4, 1], surfaceAlpha);
       if (plate.plusPad) plate.plusPad.color = pressed ? [0.08, 0.42, 0.22, 1] : hovered ? [0.20, 0.22, 0.16, 1] : [0.14, 0.195, 0.23, 1];
       if (plate.plusOutline) plate.plusOutline.color = pressed ? [0.18, 0.92, 0.42, 1] : hovered ? [1.0, 0.86, 0.22, 1] : [0.4, 0.55, 0.64, 1];
       plate.plus.color = pressed ? [0.68, 1.0, 0.74, 1] : hovered ? [1.0, 0.9, 0.32, 1] : [0.82, 0.93, 1.0, 1];
       return;
     }
     const baseBed = plate.active ? [0.36, 0.43, 0.5, 1] : [0.24, 0.27, 0.3, 1];
-    plate.bed.color = pressed ? [0.08, 0.42, 0.22, 1] : baseBed;
-    plate.border.color = pressed
+    plate.bed.color = withAlpha(pressed ? [0.08, 0.42, 0.22, 1] : baseBed, surfaceAlpha);
+    plate.border.color = withAlpha(pressed
       ? [0.18, 0.92, 0.42, 1]
       : hovered
         ? [1.0, 0.86, 0.22, 1]
         : plate.active
           ? [0.42, 0.67, 0.95, 1]
-          : [0.20, 0.27, 0.33, 1];
+          : [0.20, 0.27, 0.33, 1], surfaceAlpha);
   }
 
   applyPlateActionColors(plate) {
@@ -3984,7 +4917,11 @@ function makeRoundedPlateBorderGeometry(bed, origin = { x: 0, y: 0 }, visual = {
 }
 
 function plateBorderWidth(bed) {
-  return Math.max(2.2, Math.min(bed.x, bed.y) * 0.018);
+  return Math.max(1.1, Math.min(bed.x, bed.y) * 0.009);
+}
+
+function plateActionReferenceBorderWidth(bed) {
+  return plateBorderWidth(bed) * 2;
 }
 
 function plateCornerRadius(bed) {
@@ -4083,6 +5020,17 @@ function makeBuildPlateActionMeshes(gl, plate) {
   const layout = plateActionLayout(plate.bed);
   return ["add", "delete"].map((action) => {
     const layers = buildPlateActionLayers(action);
+    const rect = layout[action];
+    const pickRect = expandRect(rect, layout.outlineWidth || 2);
+    const scaleX = plate.visual?.scaleX || 1;
+    const scaleY = plate.visual?.scaleY || 1;
+    const billboardOrigin = plateVisualPoint(
+      (rect.x0 + rect.x1) / 2,
+      (rect.y0 + rect.y1) / 2,
+      plate.bed,
+      plate.origin,
+      { ...plate.visual, z: (plate.visual?.z || 0) + layers.pad }
+    );
     const padGeometry = makeLocalRoundedRectGeometry(layout[action], plate.bed, plate.origin, plate.visual, layers.pad);
     const outlineGeometry = makeLocalRoundedRectBorderGeometry(layout[action], plate.bed, plate.origin, plate.visual, layers.outline);
     const iconGeometry = action === "add"
@@ -4094,6 +5042,10 @@ function makeBuildPlateActionMeshes(gl, plate) {
       padBaseColor: action === "delete" ? [0.28, 0.14, 0.15, 1] : [0.16, 0.25, 0.34, 1],
       outlineBaseColor: [0.42, 0.67, 0.95, 1],
       iconBaseColor: action === "delete" ? [1.0, 0.55, 0.55, 1] : [0.78, 0.9, 1.0, 1],
+      billboardOrigin,
+      pickPoints: [],
+      pickWidth: Math.abs((pickRect.x1 - pickRect.x0) * scaleX),
+      pickHeight: Math.abs((pickRect.y1 - pickRect.y0) * scaleY),
       pad: makeMesh(gl, padGeometry, action === "delete" ? [0.28, 0.14, 0.15, 1] : [0.16, 0.25, 0.34, 1], gl.TRIANGLES),
       outline: makeMesh(gl, outlineGeometry, [0.42, 0.67, 0.95, 1], gl.TRIANGLES),
       icon: makeMesh(gl, iconGeometry, action === "delete" ? [1.0, 0.55, 0.55, 1] : [0.78, 0.9, 1.0, 1], gl.TRIANGLES)
@@ -4117,9 +5069,10 @@ function plateActionLayout(bed) {
   const outlineWidth = Math.max(2.4, size * 0.16);
   const plateGap = Math.max(3.4, size * 0.32);
   const buttonGap = Math.max(3.2, size * 0.28) + outlineWidth * 2;
-  const x0 = bed.x + plateBorderWidth(bed) + plateGap + outlineWidth;
+  const referenceBorder = plateActionReferenceBorderWidth(bed);
+  const x0 = bed.x + referenceBorder + plateGap + outlineWidth;
   const x1 = x0 + size;
-  const addY1 = bed.y - plateBorderWidth(bed) - plateGap - outlineWidth;
+  const addY1 = bed.y - referenceBorder - plateGap - outlineWidth;
   const addY0 = addY1 - size;
   const deleteY1 = addY0 - buttonGap;
   const deleteY0 = deleteY1 - size;
@@ -4264,18 +5217,106 @@ function plateVisualPoint(x, y, bed, origin = { x: 0, y: 0 }, visual = {}) {
   ];
 }
 
-function makeClipPlaneGeometry(plate, z) {
-  const v = new Float32Array([
-    plate.x, plate.y, z,
-    plate.x + plate.width, plate.y, z,
-    plate.x + plate.width, plate.y + plate.depth, z,
-    plate.x, plate.y, z,
-    plate.x + plate.width, plate.y + plate.depth, z,
-    plate.x, plate.y + plate.depth, z
-  ]);
-  const n = new Float32Array(v.length);
-  for (let i = 2; i < n.length; i += 3) n[i] = 1;
-  return { vertices: v, normals: n };
+function makeClipPlaneSurfaceGeometry(plate, z) {
+  return makeBedGeometry(
+    { x: plate.width, y: plate.depth },
+    { x: plate.x, y: plate.y },
+    { z }
+  );
+}
+
+function makeClipPlaneOutlineGeometry(plate, z) {
+  return makeRoundedPlateBorderGeometry(
+    { x: plate.width, y: plate.depth },
+    { x: plate.x, y: plate.y },
+    { z: z + 0.08 }
+  );
+}
+
+function makeClipIntersectionFill(plate, z) {
+  const segments = [];
+  for (const model of models.filter((item) => item.plateId === plate.id)) {
+    const world = modelWorldMesh(model);
+    if (z < world.bounds.minZ || z > world.bounds.maxZ) continue;
+    for (let i = 0; i < world.vertices.length; i += 9) {
+      const segment = trianglePlaneSegment([
+        [world.vertices[i], world.vertices[i + 1], world.vertices[i + 2]],
+        [world.vertices[i + 3], world.vertices[i + 4], world.vertices[i + 5]],
+        [world.vertices[i + 6], world.vertices[i + 7], world.vertices[i + 8]]
+      ], z);
+      if (segment) segments.push(segment);
+    }
+  }
+  if (!segments.length) return null;
+  return fillClipSegments(segments, {
+    x: plate.origin.x,
+    y: plate.origin.y,
+    width: plate.settings.printer.sizeX || 120,
+    depth: plate.settings.printer.sizeY || 67.5,
+    z: z + 0.12
+  });
+}
+
+function trianglePlaneSegment(triangle, z) {
+  const points = [];
+  for (const [a, b] of [[triangle[0], triangle[1]], [triangle[1], triangle[2]], [triangle[2], triangle[0]]]) {
+    const point = edgePlaneIntersection(a, b, z);
+    if (!point) continue;
+    if (!points.some((existing) => samePoint2d(existing, point))) points.push(point);
+  }
+  if (points.length < 2) return null;
+  points.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  if (length(sub(points[0], points[points.length - 1])) <= 0.001) return null;
+  return [points[0], points[points.length - 1]];
+}
+
+function samePoint2d(a, b) {
+  return Math.abs(a[0] - b[0]) < 0.001 && Math.abs(a[1] - b[1]) < 0.001;
+}
+
+function fillClipSegments(segments, plate) {
+  const cell = Math.max(0.35, Math.min(1.2, Math.min(plate.width, plate.depth) / 220));
+  const rows = Math.max(1, Math.ceil(plate.depth / cell));
+  const vertices = [];
+  const normals = [];
+  for (let row = 0; row < rows; row++) {
+    const yLocal = Math.min(plate.depth, (row + 0.5) * cell);
+    const yWorld = plate.y + yLocal;
+    const xs = [];
+    for (const [a, b] of segments) {
+      const ay = a[1];
+      const by = b[1];
+      if (Math.abs(ay - by) < 0.0001) continue;
+      if ((ay <= yWorld && yWorld < by) || (by <= yWorld && yWorld < ay)) {
+        const t = (yWorld - ay) / (by - ay);
+        xs.push(a[0] + (b[0] - a[0]) * t);
+      }
+    }
+    if (xs.length < 2) continue;
+    xs.sort((a, b) => a - b);
+    const y0 = plate.y + row * cell;
+    const y1 = Math.min(plate.y + plate.depth, y0 + cell);
+    for (let index = 0; index < xs.length - 1; index += 2) {
+      const x0 = clamp(xs[index], plate.x, plate.x + plate.width);
+      const x1 = clamp(xs[index + 1], plate.x, plate.x + plate.width);
+      if (x1 - x0 <= 0.001) continue;
+      pushWorldRect(vertices, normals, x0, y0, x1, y1, plate.z);
+    }
+  }
+  if (!vertices.length) return null;
+  return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
+}
+
+function pushWorldRect(vertices, normals, x0, y0, x1, y1, z) {
+  vertices.push(
+    x0, y0, z,
+    x1, y0, z,
+    x1, y1, z,
+    x0, y0, z,
+    x1, y1, z,
+    x0, y1, z
+  );
+  for (let i = 0; i < 6; i++) normals.push(0, 0, 1);
 }
 
 function makeSelectionBoxGeometry(boxes) {
@@ -4315,22 +5356,27 @@ function makeSupportGeometry(items, braces) {
     const base = [baseX, baseY, baseZ];
     const joint = [jointX, jointY, Math.min(jointZ, z)];
     const top = [support.x, support.y, z];
-    addSegmentCylinder(vertices, normals, base, joint, support.postRadius || 0.28, 10);
+    const postRadius = support.postRadius || 0.28;
+    const tipRadius = support.tipRadius || 0.18;
+    addSegmentCylinder(vertices, normals, base, joint, postRadius, 30);
+    addSphere(vertices, normals, joint, Math.max(postRadius, tipRadius), 42, 21);
     if ((support.kind || "bed") === "bed") {
-      addCylinder(vertices, normals, baseX, baseY, 0, 0.35, support.footRadius || 0.8, 16);
+      addCylinder(vertices, normals, baseX, baseY, 0, support.bedInterfaceThickness || 0.35, support.footRadius || 0.8, 16);
     } else {
-      addSegmentCylinder(vertices, normals, base, pointBetween(base, joint, 0.2), support.tipRadius || 0.18, 10);
+      addSegmentCylinder(vertices, normals, base, pointBetween(base, joint, 0.2), tipRadius, 30);
     }
     addTipGeometry(vertices, normals, joint, top, support);
   }
   for (const brace of braces || []) {
+    const z0 = Number.isFinite(brace.z0) ? brace.z0 : brace.z;
+    const z1 = Number.isFinite(brace.z1) ? brace.z1 : z0;
     addSegmentCylinder(
       vertices,
       normals,
-      [brace.x0, brace.y0, brace.z],
-      [brace.x1, brace.y1, brace.z],
+      [brace.x0, brace.y0, z0],
+      [brace.x1, brace.y1, z1],
       brace.radius || 0.18,
-      8
+      18
     );
   }
   return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
@@ -4340,19 +5386,42 @@ function addTipGeometry(vertices, normals, start, top, support) {
   const postRadius = support.postRadius || 0.28;
   const tipRadius = support.tipRadius || 0.18;
   const type = support.tipType || "cone";
+  if (support.sphericalContactEnabled) {
+    const radius = Math.max(0.01, (support.sphericalContactDiameter || 0.6) / 2);
+    addSphere(vertices, normals, sphericalContactCenter(top, support, radius), radius, 18, 9);
+  }
   if (type === "cylinder") {
-    addSegmentCylinder(vertices, normals, start, top, tipRadius, 10);
+    addSegmentCylinder(vertices, normals, start, top, tipRadius, 30);
     return;
   }
   if (type === "sphere") {
     const bulbRadius = Math.max(postRadius * 1.45, tipRadius * 2.2);
     const middle = pointBetween(start, top, 0.58);
-    addTaperedSegment(vertices, normals, start, middle, postRadius, bulbRadius, 12);
-    addSphere(vertices, normals, middle, bulbRadius, 12, 6);
-    addTaperedSegment(vertices, normals, middle, top, bulbRadius, tipRadius, 12);
+    addTaperedSegment(vertices, normals, start, middle, postRadius, bulbRadius, 36);
+    addSphere(vertices, normals, middle, bulbRadius, 36, 18);
+    addTaperedSegment(vertices, normals, middle, top, bulbRadius, tipRadius, 36);
     return;
   }
-  addTaperedSegment(vertices, normals, start, top, postRadius, tipRadius, 10);
+  addTaperedSegment(vertices, normals, start, top, postRadius, tipRadius, 30);
+}
+
+function sphericalContactCenter(contactPoint, support, radius) {
+  const inset = Math.min(Math.max(0, support.sphericalContactInset || 0), radius * 2);
+  const normal = supportSurfaceNormal(support);
+  return add(contactPoint, scaleVec(normal, radius - inset));
+}
+
+function supportSurfaceNormal(support) {
+  const raw = support.normal || {};
+  let normal = [
+    Number.isFinite(raw.x) ? raw.x : 0,
+    Number.isFinite(raw.y) ? raw.y : 0,
+    Number.isFinite(raw.z) ? raw.z : -1
+  ];
+  if (normal[2] > 0) normal = scaleVec(normal, -1);
+  if (length(normal) < 0.0001) return [0, 0, -1];
+  normal = normalize(normal);
+  return normal[2] > -0.05 ? normalize([normal[0] * 0.35, normal[1] * 0.35, -1]) : normal;
 }
 
 function addSphere(vertices, normals, center, radius, segments, rings) {
@@ -4397,6 +5466,7 @@ function addSegmentCylinder(vertices, normals, start, end, radius, segments) {
 function addTaperedSegment(vertices, normals, start, end, startRadius, endRadius, segments) {
   if (length(sub(end, start)) < 0.001) return;
   const axis = normalize(sub(end, start));
+  const negativeAxis = scaleVec(axis, -1);
   const reference = Math.abs(axis[2]) > 0.9 ? [1, 0, 0] : [0, 0, 1];
   const u = normalize(cross(axis, reference));
   const v = normalize(cross(axis, u));
@@ -4411,6 +5481,8 @@ function addTaperedSegment(vertices, normals, start, end, startRadius, endRadius
     const p3 = add(end, scaleVec(n0, endRadius));
     pushTri(vertices, normals, p0, p1, p2, n0, n1, n1);
     pushTri(vertices, normals, p0, p2, p3, n0, n1, n0);
+    if (startRadius > 0.001) pushTri(vertices, normals, start, p1, p0, negativeAxis, negativeAxis, negativeAxis);
+    if (endRadius > 0.001) pushTri(vertices, normals, end, p3, p2, axis, axis, axis);
   }
 }
 
@@ -4453,14 +5525,14 @@ const GIZMO_ARC_SWEEP = GIZMO_ARC_END - GIZMO_ARC_START;
 
 function makeTransformGizmo(gl, gizmo) {
   const moveLength = gizmo.length;
+  const arrowLength = gizmo.length * 1.28;
+  const arrowStroke = Math.max(0.72, gizmo.radius * 2.45);
   const arcRadius = gizmo.length * 0.82;
   const stroke = Math.max(1.1, gizmo.radius * 3.6);
   const specs = [
     { action: "move-x", axis: "x", kind: "move" },
     { action: "move-y", axis: "y", kind: "move" },
     { action: "move-z", axis: "z", kind: "move" },
-    { action: "move-yz", axis: "x", kind: "plane" },
-    { action: "move-xz", axis: "y", kind: "plane" },
     { action: "move-xy", axis: "z", kind: "plane" },
     { action: "rotate-x", axis: "x", kind: "rotate" },
     { action: "rotate-y", axis: "y", kind: "rotate" },
@@ -4468,20 +5540,22 @@ function makeTransformGizmo(gl, gizmo) {
   ];
   return {
     features: specs.map((spec) => {
+      const featureLength = spec.kind === "move" ? arrowLength : moveLength;
+      const featureStroke = spec.kind === "move" ? arrowStroke : stroke;
       const geometry = spec.kind === "move"
-        ? makeGizmoMoveGeometry(gizmo.center, spec.axis, moveLength, stroke)
+        ? makeGizmoMoveGeometry(gizmo.center, spec.axis, arrowLength, arrowStroke)
         : spec.kind === "plane"
           ? makeGizmoPlaneSquareGeometry(gizmo.center, spec.axis, moveLength, stroke)
           : makeGizmoArcGeometry(gizmo.center, spec.axis, arcRadius, stroke * 0.58);
       const activeGeometry = spec.kind === "rotate"
         ? makeGizmoArcGeometry(gizmo.center, spec.axis, arcRadius, stroke * 0.58, { fullCircle: true })
         : null;
-      const points = gizmoFeaturePoints(gizmo.center, spec, moveLength, arcRadius, stroke);
+      const points = gizmoFeaturePoints(gizmo.center, spec, featureLength, arcRadius, featureStroke);
       return {
         ...spec,
-        bounds: boundsFromPoints(points, Math.max(4, stroke * 3.2)),
+        bounds: boundsFromPoints(points, Math.max(4, featureStroke * 3.2)),
         pickPoints: points,
-        pickPadding: spec.kind === "plane" ? Math.max(4, stroke * 1.8) : Math.max(6, stroke * 2.4),
+        pickPadding: spec.kind === "plane" ? Math.max(4, stroke * 1.8) : Math.max(6, featureStroke * 2.4),
         mesh: makeMesh(gl, geometry, gizmoColor(spec.axis, "normal"), gl.TRIANGLES, { unlit: true }),
         activeMesh: activeGeometry ? makeMesh(gl, activeGeometry, gizmoColor(spec.axis, "normal"), gl.TRIANGLES, { unlit: true }) : null
       };
@@ -4495,33 +5569,52 @@ function makeGizmoMoveGeometry(center, axis, lengthValue, stroke) {
   const direction = gizmoAxisDirection(axis);
   const normal = gizmoMovePlaneNormal(axis);
   const lateral = normalize(cross(normal, direction));
-  const startAlong = stroke * 1.1;
-  const shaftEndAlong = lengthValue * 0.72;
+  const startAlong = stroke * 1.25;
   const tipAlong = lengthValue;
-  const halfStroke = stroke * 0.5;
-  const headHalf = stroke * 1.45;
-  const shoulder = Math.min(stroke * 0.72, (headHalf - halfStroke) * 0.6, (tipAlong - shaftEndAlong) * 0.24);
+  const headBaseAlong = lengthValue * 0.62;
+  const shaftHalf = Math.max(stroke * 0.38, lengthValue * 0.026);
+  const headHalf = Math.max(stroke * 2.15, lengthValue * 0.12);
+  const apexRadius = Math.min(headHalf * 0.34, (tipAlong - headBaseAlong) * 0.2);
+  const shoulderRadius = Math.min(headHalf * 0.2, (tipAlong - headBaseAlong) * 0.16);
   const toPoint = (along, side) => add(center, add(scaleVec(direction, along), scaleVec(lateral, side)));
-  const path = [
-    toPoint(tipAlong, 0),
-    toPoint(shaftEndAlong + shoulder * 0.78, headHalf - shoulder * 0.18),
-    toPoint(shaftEndAlong + shoulder * 0.28, headHalf - shoulder * 0.58),
-    toPoint(shaftEndAlong, headHalf - shoulder),
-    toPoint(shaftEndAlong, halfStroke)
+
+  const shaftPath = [
+    toPoint(headBaseAlong, shaftHalf),
+    toPoint(startAlong, shaftHalf)
   ];
   const capSegments = 9;
   for (let i = 0; i <= capSegments; i++) {
     const angle = Math.PI / 2 + (i / capSegments) * Math.PI;
-    path.push(toPoint(startAlong + Math.cos(angle) * halfStroke, Math.sin(angle) * halfStroke));
+    shaftPath.push(toPoint(startAlong + Math.cos(angle) * shaftHalf, Math.sin(angle) * shaftHalf));
   }
-  path.push(
-    toPoint(shaftEndAlong, -halfStroke),
-    toPoint(shaftEndAlong, -headHalf + shoulder),
-    toPoint(shaftEndAlong + shoulder * 0.28, -headHalf + shoulder * 0.58),
-    toPoint(shaftEndAlong + shoulder * 0.78, -headHalf + shoulder * 0.18)
-  );
-  pushFlatPolygon(vertices, normals, path, normal);
-  return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
+  shaftPath.push(toPoint(headBaseAlong, -shaftHalf));
+  pushFlatPolygon(vertices, normals, shaftPath, normal);
+
+  const rightTop = toPoint(tipAlong - apexRadius * 0.5, apexRadius * 0.866);
+  const leftTop = toPoint(tipAlong - apexRadius * 0.5, -apexRadius * 0.866);
+  const headPath = [
+    rightTop,
+    toPoint(headBaseAlong + shoulderRadius * 0.75, headHalf - shoulderRadius * 0.1),
+    toPoint(headBaseAlong, headHalf - shoulderRadius),
+    toPoint(headBaseAlong, -headHalf + shoulderRadius),
+    toPoint(headBaseAlong + shoulderRadius * 0.75, -headHalf + shoulderRadius * 0.1),
+    leftTop
+  ];
+  const apexCenterAlong = tipAlong - apexRadius;
+  const apexSegments = 10;
+  for (let i = 1; i <= apexSegments; i++) {
+    const angle = -Math.PI / 3 + (i / apexSegments) * (Math.PI * 2 / 3);
+    headPath.push(toPoint(
+      apexCenterAlong + Math.cos(angle) * apexRadius,
+      Math.sin(angle) * apexRadius
+    ));
+  }
+  pushFlatPolygon(vertices, normals, headPath, normal);
+
+  return {
+    vertices: new Float32Array(vertices),
+    normals: new Float32Array(normals)
+  };
 }
 
 function makeGizmoArcGeometry(center, axis, radius, stroke, { fullCircle = false } = {}) {
@@ -4705,6 +5798,21 @@ function gizmoColor(axis, state) {
   return palette[axis]?.[state] || [0.75, 0.75, 0.75, 0.5];
 }
 
+function withAlpha(color, alpha) {
+  return [color[0], color[1], color[2], clamp(alpha, 0, 1)];
+}
+
+function billboardRectCorners(center, right, up, width, height) {
+  const halfRight = scaleVec(right, width / 2);
+  const halfUp = scaleVec(up, height / 2);
+  return [
+    add(center, add(scaleVec(halfRight, -1), scaleVec(halfUp, -1))),
+    add(center, add(halfRight, scaleVec(halfUp, -1))),
+    add(center, add(halfRight, halfUp)),
+    add(center, add(scaleVec(halfRight, -1), halfUp))
+  ];
+}
+
 function boundsFromPoints(points, padding) {
   const xs = points.map((point) => point[0]);
   const ys = points.map((point) => point[1]);
@@ -4864,6 +5972,18 @@ function perspective(fovy, aspect, near, far) {
   ]);
 }
 
+function orthographic(left, right, bottom, top, near, far) {
+  const lr = 1 / (left - right);
+  const bt = 1 / (bottom - top);
+  const nf = 1 / (near - far);
+  return new Float32Array([
+    -2 * lr, 0, 0, 0,
+    0, -2 * bt, 0, 0,
+    0, 0, 2 * nf, 0,
+    (left + right) * lr, (top + bottom) * bt, (far + near) * nf, 1
+  ]);
+}
+
 function lookAt(eye, target, up) {
   const z = normalize(sub(eye, target));
   const x = normalize(cross(up, z));
@@ -4927,6 +6047,27 @@ function boundsCorners(bounds) {
 
 function deg(value) {
   return value * Math.PI / 180;
+}
+
+function radToDeg(value) {
+  return value * 180 / Math.PI;
+}
+
+function normalizeDegrees(value) {
+  const normalized = ((value + 180) % 360 + 360) % 360 - 180;
+  return Math.abs(normalized) < 0.000001 ? 0 : normalized;
+}
+
+function normalizeAngle(value) {
+  return Math.atan2(Math.sin(value), Math.cos(value));
+}
+
+function planeAngleAroundCenter(point, center, u, v) {
+  const relative = sub(point, center);
+  const x = dot(relative, u);
+  const y = dot(relative, v);
+  if (Math.hypot(x, y) < 0.0001) return null;
+  return Math.atan2(y, x);
 }
 
 function clamp(value, min, max) {

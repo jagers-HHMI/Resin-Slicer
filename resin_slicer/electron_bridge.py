@@ -68,7 +68,7 @@ def _preview(request: dict[str, Any]) -> None:
         xy_offset_mm=(transform.translate_x_mm, transform.translate_y_mm),
         preserve_coordinates=has_model_entries,
     )
-    plan = SupportPlan((), 0, 0, 0, 0)
+    plan = SupportPlan((), 0, 0, 0, 0.0, 0)
     if support.enabled:
         plan = plan_supports(prepared, config, support, prepared.layer_count)
 
@@ -208,18 +208,23 @@ def _support_from_request(request: dict[str, Any]) -> SupportConfig:
         support_spacing_mm=float(support.get("spacing", 3.0)),
         primary_supports_enabled=bool(support.get("primarySupportsEnabled", False)),
         primary_density_multiplier=float(support.get("primaryDensityMultiplier", 2.0)),
-        primary_area_radius_mm=float(support.get("primaryAreaRadius", 4.0)),
+        primary_area_radius_mm=_support_radius(support, "primaryAreaDiameter", "primaryAreaRadius", 4.0),
         primary_max_extra_per_island=int(support.get("primaryMaxExtra", 8)),
-        post_radius_mm=float(support.get("postRadius", 0.28)),
-        tip_radius_mm=float(support.get("tipRadius", 0.18)),
+        post_radius_mm=_support_radius(support, "postDiameter", "postRadius", 0.28),
+        tip_radius_mm=_support_radius(support, "tipDiameter", "tipRadius", 0.18),
         tip_type=str(support.get("tipType", "cone")),
+        spherical_contact_enabled=bool(support.get("sphericalContactEnabled", False)),
+        spherical_contact_diameter_mm=float(support.get("sphericalContactDiameter", 0.6)),
+        spherical_contact_inset_mm=_spherical_contact_inset_mm(support),
         tip_length_mm=float(support.get("tipLength", 0.8)),
-        tip_angle_deg=float(support.get("tipAngle", 25.0)),
-        foot_radius_mm=float(support.get("footRadius", 0.8)),
+        foot_radius_mm=_support_radius(support, "footDiameter", "footRadius", 0.8),
         bed_interface=str(support.get("bedInterface", "raft")),
-        raft_margin_mm=float(support.get("raftMargin", 0.6)),
+        raft_margin_mm=float(support.get("raftOffset", support.get("raftMargin", 0.6))),
+        raft_chamfer_width_mm=float(support.get("raftChamferWidth", support.get("raft_chamfer_width_mm", 0.4))),
+        raft_chamfer_angle_deg=float(support.get("raftChamferAngle", support.get("raft_chamfer_angle_deg", 45.0))),
+        bed_interface_thickness_mm=float(support.get("bedInterfaceThickness", 0.35)),
         brace_enabled=bool(support.get("braceEnabled", True)),
-        brace_radius_mm=float(support.get("braceRadius", 0.18)),
+        brace_radius_mm=_support_radius(support, "braceDiameter", "braceRadius", 0.18),
         brace_height_mm=float(support.get("braceHeight", 3.0)),
         brace_max_distance_mm=float(support.get("braceDistance", 8.0)),
         collision_clearance_mm=float(support.get("collisionClearance", 0.08)),
@@ -230,6 +235,20 @@ def _support_from_request(request: dict[str, Any]) -> SupportConfig:
         enforcer_min_drop_mm=float(support.get("enforcerMinDrop", 1.0)),
         analysis_max_pixels=int(support.get("analysisPixels", 250_000)),
     )
+
+
+def _support_radius(support: dict[str, Any], diameter_key: str, radius_key: str, default_radius: float) -> float:
+    if diameter_key in support:
+        return float(support.get(diameter_key, default_radius * 2.0)) * 0.5
+    return float(support.get(radius_key, default_radius))
+
+
+def _spherical_contact_inset_mm(support: dict[str, Any]) -> float:
+    diameter = float(support.get("sphericalContactDiameter", 0.6))
+    if "sphericalContactInsetPercent" in support:
+        percent = min(95.0, max(5.0, float(support.get("sphericalContactInsetPercent", 50.0))))
+        return diameter * percent / 100.0
+    return float(support.get("sphericalContactInset", diameter * 0.5))
 
 
 def _transform_from_request(request: dict[str, Any]) -> MeshTransform:
@@ -269,17 +288,37 @@ def _support_to_json(anchor: Any, plan: SupportPlan, config: PrintConfig, suppor
         "postRadius": support.post_radius_mm,
         "tipRadius": support.tip_radius_mm,
         "tipType": anchor.tip_type,
+        "normal": {
+            "x": anchor.normal_x,
+            "y": anchor.normal_y,
+            "z": anchor.normal_z,
+        },
+        "sphericalContactEnabled": support.spherical_contact_enabled,
+        "sphericalContactDiameter": support.spherical_contact_diameter_mm,
+        "sphericalContactInset": support.spherical_contact_inset_mm,
+        "sphericalContactInsetPercent": (
+            100.0 * support.spherical_contact_inset_mm / support.spherical_contact_diameter_mm
+            if support.spherical_contact_diameter_mm > 0
+            else 50.0
+        ),
         "footRadius": support.foot_radius_mm,
+        "bedInterfaceThickness": support.bed_interface_thickness_mm,
     }
 
 
 def _brace_to_json(brace: Any, config: PrintConfig) -> dict[str, float | int]:
+    z0 = (brace.start_layer + 0.5) * config.layer_height_mm
+    z1 = (brace.end_layer + 0.5) * config.layer_height_mm
     return {
         "x0": (brace.x0 + 0.5) * config.pixel_size_x_mm,
         "y0": (brace.y0 + 0.5) * config.pixel_size_y_mm,
         "x1": (brace.x1 + 0.5) * config.pixel_size_x_mm,
         "y1": (brace.y1 + 0.5) * config.pixel_size_y_mm,
-        "z": (brace.layer + 0.5) * config.layer_height_mm,
+        "z": z0,
+        "z0": z0,
+        "z1": z1,
+        "startLayer": brace.start_layer,
+        "endLayer": brace.end_layer,
         "radius": brace.radius_px * min(config.pixel_size_x_mm, config.pixel_size_y_mm),
     }
 

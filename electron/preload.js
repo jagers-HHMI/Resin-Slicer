@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 contextBridge.exposeInMainWorld("slicer", {
   openStl: () => ipcRenderer.invoke("dialog:open-stl"),
   saveOutput: (format) => ipcRenderer.invoke("dialog:save-output", format),
+  saveProject: (defaultName, content) => ipcRenderer.invoke("dialog:save-project", defaultName, content),
   openProfile: (kind) => ipcRenderer.invoke("dialog:open-profile", kind),
   saveProfile: (kind, defaultName, content) => ipcRenderer.invoke("dialog:save-profile", kind, defaultName, content),
   pathForFile: (file) => webUtils.getPathForFile(file),

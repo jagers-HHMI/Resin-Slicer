@@ -29,10 +29,12 @@ def main(argv: list[str] | None = None) -> int:
             tip_radius_mm=args.tip_radius,
             tip_type=args.tip_type,
             tip_length_mm=args.tip_length,
-            tip_angle_deg=args.tip_angle,
             foot_radius_mm=args.foot_radius,
             bed_interface=args.bed_interface,
-            raft_margin_mm=args.raft_margin,
+            raft_margin_mm=args.raft_offset,
+            raft_chamfer_width_mm=args.raft_chamfer_width,
+            raft_chamfer_angle_deg=args.raft_chamfer_angle,
+            bed_interface_thickness_mm=args.bed_interface_thickness,
             brace_enabled=not args.no_braces,
             brace_radius_mm=args.brace_radius,
             brace_height_mm=args.brace_height,
@@ -132,7 +134,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tip-radius", type=float, default=0.18, help="support contact/tip radius in millimeters")
     parser.add_argument("--tip-type", choices=["cone", "sphere", "cylinder"], default="cone", help="tip radius profile")
     parser.add_argument("--tip-length", type=float, default=0.8, help="tip segment length in millimeters")
-    parser.add_argument("--tip-angle", type=float, default=25.0, help="tip lean angle from vertical in degrees")
     parser.add_argument("--foot-radius", type=float, default=0.8, help="support foot radius in millimeters")
     parser.add_argument(
         "--bed-interface",
@@ -140,10 +141,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default="raft",
         help="build-plate interface style for support bases",
     )
-    parser.add_argument("--raft-margin", type=float, default=0.6, help="extra radius around support feet for raft/skate interfaces")
+    parser.add_argument(
+        "--raft-offset",
+        "--raft-margin",
+        dest="raft_offset",
+        type=float,
+        default=0.6,
+        help="offset distance around the projected model footprint for raft/skate interfaces",
+    )
+    parser.add_argument("--raft-chamfer-width", type=float, default=0.4, help="horizontal width of the raft bottom-edge chamfer in millimeters")
+    parser.add_argument("--raft-chamfer-angle", type=float, default=45.0, help="raft bottom-edge chamfer angle in degrees")
+    parser.add_argument("--bed-interface-thickness", type=float, default=0.35, help="bed support interface thickness in millimeters")
     parser.add_argument("--no-braces", action="store_true", help="disable cross-bracing between nearby supports")
     parser.add_argument("--brace-radius", type=float, default=0.18, help="cross-brace radius in millimeters")
-    parser.add_argument("--brace-height", type=float, default=3.0, help="preferred cross-brace height above the bed in millimeters")
+    parser.add_argument("--brace-height", type=float, default=3.0, help="starting height for diagonal braces above the bed in millimeters")
     parser.add_argument("--brace-distance", type=float, default=8.0, help="maximum distance between braced supports in millimeters")
     parser.add_argument("--collision-clearance", type=float, default=0.08, help="clearance around routed supports during collision checks")
     parser.add_argument("--max-base-reach", type=float, default=45.0, help="maximum horizontal search distance for support bases")
