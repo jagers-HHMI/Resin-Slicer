@@ -16,8 +16,25 @@ const fields = [
 ];
 
 const placementFields = new Set(["rotateX", "rotateY", "rotateZ", "translateX", "translateY", "translateZ", "scale"]);
+const translationPlacementFields = new Set(["translateX", "translateY", "translateZ"]);
+const placementUnitFactors = {
+  mm: 1,
+  cm: 10,
+  in: 25.4
+};
+const profileStorageKeys = {
+  machines: "resinSlicer.machineProfiles",
+  deletedMachines: "resinSlicer.deletedMachineProfiles",
+  resins: "resinSlicer.resinProfilesByMachine",
+  placementUnit: "resinSlicer.placementUnit",
+  supportPresets: "resinSlicer.supportPresets"
+};
 
+let builtinProfiles = {};
 let profiles = {};
+let userMachineProfiles = {};
+let deletedMachineProfileIds = [];
+let resinProfilesByMachine = {};
 let models = [];
 let selectedModelIds = new Set();
 let lastSelectedModelId = null;
@@ -38,6 +55,8 @@ let sceneUpdateFrame = null;
 let toastTimer = null;
 let themedPromptResolver = null;
 let activeRightMenuId = "placement";
+let placementUnit = "mm";
+let activeSupportPreset = "normal";
 const loadProgressItems = new Map();
 const fileReadProgressHandlers = new Map();
 
@@ -77,7 +96,7 @@ const fallbackSoundEntries = {
   "focus-ring": { file: "sounds/focus-ring.wav", recommendedVolume: 0.55, loop: false }
 };
 
-const supportPresets = {
+const defaultSupportPresets = {
   light: {
     supportsEnabled: true,
     modelLift: 4,
@@ -178,6 +197,7 @@ const supportPresets = {
     braceDistance: 10
   }
 };
+let supportPresets = cloneSettings(defaultSupportPresets);
 
 async function init() {
   viewer = new Viewer($("viewer"));
@@ -189,13 +209,21 @@ async function init() {
   $("importMachineButton").addEventListener("click", browseMachineProfile);
   $("importUvtoolsMachineButton").addEventListener("click", importUvtoolsMachine);
   $("exportMachineButton").addEventListener("click", () => exportProfile("machine"));
+  $("saveMachineProfileButton").addEventListener("click", () => saveCurrentMachineProfile({ createNew: true }));
+  $("updateMachineProfileButton").addEventListener("click", () => saveCurrentMachineProfile({ key: currentMachineProfileKey() }));
+  $("deleteMachineProfileButton").addEventListener("click", deleteSelectedMachineProfile);
+  $("topbarResinSelect").addEventListener("change", applySelectedTopbarResin);
   $("importResinButton").addEventListener("click", () => importProfile("resin"));
   $("exportResinButton").addEventListener("click", () => exportProfile("resin"));
+  $("saveResinProfileButton").addEventListener("click", () => saveCurrentResinProfile({ createNew: true }));
+  $("updateResinProfileButton").addEventListener("click", () => saveCurrentResinProfile({ key: currentResinProfileKey() }));
+  $("deleteResinProfileButton").addEventListener("click", deleteSelectedResinProfile);
   $("importSupportButton").addEventListener("click", () => importProfile("support"));
   $("exportSupportButton").addEventListener("click", () => exportProfile("support"));
   for (const button of document.querySelectorAll("[data-support-preset]")) {
     button.addEventListener("click", () => applySupportPreset(button.dataset.supportPreset));
   }
+  $("saveSupportPresetButton").addEventListener("click", saveActiveSupportPreset);
   $("saveProjectButton").addEventListener("click", saveProject);
   $("addBuildPlateButton").addEventListener("click", addBuildPlate);
   $("fitViewButton").addEventListener("click", () => {
@@ -229,6 +257,7 @@ async function init() {
   $("saveAllButton").addEventListener("click", saveAll);
   $("profile").addEventListener("change", () => {
     loadProfileDefaults();
+    persistSelectedResinForCurrentMachine();
     applyCurrentMachineProfileToAllBuildPlates();
     syncSceneSettingCommits();
     updateScene();
@@ -245,6 +274,7 @@ async function init() {
   }
   $("sphericalContactInsetPercent").addEventListener("input", syncSphericalContactFields);
   syncSphericalContactFields();
+  initPlacementUnits();
   bindSceneSettingUpdates();
   bindPanelToggles();
   bindTopbarMenus();
@@ -269,21 +299,18 @@ async function init() {
   }
   try {
     const profilePayload = await window.slicer.profiles();
-    profiles = profilePayload.profiles || {};
-    for (const name of Object.keys(profiles).sort()) {
-      const option = document.createElement("option");
-      option.value = name;
-      option.textContent = name;
-      $("profile").appendChild(option);
-    }
-    $("profile").value = profiles["generic-2k"] ? "generic-2k" : Object.keys(profiles)[0] || "";
+    builtinProfiles = profilePayload.profiles || {};
+    loadStoredProfileState();
+    loadStoredSupportPresets();
+    renderMachineProfileOptions(profiles["generic-2k"] ? "generic-2k" : Object.keys(profiles)[0] || "");
     loadProfileDefaults();
+    writeSupportPresetFields("normal");
     ensureInitialBuildPlate();
     syncSceneSettingCommits();
   } catch (error) {
     log(`Could not load Python profiles: ${error.message}`);
     showErrorPrompt("Profile Load Failed", error);
-    profiles = {
+    builtinProfiles = {
       "generic-2k": {
         resolution_x: 1920,
         resolution_y: 1080,
@@ -307,12 +334,11 @@ async function init() {
         resin_density_g_ml: 1.1
       }
     };
-    const option = document.createElement("option");
-    option.value = "generic-2k";
-    option.textContent = "generic-2k";
-    $("profile").appendChild(option);
-    $("profile").value = "generic-2k";
+    loadStoredProfileState();
+    loadStoredSupportPresets();
+    renderMachineProfileOptions("generic-2k");
     loadProfileDefaults();
+    writeSupportPresetFields("normal");
     ensureInitialBuildPlate();
     syncSceneSettingCommits();
   }
@@ -632,6 +658,430 @@ function localStorageValue(key, fallback) {
   }
 }
 
+function readStoredJson(key, fallback) {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStoredJson(key, value) {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+  } catch (error) {
+    log(`Could not save local settings: ${error.message}`);
+  }
+}
+
+function loadStoredSupportPresets() {
+  const stored = readStoredJson(profileStorageKeys.supportPresets, null);
+  supportPresets = cloneSettings(defaultSupportPresets);
+  if (!stored || typeof stored !== "object") return;
+  for (const name of Object.keys(defaultSupportPresets)) {
+    if (stored[name] && typeof stored[name] === "object") {
+      supportPresets[name] = { ...supportPresets[name], ...stored[name] };
+    }
+  }
+}
+
+function persistSupportPresets() {
+  writeStoredJson(profileStorageKeys.supportPresets, supportPresets);
+}
+
+function loadStoredProfileState() {
+  userMachineProfiles = readStoredJson(profileStorageKeys.machines, {}) || {};
+  deletedMachineProfileIds = readStoredJson(profileStorageKeys.deletedMachines, []) || [];
+  resinProfilesByMachine = readStoredJson(profileStorageKeys.resins, {}) || {};
+  mergeMachineProfiles();
+}
+
+function persistProfileStorage() {
+  writeStoredJson(profileStorageKeys.machines, userMachineProfiles);
+  writeStoredJson(profileStorageKeys.deletedMachines, deletedMachineProfileIds);
+  writeStoredJson(profileStorageKeys.resins, resinProfilesByMachine);
+}
+
+function mergeMachineProfiles() {
+  const deleted = new Set(deletedMachineProfileIds);
+  profiles = {};
+  for (const [key, cfg] of Object.entries(builtinProfiles)) {
+    if (!deleted.has(key)) profiles[key] = cfg;
+  }
+  for (const [key, cfg] of Object.entries(userMachineProfiles)) {
+    profiles[key] = cfg;
+  }
+  return profiles;
+}
+
+function renderMachineProfileOptions(preferredKey = currentMachineProfileKey()) {
+  mergeMachineProfiles();
+  const select = $("profile");
+  const previous = preferredKey || select.value;
+  select.innerHTML = "";
+  const keys = Object.keys(profiles).sort((a, b) => machineProfileLabel(a, profiles[a]).localeCompare(machineProfileLabel(b, profiles[b])));
+  for (const key of keys) {
+    const option = document.createElement("option");
+    option.value = key;
+    option.textContent = machineProfileLabel(key, profiles[key]);
+    option.title = key;
+    select.appendChild(option);
+  }
+  select.value = profiles[previous] ? previous : keys[0] || "";
+}
+
+function machineProfileLabel(key, cfg) {
+  return String(cfg?.machine_name || key || "Printer");
+}
+
+function currentMachineProfileKey() {
+  return $("profile")?.value || Object.keys(profiles)[0] || "generic-2k";
+}
+
+function profileKeyFromName(value, fallback = "profile") {
+  return String(value || fallback)
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "") || fallback;
+}
+
+function uniqueProfileKey(baseKey, collection, ignoreKey = "") {
+  const base = profileKeyFromName(baseKey);
+  if ((!collection[base] || base === ignoreKey) && !profiles[base]) return base;
+  for (let index = 2; index < 1000; index++) {
+    const key = `${base}-${index}`;
+    if ((!collection[key] || key === ignoreKey) && !profiles[key]) return key;
+  }
+  return `${base}-${Date.now()}`;
+}
+
+function machineProfileConfigFromForm() {
+  const resin = currentResinProfile();
+  return {
+    machine_name: $("machineName").value.trim() || "Custom Printer",
+    resolution_x: intNumber("resolutionX"),
+    resolution_y: intNumber("resolutionY"),
+    size_x_mm: number("sizeX"),
+    size_y_mm: number("sizeY"),
+    size_z_mm: number("sizeZ"),
+    layer_height_mm: number("layerHeight"),
+    resin_name: resin.resinName || "Standard",
+    exposure_time_s: resin.exposure,
+    bottom_exposure_time_s: resin.bottomExposure,
+    bottom_layers: resin.bottomLayers,
+    transition_layers: resin.transitionLayers,
+    lift_distance_mm: resin.liftDistance,
+    lift_speed_mm_min: resin.liftSpeed,
+    retract_distance_mm: resin.retractDistance,
+    retract_speed_mm_min: resin.retractSpeed,
+    wait_after_retract_s: resin.waitAfterRetract,
+    resin_density_g_ml: resin.resinDensity,
+    light_pwm: resin.lightPwm,
+    bottom_light_pwm: resin.bottomLightPwm
+  };
+}
+
+function applyMachineConfigToForm(cfg) {
+  $("machineName").value = cfg.machine_name || "Generic MSLA";
+  $("resolutionX").value = cfg.resolution_x ?? 1920;
+  $("resolutionY").value = cfg.resolution_y ?? 1080;
+  $("sizeX").value = cfg.size_x_mm ?? 120;
+  $("sizeY").value = cfg.size_y_mm ?? 67.5;
+  $("sizeZ").value = cfg.size_z_mm ?? 160;
+  $("layerHeight").value = cfg.layer_height_mm ?? 0.05;
+}
+
+function resinProfileFromConfig(cfg = {}) {
+  return {
+    resinName: cfg.resin_name || "Standard",
+    exposure: cfg.exposure_time_s ?? 2.5,
+    bottomExposure: cfg.bottom_exposure_time_s ?? 35,
+    bottomLayers: cfg.bottom_layers ?? 6,
+    transitionLayers: cfg.transition_layers ?? 6,
+    liftDistance: cfg.lift_distance_mm ?? 5,
+    liftSpeed: cfg.lift_speed_mm_min ?? 65,
+    retractDistance: cfg.retract_distance_mm ?? 5,
+    retractSpeed: cfg.retract_speed_mm_min ?? 150,
+    waitAfterRetract: cfg.wait_after_retract_s ?? 0.2,
+    resinDensity: cfg.resin_density_g_ml ?? 1.1,
+    lightPwm: cfg.light_pwm ?? 255,
+    bottomLightPwm: cfg.bottom_light_pwm ?? 255
+  };
+}
+
+function applyResinProfileToForm(resin = {}) {
+  $("resinName").value = resin.resinName || "Standard";
+  $("exposure").value = resin.exposure ?? 2.5;
+  $("bottomExposure").value = resin.bottomExposure ?? 35;
+  $("bottomLayers").value = resin.bottomLayers ?? 6;
+  $("transitionLayers").value = resin.transitionLayers ?? 6;
+  $("liftDistance").value = resin.liftDistance ?? 5;
+  $("liftSpeed").value = resin.liftSpeed ?? 65;
+  $("retractDistance").value = resin.retractDistance ?? 5;
+  $("retractSpeed").value = resin.retractSpeed ?? 150;
+  $("waitAfterRetract").value = resin.waitAfterRetract ?? 0.2;
+  $("resinDensity").value = resin.resinDensity ?? 1.1;
+  $("lightPwm").value = resin.lightPwm ?? 255;
+  $("bottomLightPwm").value = resin.bottomLightPwm ?? 255;
+}
+
+function machineResinBucket(machineKey = currentMachineProfileKey()) {
+  let bucket = resinProfilesByMachine[machineKey];
+  if (!bucket || typeof bucket !== "object" || !bucket.items || typeof bucket.items !== "object") {
+    bucket = { selected: "", items: {} };
+  }
+  if (!Object.keys(bucket.items).length) {
+    const resin = resinProfileFromConfig(profiles[machineKey] || builtinProfiles[machineKey] || {});
+    const key = profileKeyFromName(resin.resinName, "standard");
+    bucket.items[key] = resin;
+    bucket.selected = key;
+  }
+  if (!bucket.selected || !bucket.items[bucket.selected]) {
+    bucket.selected = Object.keys(bucket.items)[0] || "";
+  }
+  resinProfilesByMachine[machineKey] = bucket;
+  return bucket;
+}
+
+function renderTopbarResinOptions(machineKey = currentMachineProfileKey(), preferredKey = "") {
+  const select = $("topbarResinSelect");
+  if (!select) return;
+  const bucket = machineResinBucket(machineKey);
+  if (preferredKey && bucket.items[preferredKey]) bucket.selected = preferredKey;
+  select.innerHTML = "";
+  const keys = Object.keys(bucket.items).sort((a, b) => resinProfileLabel(bucket.items[a]).localeCompare(resinProfileLabel(bucket.items[b])));
+  for (const key of keys) {
+    const option = document.createElement("option");
+    option.value = key;
+    option.textContent = resinProfileLabel(bucket.items[key]);
+    select.appendChild(option);
+  }
+  select.value = bucket.selected || keys[0] || "";
+}
+
+function resinProfileLabel(resin) {
+  return String(resin?.resinName || "Standard");
+}
+
+function currentResinProfileKey() {
+  return $("topbarResinSelect")?.value || machineResinBucket().selected || "";
+}
+
+function selectedResinProfile(machineKey = currentMachineProfileKey()) {
+  const bucket = machineResinBucket(machineKey);
+  return bucket.items[bucket.selected] || Object.values(bucket.items)[0] || resinProfileFromConfig(profiles[machineKey]);
+}
+
+function findResinProfileKey(machineKey, resinName) {
+  const bucket = machineResinBucket(machineKey);
+  const normalized = profileKeyFromName(resinName, "standard");
+  if (bucket.items[normalized]) return normalized;
+  const target = String(resinName || "").trim().toLowerCase();
+  return Object.keys(bucket.items).find((key) => resinProfileLabel(bucket.items[key]).trim().toLowerCase() === target) || "";
+}
+
+function upsertCurrentResinProfileForMachine(machineKey, { key = "", createNew = false, select = true, persist = true } = {}) {
+  const bucket = machineResinBucket(machineKey);
+  const resin = currentResinProfile();
+  let targetKey = key && bucket.items[key] && !createNew ? key : "";
+  if (!targetKey && !createNew) targetKey = findResinProfileKey(machineKey, resin.resinName);
+  if (!targetKey) targetKey = uniqueProfileKey(profileKeyFromName(resin.resinName, "resin"), bucket.items, key);
+  bucket.items[targetKey] = resin;
+  if (select) bucket.selected = targetKey;
+  resinProfilesByMachine[machineKey] = bucket;
+  if (persist) persistProfileStorage();
+  return targetKey;
+}
+
+function syncTopbarResinOptionsToForm({ persist = false } = {}) {
+  const machineKey = currentMachineProfileKey();
+  let key = findResinProfileKey(machineKey, $("resinName").value);
+  if (!key) {
+    key = upsertCurrentResinProfileForMachine(machineKey, { createNew: true, select: true, persist: false });
+  } else {
+    machineResinBucket(machineKey).selected = key;
+  }
+  if (persist) persistProfileStorage();
+  renderTopbarResinOptions(machineKey, key);
+}
+
+function persistSelectedResinForCurrentMachine() {
+  const bucket = machineResinBucket(currentMachineProfileKey());
+  if ($("topbarResinSelect").value && bucket.items[$("topbarResinSelect").value]) {
+    bucket.selected = $("topbarResinSelect").value;
+    persistProfileStorage();
+  }
+}
+
+function applySelectedTopbarResin() {
+  const machineKey = currentMachineProfileKey();
+  const bucket = machineResinBucket(machineKey);
+  const key = $("topbarResinSelect").value;
+  const resin = bucket.items[key];
+  if (!resin) return;
+  bucket.selected = key;
+  persistProfileStorage();
+  applyResinProfileToForm(resin);
+  writeActivePlateSettingsFromForm();
+  syncSceneSettingCommits();
+  updateScene();
+  playSound("click-soft");
+}
+
+function saveCurrentMachineProfile({ key = "", createNew = false } = {}) {
+  const cfg = machineProfileConfigFromForm();
+  const targetKey = createNew || !key
+    ? uniqueProfileKey(profileKeyFromName(cfg.machine_name, "custom-printer"), userMachineProfiles)
+    : key;
+  userMachineProfiles[targetKey] = cfg;
+  deletedMachineProfileIds = deletedMachineProfileIds.filter((id) => id !== targetKey);
+  mergeMachineProfiles();
+  upsertCurrentResinProfileForMachine(targetKey, { select: true, persist: false });
+  persistProfileStorage();
+  renderMachineProfileOptions(targetKey);
+  $("profile").value = targetKey;
+  syncTopbarResinOptionsToForm({ persist: false });
+  writeActivePlateSettingsFromForm();
+  updateBuildPlateLayout({ force: true });
+  renderWorkspaceLists();
+  updateScene();
+  log(`Saved printer profile: ${machineProfileLabel(targetKey, cfg)}`);
+  playSound("save");
+  return targetKey;
+}
+
+async function deleteSelectedMachineProfile() {
+  const key = currentMachineProfileKey();
+  if (!key || !profiles[key]) return;
+  if (Object.keys(profiles).length <= 1) {
+    logAndPrompt("Cannot Delete Printer", "At least one machine profile must remain in the list.", "warning");
+    return;
+  }
+  const label = machineProfileLabel(key, profiles[key]);
+  const confirmed = await showThemedConfirm({
+    title: "Delete Printer?",
+    message: `Delete "${label}" from your machine profile list?`,
+    detail: "Any build plates currently using it will be switched to the next available printer profile.",
+    kind: "warning",
+    confirmText: "Delete",
+    cancelText: "Cancel"
+  });
+  if (!confirmed) return;
+  delete userMachineProfiles[key];
+  if (builtinProfiles[key] && !deletedMachineProfileIds.includes(key)) deletedMachineProfileIds.push(key);
+  delete resinProfilesByMachine[key];
+  mergeMachineProfiles();
+  persistProfileStorage();
+  renderMachineProfileOptions(Object.keys(profiles)[0] || "");
+  loadProfileDefaults();
+  applyCurrentMachineProfileToAllBuildPlates();
+  syncSceneSettingCommits();
+  updateScene();
+  log(`Deleted printer profile: ${label}`);
+  playSound("delete");
+}
+
+function saveCurrentResinProfile({ key = "", createNew = false } = {}) {
+  const machineKey = currentMachineProfileKey();
+  const targetKey = upsertCurrentResinProfileForMachine(machineKey, { key, createNew, select: true, persist: true });
+  renderTopbarResinOptions(machineKey, targetKey);
+  writeActivePlateSettingsFromForm();
+  syncSceneSettingCommits();
+  updateScene();
+  log(`Saved resin profile: ${resinProfileLabel(machineResinBucket(machineKey).items[targetKey])}`);
+  playSound("save");
+  return targetKey;
+}
+
+async function deleteSelectedResinProfile() {
+  const machineKey = currentMachineProfileKey();
+  const bucket = machineResinBucket(machineKey);
+  const key = currentResinProfileKey();
+  if (!key || !bucket.items[key]) return;
+  if (Object.keys(bucket.items).length <= 1) {
+    logAndPrompt("Cannot Delete Resin", "At least one resin must remain for the selected printer.", "warning");
+    return;
+  }
+  const label = resinProfileLabel(bucket.items[key]);
+  const confirmed = await showThemedConfirm({
+    title: "Delete Resin?",
+    message: `Delete "${label}" from this printer's resin list?`,
+    kind: "warning",
+    confirmText: "Delete",
+    cancelText: "Cancel"
+  });
+  if (!confirmed) return;
+  delete bucket.items[key];
+  bucket.selected = Object.keys(bucket.items)[0] || "";
+  persistProfileStorage();
+  renderTopbarResinOptions(machineKey, bucket.selected);
+  applyResinProfileToForm(selectedResinProfile(machineKey));
+  writeActivePlateSettingsFromForm();
+  syncSceneSettingCommits();
+  updateScene();
+  log(`Deleted resin profile: ${label}`);
+  playSound("delete");
+}
+
+async function offerSaveImportedMachineProfile(label = $("machineName").value) {
+  const confirmed = await showThemedConfirm({
+    title: "Save Printer?",
+    message: `Save "${label || "Imported Printer"}" to your machine profile list?`,
+    kind: "info",
+    confirmText: "Save",
+    cancelText: "Not Now"
+  });
+  if (confirmed) saveCurrentMachineProfile({ createNew: true });
+}
+
+async function offerSaveImportedResinProfile(label = $("resinName").value) {
+  const confirmed = await showThemedConfirm({
+    title: "Save Resin?",
+    message: `Save "${label || "Imported Resin"}" for ${machineProfileLabel(currentMachineProfileKey(), profiles[currentMachineProfileKey()])}?`,
+    kind: "info",
+    confirmText: "Save",
+    cancelText: "Not Now"
+  });
+  if (confirmed) saveCurrentResinProfile({ createNew: true });
+}
+
+function initPlacementUnits() {
+  const select = $("placementUnits");
+  if (!select) return;
+  placementUnit = validPlacementUnit(localStorageValue(profileStorageKeys.placementUnit, "mm"));
+  select.value = placementUnit;
+  select.addEventListener("change", () => {
+    const previousUnit = placementUnit;
+    const dropOffsetMm = placementDisplayToMm(Number($("dropOffset").value), previousUnit);
+    placementUnit = validPlacementUnit(select.value);
+    try {
+      localStorage.setItem(profileStorageKeys.placementUnit, placementUnit);
+    } catch {
+      // Best-effort preference only.
+    }
+    updatePlacementFieldsFromSelection();
+    $("dropOffset").value = formatPlacementValue(placementMmToDisplay(Math.max(0, dropOffsetMm), placementUnit));
+    $("dropOffset").dataset.sceneCommittedValue = $("dropOffset").value;
+  });
+}
+
+function validPlacementUnit(unit) {
+  return Object.prototype.hasOwnProperty.call(placementUnitFactors, unit) ? unit : "mm";
+}
+
+function placementDisplayToMm(value, unit = placementUnit) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric * placementUnitFactors[validPlacementUnit(unit)] : 0;
+}
+
+function placementMmToDisplay(value, unit = placementUnit) {
+  const numeric = Number(value);
+  const factor = placementUnitFactors[validPlacementUnit(unit)];
+  return Number.isFinite(numeric) ? numeric / factor : 0;
+}
+
 async function createSoundKitPlayer(enabled, volume) {
   try {
     const baseUrl = new URL(soundAssetRoot, window.location.href);
@@ -758,6 +1208,7 @@ function createBuildPlate(name, settings) {
     layersGenerated: false,
     supports: [],
     supportBraces: [],
+    supportRaft: null,
     dropAnimation: null
   };
 }
@@ -867,7 +1318,7 @@ function insetPercentSetting(support) {
 
 function applyBuildPlateSettingsToForm(plate) {
   const settings = plate.settings;
-  $("profile").value = settings.profile || $("profile").value;
+  if (profiles[settings.profile]) $("profile").value = settings.profile;
   $("centerModel").checked = !!settings.centerModel;
   const printer = settings.printer;
   $("machineName").value = printer.machineName || "Generic MSLA";
@@ -890,6 +1341,7 @@ function applyBuildPlateSettingsToForm(plate) {
   $("lightPwm").value = printer.lightPwm;
   $("bottomLightPwm").value = printer.bottomLightPwm;
   $("resinDensity").value = printer.resinDensity;
+  syncTopbarResinOptionsToForm({ persist: false });
   const support = settings.support;
   $("supportsEnabled").checked = !!support.enabled;
   $("modelLift").value = support.modelLift;
@@ -937,9 +1389,56 @@ function syncSphericalContactFields() {
   $("sphericalContactInsetValue").textContent = `${value}%`;
 }
 
-function applySupportPreset(name) {
+function supportPresetFromForm() {
+  return {
+    supportsEnabled: $("supportsEnabled").checked,
+    modelLift: number("modelLift"),
+    overhangAngle: number("overhangAngle"),
+    supportSpacing: number("supportSpacing"),
+    primarySupportsEnabled: $("primarySupportsEnabled").checked,
+    primaryDensityMultiplier: number("primaryDensityMultiplier"),
+    primaryAreaDiameter: number("primaryAreaDiameter"),
+    primaryMaxExtra: intNumber("primaryMaxExtra"),
+    postDiameter: number("postDiameter"),
+    tipDiameter: number("tipDiameter"),
+    tipType: $("tipType").value,
+    sphericalContactEnabled: $("sphericalContactEnabled").checked,
+    sphericalContactDiameter: number("sphericalContactDiameter"),
+    sphericalContactInsetPercent: number("sphericalContactInsetPercent"),
+    tipLength: number("tipLength"),
+    footDiameter: number("footDiameter"),
+    bedInterface: $("bedInterface").value,
+    raftOffset: number("raftOffset"),
+    raftChamferWidth: number("raftChamferWidth"),
+    raftChamferAngle: number("raftChamferAngle"),
+    bedInterfaceThickness: number("bedInterfaceThickness"),
+    collisionClearance: number("collisionClearance"),
+    maxBaseReach: number("maxBaseReach"),
+    maxSupportAngle: number("maxSupportAngle"),
+    enforcersEnabled: $("enforcersEnabled").checked,
+    enforcerReach: number("enforcerReach"),
+    enforcerMinDrop: number("enforcerMinDrop"),
+    braceEnabled: $("braceEnabled").checked,
+    braceDiameter: number("braceDiameter"),
+    braceHeight: number("braceHeight"),
+    braceDistance: number("braceDistance")
+  };
+}
+
+function saveActiveSupportPreset() {
+  const name = supportPresets[activeSupportPreset] ? activeSupportPreset : "normal";
+  supportPresets[name] = supportPresetFromForm();
+  persistSupportPresets();
+  writeActivePlateSettingsFromForm();
+  syncSceneSettingCommits();
+  updateScene();
+  log(`Saved current support settings to ${titleCase(name)} support preset`);
+  playSound("save");
+}
+
+function writeSupportPresetFields(name) {
   const preset = supportPresets[name];
-  if (!preset) return;
+  if (!preset) return false;
   for (const [id, value] of Object.entries(preset)) {
     const field = $(id);
     if (!field) continue;
@@ -949,14 +1448,21 @@ function applySupportPreset(name) {
       field.value = value;
     }
   }
+  activeSupportPreset = name;
   for (const button of document.querySelectorAll("[data-support-preset]")) {
     button.classList.toggle("active", button.dataset.supportPreset === name);
   }
   syncSphericalContactFields();
+  return true;
+}
+
+function applySupportPreset(name) {
+  if (!writeSupportPresetFields(name)) return;
   const plate = activePlate();
   writeActivePlateSettingsFromForm();
   plate.supports = [];
   plate.supportBraces = [];
+  plate.supportRaft = null;
   plate.layersGenerated = false;
   $("supportStatus").textContent = "Supports not generated";
   syncSceneSettingCommits();
@@ -1577,6 +2083,7 @@ async function applySelectedUvtoolsMachine() {
     hideUvtoolsDialog();
     log(`Imported UVTools machine profile: ${printer.name}`);
     playSound("confirm");
+    await offerSaveImportedMachineProfile(printer.name);
   } catch (error) {
     setUvtoolsStatus("Import failed.");
     showErrorPrompt("UVTools Import Failed", error);
@@ -1883,8 +2390,11 @@ function applyPlacementFieldToSelected(fieldId) {
   const selection = selectedModels();
   if (!selection.length) return;
   const key = placementKey(fieldId);
-  const value = roundPlacementValue(number(fieldId));
-  $(fieldId).value = formatPlacementValue(value);
+  const displayValue = roundPlacementValue(number(fieldId));
+  const value = translationPlacementFields.has(fieldId)
+    ? roundPlacementValue(placementDisplayToMm(displayValue))
+    : displayValue;
+  $(fieldId).value = formatPlacementValue(displayValue);
   const rotatesModel = key === "rotateX" || key === "rotateY" || key === "rotateZ";
   const transformsModel = key === "translateX"
     || key === "translateY"
@@ -1925,9 +2435,9 @@ function updatePlacementFieldsFromSelection() {
   $("rotateX").value = formatPlacementValue(model.transform.rotateX);
   $("rotateY").value = formatPlacementValue(model.transform.rotateY);
   $("rotateZ").value = formatPlacementValue(model.transform.rotateZ);
-  $("translateX").value = formatPlacementValue(model.transform.translateX);
-  $("translateY").value = formatPlacementValue(model.transform.translateY);
-  $("translateZ").value = formatPlacementValue(model.transform.translateZ);
+  $("translateX").value = formatPlacementValue(placementMmToDisplay(model.transform.translateX));
+  $("translateY").value = formatPlacementValue(placementMmToDisplay(model.transform.translateY));
+  $("translateZ").value = formatPlacementValue(placementMmToDisplay(model.transform.translateZ));
   $("scale").value = formatPlacementValue(model.transform.scale);
   syncSceneSettingCommits();
 }
@@ -1935,7 +2445,10 @@ function updatePlacementFieldsFromSelection() {
 function invalidateGeneratedLayersForSelection(selection) {
   for (const model of selection) {
     const plate = buildPlates.find((item) => item.id === model.plateId);
-    if (plate) plate.layersGenerated = false;
+    if (plate) {
+      plate.layersGenerated = false;
+      plate.supportRaft = null;
+    }
   }
 }
 
@@ -1978,6 +2491,7 @@ function removeSupportStructureForModels(selection) {
     plate.supportBraces = (plate.supportBraces || []).filter((brace) => !bounds.some((box) => braceInsidePlateBounds(brace, box)));
     if (beforeSupports !== plate.supports.length || beforeBraces !== plate.supportBraces.length) {
       plate.layersGenerated = false;
+      plate.supportRaft = null;
     }
   }
 }
@@ -2048,6 +2562,10 @@ function maybeMoveModelToPlateByCentroid(model) {
   const destination = buildPlates.find((plate) => pointInsidePlate(centroid, plate));
   if (!destination || destination.id === model.plateId) return;
 
+  currentPlate.layersGenerated = false;
+  currentPlate.supportRaft = null;
+  destination.layersGenerated = false;
+  destination.supportRaft = null;
   model.plateId = destination.id;
   model.transform.translateX = centroid[0] - destination.origin.x - modelLocalCentroid(model)[0];
   model.transform.translateY = centroid[1] - destination.origin.y - modelLocalCentroid(model)[1];
@@ -2112,6 +2630,7 @@ async function loadStlPaths(paths, { append = false, sound = append ? "drop" : "
     for (const plate of buildPlates) {
       plate.supports = [];
       plate.supportBraces = [];
+      plate.supportRaft = null;
       plate.layersGenerated = false;
     }
     $("outputPath").value = "";
@@ -2193,6 +2712,7 @@ function commitLoadedModel(model, { importJobId, targetPlateId }) {
   placeNewModelOnPlate(model, destinationPlate);
   models.push(model);
   destinationPlate.layersGenerated = false;
+  destinationPlate.supportRaft = null;
 
   if (importJobId === latestImportJobId) {
     activePlateId = destinationPlate.id;
@@ -2275,7 +2795,8 @@ function buildProjectSnapshot() {
       layersGenerated: !!plate.layersGenerated,
       settings: cloneSettings(plate.settings),
       supports: cloneSettings(plate.supports || []),
-      supportBraces: cloneSettings(plate.supportBraces || [])
+      supportBraces: cloneSettings(plate.supportBraces || []),
+      supportRaft: cloneSettings(plate.supportRaft || null)
     })),
     models: models.map((model) => ({
       id: model.id,
@@ -2411,6 +2932,11 @@ async function importProfile(kind) {
     syncSceneSettingCommits();
     updateScene();
     playSound("confirm");
+    if (kind === "machine") {
+      await offerSaveImportedMachineProfile($("machineName").value.trim() || fileName(file.path));
+    } else if (kind === "resin") {
+      await offerSaveImportedResinProfile($("resinName").value.trim() || fileName(file.path));
+    }
   } catch (error) {
     log(`Import ${kind} failed: ${error.message}`);
     showErrorPrompt(`Import ${profileKindLabel(kind)} Failed`, error);
@@ -2442,6 +2968,7 @@ async function generatePreview() {
     const result = await window.slicer.preview(collectPayloadForPlate(plate));
     plate.supports = result.supports || [];
     plate.supportBraces = result.braces || [];
+    plate.supportRaft = result.raft || null;
     plate.layersGenerated = true;
     $("supportStatus").textContent = `${plate.supports.length.toLocaleString()} supports generated`;
     updateScene();
@@ -2903,26 +3430,9 @@ function profileKindLabel(kind) {
 function loadProfileDefaults() {
   const cfg = profiles[$("profile").value];
   if (!cfg) return;
-  $("machineName").value = cfg.machine_name || "Generic MSLA";
-  $("resolutionX").value = cfg.resolution_x;
-  $("resolutionY").value = cfg.resolution_y;
-  $("sizeX").value = cfg.size_x_mm;
-  $("sizeY").value = cfg.size_y_mm;
-  $("sizeZ").value = cfg.size_z_mm;
-  $("layerHeight").value = cfg.layer_height_mm;
-  $("resinName").value = cfg.resin_name || "Standard";
-  $("exposure").value = cfg.exposure_time_s ?? 2.5;
-  $("bottomExposure").value = cfg.bottom_exposure_time_s ?? 35;
-  $("bottomLayers").value = cfg.bottom_layers ?? 6;
-  $("transitionLayers").value = cfg.transition_layers ?? 6;
-  $("liftDistance").value = cfg.lift_distance_mm ?? 5;
-  $("liftSpeed").value = cfg.lift_speed_mm_min ?? 65;
-  $("retractDistance").value = cfg.retract_distance_mm ?? 5;
-  $("retractSpeed").value = cfg.retract_speed_mm_min ?? 150;
-  $("waitAfterRetract").value = cfg.wait_after_retract_s ?? 0.2;
-  $("lightPwm").value = cfg.light_pwm ?? 255;
-  $("bottomLightPwm").value = cfg.bottom_light_pwm ?? 255;
-  $("resinDensity").value = cfg.resin_density_g_ml ?? 1.1;
+  applyMachineConfigToForm(cfg);
+  renderTopbarResinOptions($("profile").value);
+  applyResinProfileToForm(selectedResinProfile($("profile").value));
 }
 
 function requestSceneUpdate(options = {}) {
@@ -3125,6 +3635,7 @@ function buildScene({ skipDerivedGeometry = false } = {}) {
     outOfBoundsSpills,
     supports: skipDerivedGeometry ? null : offsetSupports(active.supports, active.origin),
     supportBraces: skipDerivedGeometry ? null : offsetBraces(active.supportBraces, active.origin),
+    supportRaft: skipDerivedGeometry ? null : offsetSupportRaft(active.supportRaft, active.origin),
     transformGizmo,
     clip: {
       enabled: active.clipEnabled,
@@ -3362,7 +3873,7 @@ function dropModelToBuildPlate(model, { exact = false } = {}) {
 
 function reorientationDropOffset() {
   const value = Number($("dropOffset")?.value);
-  return Math.max(0, Number.isFinite(value) ? value : 0);
+  return Math.max(0, Number.isFinite(value) ? placementDisplayToMm(value) : 0);
 }
 
 function transformLocalBounds(bounds, transform) {
@@ -3532,6 +4043,38 @@ function makeWorldRectGeometry(x0, y0, x1, y1, z) {
   };
 }
 
+function makeSupportRaftGeometry(raft) {
+  const x0 = Number(raft?.x0);
+  const y0 = Number(raft?.y0);
+  const x1 = Number(raft?.x1);
+  const y1 = Number(raft?.y1);
+  if (![x0, y0, x1, y1].every(Number.isFinite) || x1 <= x0 || y1 <= y0) {
+    return makeWorldRectGeometry(0, 0, 0.001, 0.001, 0.45);
+  }
+  const width = x1 - x0;
+  const depth = y1 - y0;
+  const z = Math.max(0.22, Number(raft.thickness) || 0.35) + 0.08;
+  const radius = Math.max(1.2, Math.min(width, depth) * 0.045);
+  const path = roundedRectPath(x0, y0, x1, y1, radius, 9);
+  const center = [(x0 + x1) / 2, (y0 + y1) / 2, z];
+  const vertices = [];
+  const normals = [];
+  for (let i = 0; i < path.length; i++) {
+    const next = (i + 1) % path.length;
+    pushTri(
+      vertices,
+      normals,
+      center,
+      [path[i][0], path[i][1], z],
+      [path[next][0], path[next][1], z],
+      [0, 0, 1],
+      [0, 0, 1],
+      [0, 0, 1]
+    );
+  }
+  return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
+}
+
 function offsetSupports(items, origin) {
   return (items || []).map((item) => ({
     ...item,
@@ -3552,6 +4095,17 @@ function offsetBraces(items, origin) {
     x1: item.x1 + origin.x,
     y1: item.y1 + origin.y
   }));
+}
+
+function offsetSupportRaft(raft, origin) {
+  if (!raft) return null;
+  return {
+    ...raft,
+    x0: raft.x0 + origin.x,
+    y0: raft.y0 + origin.y,
+    x1: raft.x1 + origin.x,
+    y1: raft.y1 + origin.y
+  };
 }
 
 function makeLayerLines(plate, z) {
@@ -4511,6 +5065,9 @@ class Viewer {
       ? makeMesh(this.gl, outOfBoundsBoxes, [1.0, 0.14, 0.10, 1], this.gl.LINES, { unlit: true })
       : null;
     this.meshes.supports = makeMesh(this.gl, makeSupportGeometry(scene.supports, scene.supportBraces), [1.0, 0.63, 0.18, 1], this.gl.TRIANGLES);
+    this.meshes.supportRaft = scene.supportRaft
+      ? makeMesh(this.gl, makeSupportRaftGeometry(scene.supportRaft), [1.0, 0.64, 0.18, scene.supportRaft.type === "skate" ? 0.28 : 0.36], this.gl.TRIANGLES, { unlit: true })
+      : null;
     this.meshes.clipPlane = scene.clip.enabled ? {
       surface: makeMesh(this.gl, makeClipPlaneSurfaceGeometry(scene.clip.plate, scene.clip.z), [1.0, 0.86, 0.16, 0.2], this.gl.TRIANGLES, { unlit: true }),
       outline: makeMesh(this.gl, makeClipPlaneOutlineGeometry(scene.clip.plate, scene.clip.z), [1.0, 0.86, 0.16, 1], this.gl.TRIANGLES, { unlit: true }),
@@ -4641,6 +5198,7 @@ class Viewer {
         drawMesh(gl, this.program, action.icon, mvp, this.clipZ);
       }
     }
+    if (this.meshes.supportRaft) this.drawTransparentMesh(this.meshes.supportRaft, mvp);
     if (this.meshes.supports) drawMesh(gl, this.program, this.meshes.supports, mvp, this.clipZ);
     for (const item of this.meshes.models || []) {
       drawMesh(gl, this.program, item.mesh, mvp, this.clipZ);
@@ -5066,7 +5624,7 @@ function buildPlateActionLayers(action) {
 
 function plateActionLayout(bed) {
   const size = clamp(Math.min(bed.x, bed.y) * 0.15, 16, 28);
-  const outlineWidth = Math.max(2.4, size * 0.16);
+  const outlineWidth = plateBorderWidth(bed);
   const plateGap = Math.max(3.4, size * 0.32);
   const buttonGap = Math.max(3.2, size * 0.28) + outlineWidth * 2;
   const referenceBorder = plateActionReferenceBorderWidth(bed);
@@ -5529,6 +6087,7 @@ function makeTransformGizmo(gl, gizmo) {
   const arrowStroke = Math.max(0.72, gizmo.radius * 2.45);
   const arcRadius = gizmo.length * 0.82;
   const stroke = Math.max(1.1, gizmo.radius * 3.6);
+  const rotationTubeRadius = Math.max(0.32, stroke * 0.28);
   const specs = [
     { action: "move-x", axis: "x", kind: "move" },
     { action: "move-y", axis: "y", kind: "move" },
@@ -5546,9 +6105,9 @@ function makeTransformGizmo(gl, gizmo) {
         ? makeGizmoMoveGeometry(gizmo.center, spec.axis, arrowLength, arrowStroke)
         : spec.kind === "plane"
           ? makeGizmoPlaneSquareGeometry(gizmo.center, spec.axis, moveLength, stroke)
-          : makeGizmoArcGeometry(gizmo.center, spec.axis, arcRadius, stroke * 0.58);
+          : makeGizmoArcGeometry(gizmo.center, spec.axis, arcRadius, rotationTubeRadius, { fullCircle: true });
       const activeGeometry = spec.kind === "rotate"
-        ? makeGizmoArcGeometry(gizmo.center, spec.axis, arcRadius, stroke * 0.58, { fullCircle: true })
+        ? makeGizmoArcGeometry(gizmo.center, spec.axis, arcRadius, rotationTubeRadius, { fullCircle: true })
         : null;
       const points = gizmoFeaturePoints(gizmo.center, spec, featureLength, arcRadius, featureStroke);
       return {
@@ -5567,49 +6126,22 @@ function makeGizmoMoveGeometry(center, axis, lengthValue, stroke) {
   const vertices = [];
   const normals = [];
   const direction = gizmoAxisDirection(axis);
-  const normal = gizmoMovePlaneNormal(axis);
-  const lateral = normalize(cross(normal, direction));
-  const startAlong = stroke * 1.25;
-  const tipAlong = lengthValue;
-  const headBaseAlong = lengthValue * 0.62;
-  const shaftHalf = Math.max(stroke * 0.38, lengthValue * 0.026);
-  const headHalf = Math.max(stroke * 2.15, lengthValue * 0.12);
-  const apexRadius = Math.min(headHalf * 0.34, (tipAlong - headBaseAlong) * 0.2);
-  const shoulderRadius = Math.min(headHalf * 0.2, (tipAlong - headBaseAlong) * 0.16);
-  const toPoint = (along, side) => add(center, add(scaleVec(direction, along), scaleVec(lateral, side)));
+  const startAlong = Math.max(stroke * 1.35, lengthValue * 0.075);
+  const coneLength = clamp(lengthValue * 0.24, stroke * 2.8, lengthValue * 0.34);
+  const shaftRadius = Math.max(0.22, stroke * 0.22);
+  const coneRadius = Math.max(shaftRadius * 2.6, stroke * 1.05);
+  const shaftStart = add(center, scaleVec(direction, startAlong));
+  const shaftEnd = add(center, scaleVec(direction, lengthValue - coneLength));
+  const coneTip = add(center, scaleVec(direction, lengthValue));
 
-  const shaftPath = [
-    toPoint(headBaseAlong, shaftHalf),
-    toPoint(startAlong, shaftHalf)
-  ];
-  const capSegments = 9;
-  for (let i = 0; i <= capSegments; i++) {
-    const angle = Math.PI / 2 + (i / capSegments) * Math.PI;
-    shaftPath.push(toPoint(startAlong + Math.cos(angle) * shaftHalf, Math.sin(angle) * shaftHalf));
-  }
-  shaftPath.push(toPoint(headBaseAlong, -shaftHalf));
-  pushFlatPolygon(vertices, normals, shaftPath, normal);
-
-  const rightTop = toPoint(tipAlong - apexRadius * 0.5, apexRadius * 0.866);
-  const leftTop = toPoint(tipAlong - apexRadius * 0.5, -apexRadius * 0.866);
-  const headPath = [
-    rightTop,
-    toPoint(headBaseAlong + shoulderRadius * 0.75, headHalf - shoulderRadius * 0.1),
-    toPoint(headBaseAlong, headHalf - shoulderRadius),
-    toPoint(headBaseAlong, -headHalf + shoulderRadius),
-    toPoint(headBaseAlong + shoulderRadius * 0.75, -headHalf + shoulderRadius * 0.1),
-    leftTop
-  ];
-  const apexCenterAlong = tipAlong - apexRadius;
-  const apexSegments = 10;
-  for (let i = 1; i <= apexSegments; i++) {
-    const angle = -Math.PI / 3 + (i / apexSegments) * (Math.PI * 2 / 3);
-    headPath.push(toPoint(
-      apexCenterAlong + Math.cos(angle) * apexRadius,
-      Math.sin(angle) * apexRadius
-    ));
-  }
-  pushFlatPolygon(vertices, normals, headPath, normal);
+  addGizmoTaperedSegment(vertices, normals, shaftStart, shaftEnd, shaftRadius, shaftRadius, 24, {
+    capStart: true,
+    capEnd: false
+  });
+  addGizmoTaperedSegment(vertices, normals, shaftEnd, coneTip, coneRadius, 0, 32, {
+    capStart: true,
+    capEnd: false
+  });
 
   return {
     vertices: new Float32Array(vertices),
@@ -5620,53 +6152,25 @@ function makeGizmoMoveGeometry(center, axis, lengthValue, stroke) {
 function makeGizmoArcGeometry(center, axis, radius, stroke, { fullCircle = false } = {}) {
   const vertices = [];
   const normals = [];
-  const normal = gizmoAxisDirection(axis);
   const [u, v] = gizmoArcBasis(axis);
-  const innerRadius = Math.max(0.1, radius - stroke * 0.5);
-  const outerRadius = radius + stroke * 0.5;
   const startAngle = fullCircle ? 0 : GIZMO_ARC_START;
   const endAngle = fullCircle ? Math.PI * 2 : GIZMO_ARC_END;
-  const segments = fullCircle ? 72 : 18;
+  const segments = fullCircle ? 96 : 24;
   for (let i = 0; i < segments; i++) {
     const a0 = startAngle + (i / segments) * (endAngle - startAngle);
     const a1 = startAngle + ((i + 1) / segments) * (endAngle - startAngle);
-    pushFlatQuad(
+    addGizmoTaperedSegment(
       vertices,
       normals,
-      gizmoArcPoint(center, u, v, innerRadius, a0),
-      gizmoArcPoint(center, u, v, outerRadius, a0),
-      gizmoArcPoint(center, u, v, outerRadius, a1),
-      gizmoArcPoint(center, u, v, innerRadius, a1),
-      normal
+      gizmoArcPoint(center, u, v, radius, a0),
+      gizmoArcPoint(center, u, v, radius, a1),
+      stroke,
+      stroke,
+      10,
+      { capStart: !fullCircle && i === 0, capEnd: !fullCircle && i === segments - 1 }
     );
   }
-  if (!fullCircle) {
-    addGizmoArcCap(vertices, normals, center, u, v, radius, stroke, startAngle, -1, normal);
-    addGizmoArcCap(vertices, normals, center, u, v, radius, stroke, endAngle, 1, normal);
-  }
   return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
-}
-
-function addGizmoArcCap(vertices, normals, center, u, v, radius, stroke, angle, tangentSign, normal) {
-  const capCenter = gizmoArcPoint(center, u, v, radius, angle);
-  const radial = normalize(add(scaleVec(u, Math.cos(angle)), scaleVec(v, Math.sin(angle))));
-  const tangent = normalize(add(scaleVec(u, -Math.sin(angle)), scaleVec(v, Math.cos(angle))));
-  const halfStroke = stroke * 0.5;
-  const points = [];
-  const segments = 8;
-  for (let i = 0; i <= segments; i++) {
-    const theta = (i / segments) * Math.PI;
-    points.push(add(
-      capCenter,
-      add(
-        scaleVec(radial, Math.cos(theta) * halfStroke),
-        scaleVec(tangent, Math.sin(theta) * halfStroke * tangentSign)
-      )
-    ));
-  }
-  for (let i = 0; i < points.length - 1; i++) {
-    pushFlatTriangle(vertices, normals, capCenter, points[i], points[i + 1], normal);
-  }
 }
 
 function makeGizmoPlaneSquareGeometry(center, lockedAxis, lengthValue, stroke) {
@@ -5695,7 +6199,7 @@ function gizmoFeaturePoints(center, spec, moveLength, arcRadius, stroke) {
   if (spec.kind === "plane") {
     return gizmoPlaneSquareCorners(center, spec.axis, moveLength, stroke);
   }
-  return gizmoArcPoints(center, spec.axis, arcRadius, 10);
+  return gizmoArcPoints(center, spec.axis, arcRadius, 24, { fullCircle: true });
 }
 
 function gizmoPlaneSquareCorners(center, lockedAxis, lengthValue, stroke) {
@@ -5728,11 +6232,13 @@ function gizmoArcPoint(center, u, v, radius, angle) {
   return add(center, add(scaleVec(u, Math.cos(angle) * radius), scaleVec(v, Math.sin(angle) * radius)));
 }
 
-function gizmoArcPoints(center, axis, radius, segments) {
+function gizmoArcPoints(center, axis, radius, segments, { fullCircle = false } = {}) {
   const [u, v] = gizmoArcBasis(axis);
   const points = [];
+  const startAngle = fullCircle ? 0 : GIZMO_ARC_START;
+  const sweep = fullCircle ? Math.PI * 2 : GIZMO_ARC_SWEEP;
   for (let i = 0; i <= segments; i++) {
-    const angle = GIZMO_ARC_START + (i / segments) * GIZMO_ARC_SWEEP;
+    const angle = startAngle + (i / segments) * sweep;
     points.push(gizmoArcPoint(center, u, v, radius, angle));
   }
   return points;
@@ -5758,6 +6264,31 @@ function gizmoPlaneAxes(lockedAxis) {
 
 function gizmoMovePlaneNormal(axis) {
   return axis === "z" ? [0, 1, 0] : [0, 0, 1];
+}
+
+function addGizmoTaperedSegment(vertices, normals, start, end, startRadius, endRadius, segments, options = {}) {
+  if (length(sub(end, start)) < 0.001) return;
+  const axis = normalize(sub(end, start));
+  const negativeAxis = scaleVec(axis, -1);
+  const reference = Math.abs(axis[2]) > 0.9 ? [1, 0, 0] : [0, 0, 1];
+  const u = normalize(cross(axis, reference));
+  const v = normalize(cross(axis, u));
+  const capStart = options.capStart !== false;
+  const capEnd = options.capEnd !== false;
+  for (let i = 0; i < segments; i++) {
+    const a0 = (i / segments) * Math.PI * 2;
+    const a1 = ((i + 1) / segments) * Math.PI * 2;
+    const n0 = add(scaleVec(u, Math.cos(a0)), scaleVec(v, Math.sin(a0)));
+    const n1 = add(scaleVec(u, Math.cos(a1)), scaleVec(v, Math.sin(a1)));
+    const p0 = add(start, scaleVec(n0, startRadius));
+    const p1 = add(start, scaleVec(n1, startRadius));
+    const p2 = add(end, scaleVec(n1, endRadius));
+    const p3 = add(end, scaleVec(n0, endRadius));
+    pushTri(vertices, normals, p0, p1, p2, n0, n1, n1);
+    if (endRadius > 0.001) pushTri(vertices, normals, p0, p2, p3, n0, n1, n0);
+    if (capStart && startRadius > 0.001) pushTri(vertices, normals, start, p1, p0, negativeAxis, negativeAxis, negativeAxis);
+    if (capEnd && endRadius > 0.001) pushTri(vertices, normals, end, p3, p2, axis, axis, axis);
+  }
 }
 
 function pushFlatQuad(vertices, normals, a, b, c, d, normal) {

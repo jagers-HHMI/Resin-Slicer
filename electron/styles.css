@@ -136,7 +136,11 @@ body {
 .topbar label {
   margin: 0;
   min-width: 0;
-  width: min(260px, 32vw);
+  width: min(220px, 26vw);
+}
+
+.topbar-resin-label {
+  width: min(180px, 20vw);
 }
 
 .topbar button {
@@ -192,6 +196,10 @@ body {
 
 .topbar-menu-panel .row {
   margin-bottom: 10px;
+}
+
+.topbar-menu-panel .profile-actions {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .topbar-menu-panel .grid {
@@ -276,6 +284,11 @@ body {
   line-height: 1;
   backface-visibility: hidden;
   box-shadow: inset 0 0 18px rgba(126, 164, 202, 0.08);
+}
+
+.view-cube-face > span {
+  display: inline-block;
+  transform: rotate(180deg);
 }
 
 .face-front {
@@ -619,7 +632,7 @@ body {
 
 .workflow {
   border-top: 0;
-  padding-top: 0;
+  padding: 10px 11px 12px;
   margin-top: 0;
 }
 
@@ -762,6 +775,16 @@ details.group > .preset-row {
   color: #f4f8fc;
 }
 
+.preset-row .save-preset {
+  border-color: #526679;
+  background: #202b36;
+  color: #dfeaf2;
+}
+
+.preset-row .save-preset:hover {
+  background: #283746;
+}
+
 .row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -871,7 +894,7 @@ details.group > .preset-row {
 .plate-toggle {
   width: 100%;
   margin: 0;
-  padding: 0;
+  padding: 10px 11px;
   border: 0;
   background: transparent;
   color: inherit;
@@ -904,6 +927,7 @@ details.group > .preset-row {
   display: none;
   grid-template-columns: repeat(2, 26px);
   gap: 5px;
+  padding-right: 10px;
 }
 
 .plate-node.active .plate-actions {

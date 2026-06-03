@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import PROFILES, PrintConfig, SupportConfig, profile
-from .errors import SlicerError
+from .errors import ConfigError, SlicerError
 from .mesh import Mesh, load_mesh
 from .pipeline import SliceJob, slice_to_file
 from .slicing import prepare_mesh
@@ -70,7 +70,7 @@ def _preview(request: dict[str, Any]) -> None:
     )
     plan = SupportPlan((), 0, 0, 0, 0.0, 0)
     if support.enabled:
-        plan = plan_supports(prepared, config, support, prepared.layer_count)
+        plan = plan_supports(prepared, config, support, prepared.layer_count, include_raft_mask=False)
 
     bounds = prepared.mesh.bounds()
     _write_json(
@@ -88,6 +88,7 @@ def _preview(request: dict[str, Any]) -> None:
             "layers": prepared.layer_count,
             "supports": [_support_to_json(anchor, plan, config, support) for anchor in plan.anchors],
             "braces": [_brace_to_json(brace, config) for brace in plan.braces],
+            "raft": _raft_preview_to_json(prepared, support) if support.enabled else None,
             "supportCount": len(plan.anchors),
             "materialLiftMm": model_lift,
         }
@@ -170,7 +171,10 @@ def _model_transform(model: dict[str, Any]) -> MeshTransform:
 
 
 def _config_from_request(request: dict[str, Any]) -> PrintConfig:
-    cfg = profile(request.get("profile", "generic-2k"))
+    try:
+        cfg = profile(request.get("profile", "generic-2k"))
+    except ConfigError:
+        cfg = profile("generic-2k")
     printer = request.get("printer", {})
     return cfg.with_overrides(
         resolution_x=int(printer.get("resolutionX", cfg.resolution_x)),
@@ -320,6 +324,22 @@ def _brace_to_json(brace: Any, config: PrintConfig) -> dict[str, float | int]:
         "startLayer": brace.start_layer,
         "endLayer": brace.end_layer,
         "radius": brace.radius_px * min(config.pixel_size_x_mm, config.pixel_size_y_mm),
+    }
+
+
+def _raft_preview_to_json(prepared: Any, support: SupportConfig) -> dict[str, float | str] | None:
+    if support.bed_interface not in {"raft", "skate"}:
+        return None
+    bounds = prepared.mesh.bounds()
+    margin = max(0.0, support.raft_margin_mm)
+    return {
+        "type": support.bed_interface,
+        "x0": bounds.min_x - margin,
+        "y0": bounds.min_y - margin,
+        "x1": bounds.max_x + margin,
+        "y1": bounds.max_y + margin,
+        "offset": margin,
+        "thickness": support.bed_interface_thickness_mm,
     }
 
 

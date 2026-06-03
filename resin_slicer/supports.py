@@ -56,6 +56,12 @@ class _AnchorCandidate:
 class _Surface:
     triangle: Triangle
     normal: Point3
+    min_x: float
+    min_y: float
+    min_z: float
+    max_x: float
+    max_y: float
+    max_z: float
 
 
 @dataclass(frozen=True)
@@ -100,6 +106,7 @@ def plan_supports(
     support: SupportConfig,
     layer_count: int,
     progress: Progress | None = None,
+    include_raft_mask: bool = True,
 ) -> SupportPlan:
     support.validate()
     output_pixel_mm = min(config.pixel_size_x_mm, config.pixel_size_y_mm)
@@ -115,7 +122,9 @@ def plan_supports(
         1,
         int(ceil(support.bed_interface_thickness_mm / config.layer_height_mm)),
     )
-    raft_mask, raft_shadow_mask, raft_offset_px = _projected_raft_masks(prepared, config, support)
+    raft_mask, raft_shadow_mask, raft_offset_px = (
+        _projected_raft_masks(prepared, config, support) if include_raft_mask else (None, None, 0)
+    )
 
     analysis_config = _analysis_config(config, support)
     analysis_pixel_mm = min(analysis_config.pixel_size_x_mm, analysis_config.pixel_size_y_mm)
@@ -129,7 +138,7 @@ def plan_supports(
     history: deque[LayerRaster] = deque(maxlen=lookback_layers)
     occupied_layers: list[_OccupiedLayer] = []
     anchors: list[SupportAnchor] = []
-    placed_points: list[tuple[int, int]] = []
+    placed_points = _PlacedPointIndex(config)
     surface_normals = _SurfaceNormalSampler(prepared.mesh.triangles)
 
     interval = max(1, layer_count // 20)
@@ -153,7 +162,7 @@ def plan_supports(
             for candidate in _anchor_candidates(component, analysis_config, support):
                 x, y = candidate.x, candidate.y
                 out_x, out_y = _scale_point_to_output(x, y, analysis_config, config)
-                if _too_close_to_existing(placed_points, out_x, out_y, config, candidate.spacing_mm):
+                if placed_points.too_close(out_x, out_y, candidate.spacing_mm):
                     continue
                 fallback_normal = _estimate_surface_normal(current, base_layer, analysis_config, x, y)
                 contact_point = (
@@ -179,7 +188,7 @@ def plan_supports(
                     continue
 
                 out_anchor = _scale_anchor_to_output(route, analysis_config, config)
-                placed_points.append((out_anchor.x, out_anchor.y))
+                placed_points.add(out_anchor.x, out_anchor.y)
                 anchors.append(out_anchor)
 
         history.append(current)
@@ -351,6 +360,9 @@ def _overhang_lookback_layers(
 class _SurfaceNormalSampler:
     def __init__(self, triangles: tuple[Triangle, ...]) -> None:
         self.surfaces = tuple(surface for tri in triangles if (surface := _surface_from_triangle(tri)) is not None)
+        self.cell_size_mm = self._cell_size()
+        self.cells: dict[tuple[int, int, int], list[int]] = {}
+        self._build_index()
 
     def normal_at_contact(
         self,
@@ -359,9 +371,10 @@ class _SurfaceNormalSampler:
     ) -> tuple[float, float, float]:
         if not self.surfaces:
             return fallback
-        nearest = min(self.surfaces, key=lambda surface: _point_triangle_distance2(point, surface.triangle))
+        surfaces = self._nearby_surfaces(point)
+        nearest = min(surfaces, key=lambda surface: _point_triangle_distance2(point, surface.triangle))
         aligned: list[tuple[float, Point3]] = []
-        for surface in self.surfaces:
+        for surface in surfaces:
             if _dot3(nearest.normal, surface.normal) <= 0.95:
                 continue
             aligned.append((_point_triangle_distance2(point, surface.triangle), surface.normal))
@@ -370,13 +383,81 @@ class _SurfaceNormalSampler:
         aligned.sort(key=lambda item: item[0])
         return _average_normals(tuple(normal for _distance, normal in aligned[:30]))
 
+    def _cell_size(self) -> float:
+        if not self.surfaces:
+            return 4.0
+        min_x = min(surface.min_x for surface in self.surfaces)
+        min_y = min(surface.min_y for surface in self.surfaces)
+        min_z = min(surface.min_z for surface in self.surfaces)
+        max_x = max(surface.max_x for surface in self.surfaces)
+        max_y = max(surface.max_y for surface in self.surfaces)
+        max_z = max(surface.max_z for surface in self.surfaces)
+        span = max(max_x - min_x, max_y - min_y, max_z - min_z, 1.0)
+        return max(4.0, span / 24.0)
+
+    def _build_index(self) -> None:
+        if not self.surfaces:
+            return
+        for index, surface in enumerate(self.surfaces):
+            min_key = self._cell_key((surface.min_x, surface.min_y, surface.min_z))
+            max_key = self._cell_key((surface.max_x, surface.max_y, surface.max_z))
+            for ix in range(min_key[0], max_key[0] + 1):
+                for iy in range(min_key[1], max_key[1] + 1):
+                    for iz in range(min_key[2], max_key[2] + 1):
+                        self.cells.setdefault((ix, iy, iz), []).append(index)
+
+    def _nearby_surfaces(self, point: Point3) -> tuple[_Surface, ...]:
+        if not self.cells:
+            return self.surfaces
+        center = self._cell_key(point)
+        target = min(len(self.surfaces), 96)
+        indices: list[int] = []
+        seen: set[int] = set()
+        for radius in range(5):
+            for ix in range(center[0] - radius, center[0] + radius + 1):
+                for iy in range(center[1] - radius, center[1] + radius + 1):
+                    for iz in range(center[2] - radius, center[2] + radius + 1):
+                        if radius and (
+                            abs(ix - center[0]) < radius
+                            and abs(iy - center[1]) < radius
+                            and abs(iz - center[2]) < radius
+                        ):
+                            continue
+                        for index in self.cells.get((ix, iy, iz), ()):
+                            if index in seen:
+                                continue
+                            seen.add(index)
+                            indices.append(index)
+            if len(indices) >= target:
+                break
+        if not indices:
+            return self.surfaces
+        return tuple(self.surfaces[index] for index in indices)
+
+    def _cell_key(self, point: Point3) -> tuple[int, int, int]:
+        cell = self.cell_size_mm
+        return (
+            int(floor(point[0] / cell)),
+            int(floor(point[1] / cell)),
+            int(floor(point[2] / cell)),
+        )
+
 
 def _surface_from_triangle(triangle: Triangle) -> _Surface | None:
     a, b, c = triangle
     normal = _cross3(_sub3(b, a), _sub3(c, a))
     if _length3(normal) < 1e-9:
         return None
-    return _Surface(triangle, _normalize_downward(normal))
+    return _Surface(
+        triangle,
+        _normalize_downward(normal),
+        min(a[0], b[0], c[0]),
+        min(a[1], b[1], c[1]),
+        min(a[2], b[2], c[2]),
+        max(a[0], b[0], c[0]),
+        max(a[1], b[1], c[1]),
+        max(a[2], b[2], c[2]),
+    )
 
 
 def _average_normals(normals: tuple[Point3, ...]) -> tuple[float, float, float]:
@@ -1068,6 +1149,35 @@ def _anchor_candidates(
         append_candidate(index % config.resolution_x, index // config.resolution_x, support.support_spacing_mm, "secondary")
 
     return candidates[: support.max_supports_per_island + support.primary_max_extra_per_island]
+
+
+class _PlacedPointIndex:
+    def __init__(self, config: PrintConfig) -> None:
+        self.config = config
+        self.cell_size_mm = max(1.0, min(config.size_x_mm, config.size_y_mm) / 48.0)
+        self.cells: dict[tuple[int, int], list[tuple[int, int]]] = {}
+
+    def add(self, x: int, y: int) -> None:
+        self.cells.setdefault(self._key(x, y), []).append((x, y))
+
+    def too_close(self, x: int, y: int, spacing_mm: float) -> bool:
+        min_distance2 = spacing_mm * spacing_mm
+        radius = max(1, int(ceil(spacing_mm / self.cell_size_mm)))
+        cell_x, cell_y = self._key(x, y)
+        for ix in range(cell_x - radius, cell_x + radius + 1):
+            for iy in range(cell_y - radius, cell_y + radius + 1):
+                for other_x, other_y in self.cells.get((ix, iy), ()):
+                    dx_mm = (x - other_x) * self.config.pixel_size_x_mm
+                    dy_mm = (y - other_y) * self.config.pixel_size_y_mm
+                    if dx_mm * dx_mm + dy_mm * dy_mm < min_distance2:
+                        return True
+        return False
+
+    def _key(self, x: int, y: int) -> tuple[int, int]:
+        return (
+            int(floor((x * self.config.pixel_size_x_mm) / self.cell_size_mm)),
+            int(floor((y * self.config.pixel_size_y_mm) / self.cell_size_mm)),
+        )
 
 
 def _too_close_to_existing(

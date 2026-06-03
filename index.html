@@ -27,6 +27,7 @@
       <section class="center-stage">
         <nav class="topbar">
           <label>Machine Profile <select id="profile"></select></label>
+          <label class="topbar-resin-label">Resin <select id="topbarResinSelect"></select></label>
           <div class="topbar-menu">
             <button id="modifyPrinterButton" class="topbar-menu-button" type="button" data-topbar-menu-button="printerTopbarMenu" aria-expanded="false">Modify Printer</button>
             <section id="printerTopbarMenu" class="topbar-menu-panel" hidden>
@@ -34,6 +35,11 @@
               <div class="row">
                 <button id="importUvtoolsMachineButton" type="button">Import Printer</button>
                 <button id="exportMachineButton" type="button">Export Printer</button>
+              </div>
+              <div class="row profile-actions">
+                <button id="saveMachineProfileButton" type="button">Save As Printer</button>
+                <button id="updateMachineProfileButton" type="button">Update Selected</button>
+                <button id="deleteMachineProfileButton" type="button">Delete Selected</button>
               </div>
               <div class="grid two">
                 <label>X pixels <input id="resolutionX" type="number"></label>
@@ -52,6 +58,11 @@
               <div class="row">
                 <button id="importResinButton" type="button">Import Resin</button>
                 <button id="exportResinButton" type="button">Export Resin</button>
+              </div>
+              <div class="row profile-actions">
+                <button id="saveResinProfileButton" type="button">Save Resin</button>
+                <button id="updateResinProfileButton" type="button">Update Selected</button>
+                <button id="deleteResinProfileButton" type="button">Delete Selected</button>
               </div>
               <div class="grid two">
                 <label>Normal exposure <input id="exposure" type="number" step="0.01" value="2.5"></label>
@@ -98,12 +109,12 @@
           <canvas id="viewer"></canvas>
           <div id="viewCube" class="view-cube" aria-hidden="true">
             <div class="view-cube-object">
-              <span class="view-cube-face face-front">Front</span>
-              <span class="view-cube-face face-back">Back</span>
-              <span class="view-cube-face face-left">Left</span>
-              <span class="view-cube-face face-right">Right</span>
-              <span class="view-cube-face face-top">Top</span>
-              <span class="view-cube-face face-bottom">Bottom</span>
+              <span class="view-cube-face face-front"><span>Front</span></span>
+              <span class="view-cube-face face-back"><span>Back</span></span>
+              <span class="view-cube-face face-left"><span>Left</span></span>
+              <span class="view-cube-face face-right"><span>Right</span></span>
+              <span class="view-cube-face face-top"><span>Top</span></span>
+              <span class="view-cube-face face-bottom"><span>Bottom</span></span>
             </div>
           </div>
           <div class="clip-scrubber" aria-label="Layer clipping controls">
@@ -164,6 +175,13 @@
               <label>Rot X <input id="rotateX" type="number" step="0.01" value="0.00"></label>
               <label>Rot Y <input id="rotateY" type="number" step="0.01" value="0.00"></label>
               <label>Rot Z <input id="rotateZ" type="number" step="0.01" value="0.00"></label>
+              <label>Units
+                <select id="placementUnits">
+                  <option value="mm" selected>mm</option>
+                  <option value="cm">cm</option>
+                  <option value="in">inch</option>
+                </select>
+              </label>
               <label>Move X <input id="translateX" type="number" step="0.01" value="0.00"></label>
               <label>Move Y <input id="translateY" type="number" step="0.01" value="0.00"></label>
               <label>Move Z <input id="translateZ" type="number" step="0.01" value="0.00"></label>
@@ -181,6 +199,7 @@
               <button type="button" data-support-preset="light">Light</button>
               <button class="active" type="button" data-support-preset="normal">Normal</button>
               <button type="button" data-support-preset="heavy">Heavy</button>
+              <button id="saveSupportPresetButton" class="save-preset" type="button">Save</button>
             </div>
             <div class="preset-row">
               <button id="importSupportButton" type="button">Import Supports</button>

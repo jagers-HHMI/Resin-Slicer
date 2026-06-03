@@ -1,0 +1,54 @@
+{
+  "schema": "resin-slicer-profile",
+  "version": 1,
+  "profileType": "resin",
+  "settings": {
+    "resinName": "Resione K+ - Elegoo Jupiter 6K",
+    "layerHeight": 0.05,
+    "exposure": 3.75,
+    "bottomExposure": 60,
+    "bottomLayers": 6,
+    "transitionLayers": 6,
+    "liftDistance": 9,
+    "liftSpeed": 65,
+    "retractDistance": 9,
+    "retractSpeed": 150,
+    "waitAfterRetract": 3,
+    "resinDensity": 1.1,
+    "lightPwm": 255,
+    "bottomLightPwm": 255
+  },
+  "chitubox": {
+    "resinName": "Resione K+ - Elegoo Jupiter 6K",
+    "layerHeight": 0.05,
+    "normalExposureTime": 3.75,
+    "bottomExposureTime": 60,
+    "bottomLayerCount": 6,
+    "transitionLayerCount": 6,
+    "liftingDistance": 9,
+    "liftingSpeed": 65,
+    "retractDistance": 9,
+    "retractSpeed": 150,
+    "lightOffDelay": 3,
+    "resinDensity": 1.1
+  },
+  "source": {
+    "manufacturer": "Resione",
+    "resin": "K+",
+    "printer": "Elegoo Jupiter 6K",
+    "sourceUrl": "https://docs.google.com/spreadsheets/d/1hMbbtbjoZooC9R1g0jIkHIcAjbFNQ7aBoUiSoqjDvxs/edit?pli=1&gid=0#gid=0",
+    "sourceTitle": "Rules table for setting parameters of Resione resin printing",
+    "sourceValues": {
+      "layerHeight": "0.05mm",
+      "exposureTime": "3-4.5s",
+      "bottomExposureTime": "50-70s",
+      "largeLcdLiftHeight": ">=9mm",
+      "largeLcdRestTimeAfterRetract": ">=3s"
+    },
+    "assumptions": [
+      "Elegoo Jupiter 6K uses a 12.8-inch LCD, so the source sheet's >=8.9-inch LCD rows were used.",
+      "Exposure and bottom exposure are set to the midpoints of the source ranges.",
+      "The source sheet does not provide a K+ lift/retract speed, bottom layer count, transition layer count, resin density, or PWM values; app defaults were used for those fields."
+    ]
+  }
+}
