@@ -11,7 +11,7 @@ const fields = [
   "tipDiameter", "tipType", "sphericalContactDiameter", "sphericalContactInsetPercent",
   "tipLength", "footDiameter",
   "bedInterface", "raftOffset", "raftChamferWidth", "raftChamferAngle", "bedInterfaceThickness", "collisionClearance", "maxBaseReach",
-  "maxSupportAngle", "enforcerReach", "enforcerMinDrop",
+  "maxSupportAngle", "enforcerReach", "enforcerMinDrop", "cadSlicingMode",
   "braceDiameter", "braceHeight", "braceDistance"
 ];
 
@@ -1222,6 +1222,7 @@ function buildPlateSettingsFromForm() {
   return {
     profile: $("profile").value,
     centerModel: $("centerModel").checked,
+    cadSlicingMode: $("cadSlicingMode")?.value || "tessellated",
     printer: {
       machineName: $("machineName").value.trim(),
       resolutionX: number("resolutionX"),
@@ -1320,6 +1321,7 @@ function applyBuildPlateSettingsToForm(plate) {
   const settings = plate.settings;
   if (profiles[settings.profile]) $("profile").value = settings.profile;
   $("centerModel").checked = !!settings.centerModel;
+  if ($("cadSlicingMode")) $("cadSlicingMode").value = settings.cadSlicingMode || "tessellated";
   const printer = settings.printer;
   $("machineName").value = printer.machineName || "Generic MSLA";
   $("resolutionX").value = printer.resolutionX;
@@ -3089,6 +3091,7 @@ function basePayload(plate = activePlate(), outputPath = $("outputPath").value.t
     outputPath,
     format: $("format").value,
     profile: settings.profile,
+    cadSlicingMode: settings.cadSlicingMode || "tessellated",
     centerModel: false,
     printer: cloneSettings(settings.printer),
     transform: {
@@ -5159,8 +5162,6 @@ class Viewer {
     const view = lookAt(eye, this.target, up);
     const mvp = multiply(projection, view);
     this.lastMvp = mvp;
-    const actionBillboard = this.plateActionBillboardFrame();
-    this.updatePlateActionBillboards(actionBillboard);
     this.updatePickRects(mvp);
     const plateAlpha = this.isViewingBuildPlateUnderside() ? 0.5 : 1;
     const deferPlateSurfaces = plateAlpha < 1;
@@ -5178,7 +5179,6 @@ class Viewer {
       if (!this.shouldShowPlateActions(plate)) continue;
       this.applyPlateActionColors(plate);
       for (const action of plate.actions || []) {
-        this.facePlateActionToCamera(action, actionBillboard.rotation);
         drawMesh(gl, this.program, action.pad, mvp, this.clipZ);
         drawMesh(gl, this.program, action.outline, mvp, this.clipZ);
         drawMesh(gl, this.program, action.icon, mvp, this.clipZ);
@@ -5262,36 +5262,6 @@ class Viewer {
     drawMesh(gl, this.program, clip.outline, mvp, this.clipZ);
     gl.enable(gl.CULL_FACE);
     gl.depthMask(true);
-  }
-
-  plateActionBillboardFrame() {
-    const { right, up, zAxis } = this.cameraState();
-    const matrix = [
-      [right[0], up[0], zAxis[0]],
-      [right[1], up[1], zAxis[1]],
-      [right[2], up[2], zAxis[2]]
-    ];
-    return {
-      right,
-      up,
-      rotation: eulerFromRotationMatrix(matrix)
-    };
-  }
-
-  updatePlateActionBillboards(frame) {
-    for (const plate of this.meshes.plates || []) {
-      for (const action of plate.actions || []) {
-        action.pickPoints.length = 0;
-        action.pickPoints.push(...billboardRectCorners(action.billboardOrigin, frame.right, frame.up, action.pickWidth, action.pickHeight));
-      }
-    }
-  }
-
-  facePlateActionToCamera(action, rotation) {
-    for (const mesh of [action.pad, action.outline, action.icon]) {
-      mesh.modelOrigin = action.billboardOrigin;
-      mesh.modelRotation = rotation;
-    }
   }
 
   applyPlateInteractionColors(plate, type, surfaceAlpha = 1) {
@@ -5581,33 +5551,17 @@ function platePlusPadRect(bed) {
 function makeBuildPlateActionMeshes(gl, plate) {
   const layout = plateActionLayout(plate.bed);
   return ["add", "delete"].map((action) => {
-    const layers = buildPlateActionLayers(action);
+    const layers = buildPlateActionLayers();
     const rect = layout[action];
-    const pickRect = expandRect(rect, layout.outlineWidth || 2);
-    const scaleX = plate.visual?.scaleX || 1;
-    const scaleY = plate.visual?.scaleY || 1;
-    const billboardOrigin = plateVisualPoint(
-      (rect.x0 + rect.x1) / 2,
-      (rect.y0 + rect.y1) / 2,
-      plate.bed,
-      plate.origin,
-      { ...plate.visual, z: (plate.visual?.z || 0) + layers.pad }
-    );
     const padGeometry = makeLocalRoundedRectGeometry(layout[action], plate.bed, plate.origin, plate.visual, layers.pad);
     const outlineGeometry = makeLocalRoundedRectBorderGeometry(layout[action], plate.bed, plate.origin, plate.visual, layers.outline);
-    const iconGeometry = action === "add"
-      ? makePlateActionPlusIconGeometry(layout[action], plate.bed, plate.origin, plate.visual, layers)
-      : makePlateActionTrashIconGeometry(layout[action], plate.bed, plate.origin, plate.visual, layers);
+    const iconGeometry = makePlateActionSvgIconGeometry(action, layout[action], plate.bed, plate.origin, plate.visual, layers.icon);
     return {
       action,
-      bounds: localRectBounds(expandRect(layout[action], layout.outlineWidth || 2), plate.bed, plate.origin, plate.visual, layers.pad, 10),
+      bounds: localRectBounds(expandRect(layout[action], layout.outlineWidth || 2), plate.bed, plate.origin, plate.visual, layers.pad, 0.8),
       padBaseColor: action === "delete" ? [0.28, 0.14, 0.15, 1] : [0.16, 0.25, 0.34, 1],
       outlineBaseColor: [0.42, 0.67, 0.95, 1],
       iconBaseColor: action === "delete" ? [1.0, 0.55, 0.55, 1] : [0.78, 0.9, 1.0, 1],
-      billboardOrigin,
-      pickPoints: [],
-      pickWidth: Math.abs((pickRect.x1 - pickRect.x0) * scaleX),
-      pickHeight: Math.abs((pickRect.y1 - pickRect.y0) * scaleY),
       pad: makeMesh(gl, padGeometry, action === "delete" ? [0.28, 0.14, 0.15, 1] : [0.16, 0.25, 0.34, 1], gl.TRIANGLES),
       outline: makeMesh(gl, outlineGeometry, [0.42, 0.67, 0.95, 1], gl.TRIANGLES),
       icon: makeMesh(gl, iconGeometry, action === "delete" ? [1.0, 0.55, 0.55, 1] : [0.78, 0.9, 1.0, 1], gl.TRIANGLES)
@@ -5615,14 +5569,11 @@ function makeBuildPlateActionMeshes(gl, plate) {
   });
 }
 
-function buildPlateActionLayers(action) {
-  const z = action === "delete" ? 0.16 : 0;
+function buildPlateActionLayers() {
   return {
-    pad: 3.2 + z,
-    outline: 3.62 + z,
-    iconA: 5.15 + z,
-    iconB: 5.58 + z,
-    iconC: 6.02 + z
+    pad: 0.18,
+    outline: 0.21,
+    icon: 0.24
   };
 }
 
@@ -5645,26 +5596,132 @@ function plateActionLayout(bed) {
   };
 }
 
-function makePlateActionPlusIconGeometry(rect, bed, origin, visual, layers) {
+const PLATE_ACTION_ICON_SVGS = {
+  add: {
+    viewBox: [0, 0, 24, 24],
+    path: "M10 4 H14 V10 H20 V14 H14 V20 H10 V14 H4 V10 H10 Z"
+  },
+  delete: {
+    viewBox: [0, 0, 24, 24],
+    path: "M9 4 H15 L16 6 H20 V8 H18 L17 20 H7 L6 8 H4 V6 H8 Z"
+  }
+};
+
+function makePlateActionSvgIconGeometry(action, rect, bed, origin, visual, zOffset) {
+  const icon = PLATE_ACTION_ICON_SVGS[action] || PLATE_ACTION_ICON_SVGS.add;
+  const [minX, minY, width, height] = icon.viewBox;
+  const points = parseSimpleSvgPath(icon.path);
   const size = Math.min(rect.x1 - rect.x0, rect.y1 - rect.y0);
-  const thick = size * 0.18;
+  const iconSize = size * 0.62;
   const cx = (rect.x0 + rect.x1) / 2;
   const cy = (rect.y0 + rect.y1) / 2;
-  return combineGeometry([
-    makeVisualLocalRectGeometry(cx - size * 0.28, cy - thick / 2, cx + size * 0.28, cy + thick / 2, bed, origin, visual, layers.iconA),
-    makeVisualLocalRectGeometry(cx - thick / 2, cy - size * 0.28, cx + thick / 2, cy + size * 0.28, bed, origin, visual, layers.iconB)
+  const x0 = cx - iconSize / 2;
+  const y0 = cy - iconSize / 2;
+  const localPoints = points.map((point) => [
+    x0 + ((point[0] - minX) / width) * iconSize,
+    y0 + (1 - (point[1] - minY) / height) * iconSize
   ]);
+  const triangles = triangulatePolygon2d(localPoints);
+  const vertices = [];
+  const normals = [];
+  const localVisual = { ...visual, z: (visual?.z || 0) + zOffset };
+  for (const [a, b, c] of triangles) {
+    pushFlatTriangle(
+      vertices,
+      normals,
+      plateVisualPoint(a[0], a[1], bed, origin, localVisual),
+      plateVisualPoint(b[0], b[1], bed, origin, localVisual),
+      plateVisualPoint(c[0], c[1], bed, origin, localVisual),
+      [0, 0, 1]
+    );
+  }
+  return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
 }
 
-function makePlateActionTrashIconGeometry(rect, bed, origin, visual, layers) {
-  const size = Math.min(rect.x1 - rect.x0, rect.y1 - rect.y0);
-  const cx = (rect.x0 + rect.x1) / 2;
-  const cy = (rect.y0 + rect.y1) / 2;
-  return combineGeometry([
-    makeVisualLocalRectGeometry(cx - size * 0.24, cy - size * 0.18, cx + size * 0.24, cy + size * 0.20, bed, origin, visual, layers.iconA),
-    makeVisualLocalRectGeometry(cx - size * 0.30, cy + size * 0.25, cx + size * 0.30, cy + size * 0.34, bed, origin, visual, layers.iconB),
-    makeVisualLocalRectGeometry(cx - size * 0.12, cy + size * 0.36, cx + size * 0.12, cy + size * 0.43, bed, origin, visual, layers.iconC)
-  ]);
+function parseSimpleSvgPath(path) {
+  const tokens = String(path).match(/[MLHVZ]|-?\d*\.?\d+(?:e[-+]?\d+)?/gi) || [];
+  const points = [];
+  let index = 0;
+  let command = "";
+  let cursor = [0, 0];
+  while (index < tokens.length) {
+    const token = tokens[index++];
+    if (/^[MLHVZ]$/i.test(token)) {
+      command = token.toUpperCase();
+      if (command === "Z") break;
+      continue;
+    }
+    index -= 1;
+    if (command === "M" || command === "L") {
+      cursor = [Number(tokens[index++]), Number(tokens[index++])];
+      points.push(cursor);
+      command = command === "M" ? "L" : command;
+    } else if (command === "H") {
+      cursor = [Number(tokens[index++]), cursor[1]];
+      points.push(cursor);
+    } else if (command === "V") {
+      cursor = [cursor[0], Number(tokens[index++])];
+      points.push(cursor);
+    } else {
+      index += 1;
+    }
+  }
+  return points;
+}
+
+function triangulatePolygon2d(points) {
+  if (points.length < 3) return [];
+  const working = polygonArea2d(points) < 0 ? [...points].reverse() : [...points];
+  const triangles = [];
+  let guard = working.length * working.length;
+  while (working.length > 3 && guard-- > 0) {
+    let clipped = false;
+    for (let i = 0; i < working.length; i++) {
+      const previous = working[(i + working.length - 1) % working.length];
+      const current = working[i];
+      const next = working[(i + 1) % working.length];
+      if (!isConvexPolygonCorner(previous, current, next)) continue;
+      if (working.some((point, pointIndex) => (
+        pointIndex !== i
+        && pointIndex !== (i + working.length - 1) % working.length
+        && pointIndex !== (i + 1) % working.length
+        && pointInTriangle2d(point, previous, current, next)
+      ))) continue;
+      triangles.push([previous, current, next]);
+      working.splice(i, 1);
+      clipped = true;
+      break;
+    }
+    if (!clipped) break;
+  }
+  if (working.length === 3) triangles.push([working[0], working[1], working[2]]);
+  return triangles;
+}
+
+function polygonArea2d(points) {
+  let area = 0;
+  for (let i = 0; i < points.length; i++) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    area += a[0] * b[1] - b[0] * a[1];
+  }
+  return area / 2;
+}
+
+function isConvexPolygonCorner(a, b, c) {
+  return ((b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])) > 0;
+}
+
+function pointInTriangle2d(point, a, b, c) {
+  const area = Math.abs(cross2d(a, b, c));
+  const a0 = Math.abs(cross2d(point, a, b));
+  const a1 = Math.abs(cross2d(point, b, c));
+  const a2 = Math.abs(cross2d(point, c, a));
+  return Math.abs(area - (a0 + a1 + a2)) < 1e-6;
+}
+
+function cross2d(a, b, c) {
+  return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
 }
 
 function makeLocalRoundedRectGeometry(rect, bed, origin, visual, zOffset) {
@@ -5712,21 +5769,6 @@ function expandRect(rect, amount) {
     y1: rect.y1 + amount,
     radius: (rect.radius || 0) + amount
   };
-}
-
-function makeVisualLocalRectGeometry(x0, y0, x1, y1, bed, origin, visual, zOffset) {
-  const localVisual = { ...visual, z: (visual?.z || 0) + zOffset };
-  const vertices = new Float32Array([
-    ...plateVisualPoint(x0, y0, bed, origin, localVisual),
-    ...plateVisualPoint(x1, y0, bed, origin, localVisual),
-    ...plateVisualPoint(x1, y1, bed, origin, localVisual),
-    ...plateVisualPoint(x0, y0, bed, origin, localVisual),
-    ...plateVisualPoint(x1, y1, bed, origin, localVisual),
-    ...plateVisualPoint(x0, y1, bed, origin, localVisual)
-  ]);
-  const normals = new Float32Array(vertices.length);
-  for (let i = 2; i < normals.length; i += 3) normals[i] = 1;
-  return { vertices, normals };
 }
 
 function localRectBounds(rect, bed, origin, visual, zOffset, zPadding = 0) {
@@ -6362,17 +6404,6 @@ function gizmoColor(axis, state) {
 
 function withAlpha(color, alpha) {
   return [color[0], color[1], color[2], clamp(alpha, 0, 1)];
-}
-
-function billboardRectCorners(center, right, up, width, height) {
-  const halfRight = scaleVec(right, width / 2);
-  const halfUp = scaleVec(up, height / 2);
-  return [
-    add(center, add(scaleVec(halfRight, -1), scaleVec(halfUp, -1))),
-    add(center, add(halfRight, scaleVec(halfUp, -1))),
-    add(center, add(halfRight, halfUp)),
-    add(center, add(scaleVec(halfRight, -1), halfUp))
-  ];
 }
 
 function boundsFromPoints(points, padding) {

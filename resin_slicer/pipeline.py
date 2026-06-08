@@ -16,6 +16,13 @@ from .slicing import PreparedMesh, prepare_mesh, render_prepared_layer
 from .supports import SupportPlan, apply_supports, plan_supports
 from .transform import MeshTransform, apply_transform
 
+try:
+    from .cad_slicing import CadSliceModel, CadSliceSource, prepare_cad_slice_source
+except Exception:  # pragma: no cover - CAD dependencies are optional until STEP/B-rep mode is used.
+    CadSliceModel = object  # type: ignore[assignment]
+    CadSliceSource = object  # type: ignore[assignment]
+    prepare_cad_slice_source = None  # type: ignore[assignment]
+
 Progress = Callable[[str], None]
 
 
@@ -26,6 +33,9 @@ class SliceJob:
     support_config: SupportConfig = SupportConfig()
     transform: MeshTransform = MeshTransform()
     preserve_coordinates: bool = False
+    raster_mesh: Mesh | None = None
+    cad_models: tuple[CadSliceModel, ...] = ()
+    cad_slice_mode: str = "tessellated"
 
 
 @dataclass(frozen=True)
@@ -62,6 +72,26 @@ def slice_to_file(
         xy_offset_mm=(job.transform.translate_x_mm, job.transform.translate_y_mm),
         preserve_coordinates=job.preserve_coordinates,
     )
+    model_prepared: PreparedMesh | None = prepared
+    if job.raster_mesh is not None:
+        raster_mesh = apply_transform(job.raster_mesh, orientation)
+        model_prepared = prepare_mesh(
+            raster_mesh,
+            config,
+            z_offset_mm=model_lift + job.transform.translate_z_mm,
+            xy_offset_mm=(job.transform.translate_x_mm, job.transform.translate_y_mm),
+            preserve_coordinates=job.preserve_coordinates,
+        )
+    elif job.cad_slice_mode == "brep" and job.cad_models:
+        model_prepared = None
+    cad_source = None
+    if job.cad_slice_mode == "brep" and job.cad_models:
+        if prepare_cad_slice_source is None:
+            raise FormatError("B-rep slicing requires OpenCascade/build123d")
+        cad_source = prepare_cad_slice_source(
+            job.cad_models,
+            z_offset_mm=model_lift + job.transform.translate_z_mm,
+        )
     output = Path(output_path)
     fmt = fmt.lower().lstrip(".")
     if fmt not in {"goo", "ctb"}:
@@ -91,14 +121,14 @@ def slice_to_file(
             output,
             config,
             prepared.layer_count,
-            _layer_iter(prepared, config, support_config.enabled, support_plan, progress, layer_workers),
+            _layer_iter(prepared, model_prepared, config, support_config.enabled, support_plan, progress, layer_workers, cad_source),
         )
     else:
         stats = write_ctb(
             output,
             config,
             prepared.layer_count,
-            _layer_iter(prepared, config, support_config.enabled, support_plan, progress, layer_workers),
+            _layer_iter(prepared, model_prepared, config, support_config.enabled, support_plan, progress, layer_workers, cad_source),
         )
 
     return SliceResult(
@@ -114,14 +144,16 @@ def _progress_interval(total: int) -> int:
 
 
 def _layer_iter(
-    prepared: PreparedMesh,
+    support_prepared: PreparedMesh,
+    model_prepared: PreparedMesh | None,
     config: PrintConfig,
     supports_enabled: bool,
     support_plan: SupportPlan,
     progress: Progress | None,
     layer_workers: int | None,
+    cad_source: CadSliceSource | None = None,
 ) -> Iterator[tuple[int, LayerRaster]]:
-    total = prepared.layer_count
+    total = support_prepared.layer_count
     workers = _resolve_layer_workers(layer_workers, total)
     interval = _progress_interval(total)
 
@@ -129,7 +161,7 @@ def _layer_iter(
         for layer_index in range(total):
             if progress and (layer_index == 0 or (layer_index + 1) % interval == 0):
                 progress(f"writing layer {layer_index + 1}/{total}")
-            yield _render_layer(prepared, config, supports_enabled, support_plan, layer_index)
+            yield _render_layer(support_prepared, model_prepared, config, supports_enabled, support_plan, layer_index, cad_source)
         return
 
     if progress:
@@ -144,11 +176,13 @@ def _layer_iter(
             while next_submit < total and len(futures) < workers:
                 futures[next_submit] = executor.submit(
                     _render_layer,
-                    prepared,
+                    support_prepared,
+                    model_prepared,
                     config,
                     supports_enabled,
                     support_plan,
                     next_submit,
+                    cad_source,
                 )
                 next_submit += 1
 
@@ -160,13 +194,20 @@ def _layer_iter(
 
 
 def _render_layer(
-    prepared: PreparedMesh,
+    support_prepared: PreparedMesh,
+    model_prepared: PreparedMesh | None,
     config: PrintConfig,
     supports_enabled: bool,
     support_plan: SupportPlan,
     layer_index: int,
+    cad_source: CadSliceSource | None = None,
 ) -> tuple[int, LayerRaster]:
-    layer = render_prepared_layer(prepared, config, layer_index)
+    if cad_source is not None:
+        layer = cad_source.render_layer(layer_index, config)
+        if model_prepared is not None:
+            layer.or_with(render_prepared_layer(model_prepared, config, layer_index))
+    else:
+        layer = render_prepared_layer(model_prepared or support_prepared, config, layer_index)
     if supports_enabled:
         apply_supports(layer, layer_index, support_plan)
     return layer_index, layer

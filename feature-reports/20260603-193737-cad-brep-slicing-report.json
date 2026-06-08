@@ -1,0 +1,28 @@
+{
+  "idea_id": "cad-brep-slicing",
+  "title": "CAD B-rep slicing mode for STEP/STP files",
+  "status": "implemented",
+  "files_changed": [
+    "index.html",
+    "electron/renderer.js",
+    "resin_slicer/step.py",
+    "resin_slicer/mesh.py",
+    "resin_slicer/cad_slicing.py",
+    "resin_slicer/slicing.py",
+    "resin_slicer/pipeline.py",
+    "resin_slicer/electron_bridge.py",
+    "tests/test_mesh.py",
+    "tests/test_electron_bridge.py",
+    "README.md"
+  ],
+  "verification": [
+    "python -m compileall resin_slicer",
+    "python -m unittest tests.test_mesh tests.test_electron_bridge",
+    "python -m unittest discover -s tests",
+    "npm.cmd run check",
+    "Generated STEP box smoke test using OpenCascade B-rep section slicing to GOO"
+  ],
+  "remaining_checks": [
+    "Manual visual inspection with a complex curved STEP file is recommended before relying on B-rep mode for production prints."
+  ]
+}

@@ -48,14 +48,12 @@ class MeshLoadTests(unittest.TestCase):
 
             self.assertEqual(len(load_mesh(path).triangles), 1)
 
-    def test_load_mesh_dispatches_step_extension_through_tessellation(self) -> None:
+    def test_load_mesh_dispatches_step_extension_through_native_tessellation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             step_path = Path(tmp) / "part.stp"
-            stl_path = Path(tmp) / "part.stl"
             step_path.write_text("ISO-10303-21;\nEND-ISO-10303-21;\n", encoding="ascii")
-            _write_ascii_stl(stl_path, Mesh((((0, 0, 0), (1, 0, 0), (0, 1, 0)),)))
 
-            with patch("resin_slicer.step.step_to_stl_path", return_value=stl_path):
+            with patch("resin_slicer.step.step_to_mesh", return_value=Mesh((((0, 0, 0), (1, 0, 0), (0, 1, 0)),))):
                 self.assertEqual(len(load_mesh(step_path).triangles), 1)
 
 

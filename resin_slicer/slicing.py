@@ -85,6 +85,10 @@ def render_prepared_layer(prepared: PreparedMesh, config: PrintConfig, layer_ind
     return _rasterize_segments(segments, config)
 
 
+def rasterize_segments(segments: list[Segment], config: PrintConfig) -> LayerRaster:
+    return _rasterize_segments(segments, config)
+
+
 def _build_layer_index(mesh: Mesh, config: PrintConfig, layer_count: int) -> tuple[tuple[Triangle, ...], ...]:
     buckets: list[list[Triangle]] = [[] for _ in range(layer_count)]
     height = config.layer_height_mm

@@ -27,11 +27,12 @@ Outputs:
 
 ## GUI Workflow
 
-1. Open one or more STL/OBJ files, or drag mesh files into the 3D view.
+1. Open one or more STL/OBJ/STP/STEP files, or drag mesh files into the 3D view.
 2. Choose `GOO` or `CTB`.
-3. Adjust placement/orientation in the 3D viewer and `Placement` section. Multiple loaded meshes are arranged automatically on the build plate.
-4. Generate a support preview.
-5. Slice to the selected output path.
+3. For STEP/STP jobs, choose `Tessellated` or `B-rep sections` from `CAD slice mode` in the Job panel. Tessellated mode slices the converted triangle mesh. B-rep sections mode uses OpenCascade CAD sectioning for STEP/STP model exposure layers while retaining tessellation for display and support planning.
+4. Adjust placement/orientation in the 3D viewer and `Placement` section. Multiple loaded meshes are arranged automatically on the build plate.
+5. Generate a support preview.
+6. Slice to the selected output path.
 
 Layer rendering uses multiple worker threads by default, capped at four workers or the number of layers in the job.
 

@@ -7,6 +7,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from .cad_slicing import CadSliceModel
 from .config import PROFILES, PrintConfig, SupportConfig, profile
 from .errors import ConfigError, SlicerError
 from .mesh import Mesh, load_mesh
@@ -99,6 +100,9 @@ def _slice(request: dict[str, Any]) -> None:
     mesh = _mesh_from_request(request)
     transform = _transform_from_request(request)
     has_model_entries = bool(request.get("models"))
+    cad_slice_mode = _cad_slice_mode_from_request(request)
+    cad_models = _cad_models_from_request(request) if cad_slice_mode == "brep" else ()
+    raster_mesh = _mesh_from_request(request, include_step=False) if cad_models else None
     if has_model_entries:
         transform = MeshTransform(
             translate_x_mm=transform.translate_x_mm,
@@ -112,6 +116,9 @@ def _slice(request: dict[str, Any]) -> None:
             support_config=_support_from_request(request),
             transform=transform,
             preserve_coordinates=has_model_entries,
+            raster_mesh=raster_mesh,
+            cad_models=cad_models,
+            cad_slice_mode=cad_slice_mode,
         ),
         request["outputPath"],
         request.get("format", "goo"),
@@ -129,7 +136,7 @@ def _slice(request: dict[str, Any]) -> None:
     )
 
 
-def _mesh_from_request(request: dict[str, Any]) -> Mesh:
+def _mesh_from_request(request: dict[str, Any], *, include_step: bool = True) -> Mesh | None:
     models = request.get("models")
     if models:
         triangles = []
@@ -137,13 +144,40 @@ def _mesh_from_request(request: dict[str, Any]) -> Mesh:
             path = model.get("inputPath") or model.get("path")
             if not path:
                 raise SlicerError("model entry is missing inputPath")
+            if not include_step and _is_step_path(path):
+                continue
             mesh = load_mesh(path)
             triangles.extend(apply_transform(mesh, _model_transform(model)).triangles)
         if not triangles:
+            if not include_step:
+                return None
             raise SlicerError("no model triangles were loaded")
         return Mesh(tuple(triangles))
 
+    if not include_step and _is_step_path(request.get("inputPath", "")):
+        return None
     return load_mesh(request["inputPath"])
+
+
+def _cad_slice_mode_from_request(request: dict[str, Any]) -> str:
+    mode = str(request.get("cadSlicingMode", request.get("cad_slice_mode", "tessellated"))).lower()
+    return "brep" if mode in {"brep", "b-rep", "cad", "cad-brep"} else "tessellated"
+
+
+def _cad_models_from_request(request: dict[str, Any]) -> tuple[CadSliceModel, ...]:
+    models = request.get("models")
+    if not models:
+        return ()
+    out: list[CadSliceModel] = []
+    for model in models:
+        path = model.get("inputPath") or model.get("path")
+        if path and _is_step_path(path):
+            out.append(CadSliceModel(str(path), _model_transform(model)))
+    return tuple(out)
+
+
+def _is_step_path(path: object) -> bool:
+    return str(path or "").lower().endswith((".stp", ".step"))
 
 
 def _layer_workers_from_request(request: dict[str, Any]) -> int | None:

@@ -1,8 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from resin_slicer.electron_bridge import _mesh_from_request
+from resin_slicer.electron_bridge import _cad_models_from_request, _cad_slice_mode_from_request, _mesh_from_request
 from resin_slicer.mesh import Mesh, cube_mesh
 
 
@@ -27,6 +28,27 @@ class ElectronBridgeTests(unittest.TestCase):
         self.assertEqual(len(mesh.triangles), 24)
         self.assertAlmostEqual(bounds.min_x, 0)
         self.assertAlmostEqual(bounds.max_x, 24)
+
+    def test_brep_mode_collects_step_models_and_omits_them_from_raster_mesh(self) -> None:
+        request = {
+            "cadSlicingMode": "brep",
+            "models": [
+                {"inputPath": "cad.step", "transform": {"translateX": 2}},
+                {"inputPath": "mesh.stl", "transform": {"translateX": 4}},
+            ],
+        }
+
+        with patch("resin_slicer.electron_bridge.load_mesh", return_value=cube_mesh(5)) as load_mesh:
+            raster_mesh = _mesh_from_request(request, include_step=False)
+
+        self.assertEqual(_cad_slice_mode_from_request(request), "brep")
+        self.assertEqual(len(_cad_models_from_request(request)), 1)
+        self.assertIsNotNone(raster_mesh)
+        self.assertEqual(len(raster_mesh.triangles), 12)
+        load_mesh.assert_called_once_with("mesh.stl")
+
+    def test_tessellated_mode_is_default(self) -> None:
+        self.assertEqual(_cad_slice_mode_from_request({}), "tessellated")
 
 
 def _write_ascii_stl(path: Path, mesh: Mesh) -> None:

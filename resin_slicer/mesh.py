@@ -74,9 +74,9 @@ def load_obj(path: str | Path) -> Mesh:
 
 
 def load_step(path: str | Path) -> Mesh:
-    from .step import step_to_stl_path
+    from .step import step_to_mesh
 
-    return load_stl(step_to_stl_path(path))
+    return step_to_mesh(path)
 
 
 def load_mesh(path: str | Path) -> Mesh:
