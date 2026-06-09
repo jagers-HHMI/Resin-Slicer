@@ -107,6 +107,7 @@ def plan_supports(
     layer_count: int,
     progress: Progress | None = None,
     include_raft_mask: bool = True,
+    on_anchor: Callable[[SupportAnchor], None] | None = None,
 ) -> SupportPlan:
     support.validate()
     output_pixel_mm = min(config.pixel_size_x_mm, config.pixel_size_y_mm)
@@ -147,6 +148,14 @@ def plan_supports(
             progress(f"support analysis layer {layer_index + 1}/{layer_count}")
 
         current = render_prepared_layer(prepared, analysis_config, layer_index)
+        occupied = _occupied_layer(layer_index, current)
+        if occupied is None:
+            # Empty layer (e.g. the model-lift gap or an internal void): there is
+            # nothing here to support or to collide against, so skip the costly
+            # dilation / unsupported-mask / connected-component analysis entirely.
+            history.append(current)
+            continue
+
         base_layer = history[0] if history else LayerRaster(analysis_config.resolution_x, analysis_config.resolution_y)
         overhang_px = _overhang_allowance_px(
             analysis_config,
@@ -190,11 +199,11 @@ def plan_supports(
                 out_anchor = _scale_anchor_to_output(route, analysis_config, config)
                 placed_points.add(out_anchor.x, out_anchor.y)
                 anchors.append(out_anchor)
+                if on_anchor is not None:
+                    on_anchor(out_anchor)
 
         history.append(current)
-        occupied = _occupied_layer(layer_index, current)
-        if occupied is not None:
-            occupied_layers.append(occupied)
+        occupied_layers.append(occupied)
 
     braces = _plan_braces(anchors, prepared, config, support, layer_count, brace_radius, bed_interface_layers)
     return SupportPlan(

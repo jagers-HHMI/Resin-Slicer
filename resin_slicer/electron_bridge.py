@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tempfile
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -71,7 +72,18 @@ def _preview(request: dict[str, Any]) -> None:
     )
     plan = SupportPlan((), 0, 0, 0, 0.0, 0)
     if support.enabled:
-        plan = plan_supports(prepared, config, support, prepared.layer_count, include_raft_mask=False)
+        def _emit_support(anchor: Any) -> None:
+            _write_json({"type": "support", "support": _support_to_json(anchor, None, config, support)})
+
+        plan = plan_supports(
+            prepared,
+            config,
+            support,
+            prepared.layer_count,
+            progress=lambda message: _write_json({"type": "progress", "message": message}),
+            include_raft_mask=False,
+            on_anchor=_emit_support,
+        )
 
     bounds = prepared.mesh.bounds()
     _write_json(
@@ -109,10 +121,13 @@ def _slice(request: dict[str, Any]) -> None:
             translate_y_mm=transform.translate_y_mm,
             translate_z_mm=transform.translate_z_mm,
         )
+    config = _config_from_request(request)
+    preview_scale = max(1, config.resolution_x // 480)
+    preview_dir = tempfile.mkdtemp(prefix="rspreview_")
     result = slice_to_file(
         SliceJob(
             mesh=mesh,
-            print_config=_config_from_request(request),
+            print_config=config,
             support_config=_support_from_request(request),
             transform=transform,
             preserve_coordinates=has_model_entries,
@@ -124,6 +139,8 @@ def _slice(request: dict[str, Any]) -> None:
         request.get("format", "goo"),
         progress=lambda message: _write_json({"type": "progress", "message": message}),
         layer_workers=_layer_workers_from_request(request),
+        preview_dir=preview_dir,
+        preview_scale=preview_scale,
     )
     _write_json(
         {
@@ -132,6 +149,8 @@ def _slice(request: dict[str, Any]) -> None:
             "layers": result.layer_count,
             "supports": result.support_count,
             "materialMl": result.material_ml,
+            "previewDir": preview_dir,
+            "previewLayerCount": result.layer_count,
         }
     )
 
@@ -302,7 +321,7 @@ def _transform_from_request(request: dict[str, Any]) -> MeshTransform:
     )
 
 
-def _support_to_json(anchor: Any, plan: SupportPlan, config: PrintConfig, support: SupportConfig) -> dict[str, Any]:
+def _support_to_json(anchor: Any, plan: SupportPlan | None, config: PrintConfig, support: SupportConfig) -> dict[str, Any]:
     base_x = anchor.base_x if anchor.base_x is not None else anchor.x
     base_y = anchor.base_y if anchor.base_y is not None else anchor.y
     joint_x = anchor.joint_x if anchor.joint_x is not None else anchor.x

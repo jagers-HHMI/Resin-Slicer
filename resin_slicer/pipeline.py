@@ -44,6 +44,7 @@ class SliceResult:
     support_count: int
     material_ml: float
     output_path: Path
+    preview_dir: str | None = None
 
 
 def slice_to_file(
@@ -52,6 +53,8 @@ def slice_to_file(
     fmt: str,
     progress: Progress | None = None,
     layer_workers: int | None = None,
+    preview_dir: str | None = None,
+    preview_scale: int = 1,
 ) -> SliceResult:
     config = job.print_config
     support_config = job.support_config
@@ -116,26 +119,20 @@ def slice_to_file(
 
     if progress:
         progress(f"writing {fmt}")
+    layer_gen = _layer_iter(prepared, model_prepared, config, support_config.enabled, support_plan, progress, layer_workers, cad_source)
+    if preview_dir:
+        layer_gen = _preview_writing_iter(layer_gen, preview_dir, preview_scale)
     if fmt == "goo":
-        stats = write_goo(
-            output,
-            config,
-            prepared.layer_count,
-            _layer_iter(prepared, model_prepared, config, support_config.enabled, support_plan, progress, layer_workers, cad_source),
-        )
+        stats = write_goo(output, config, prepared.layer_count, layer_gen)
     else:
-        stats = write_ctb(
-            output,
-            config,
-            prepared.layer_count,
-            _layer_iter(prepared, model_prepared, config, support_config.enabled, support_plan, progress, layer_workers, cad_source),
-        )
+        stats = write_ctb(output, config, prepared.layer_count, layer_gen)
 
     return SliceResult(
         layer_count=prepared.layer_count,
         support_count=len(support_plan.anchors),
         material_ml=stats.material_mm3 / 1000.0,
         output_path=output,
+        preview_dir=preview_dir,
     )
 
 
@@ -191,6 +188,19 @@ def _layer_iter(
                 progress(f"writing layer {layer_index + 1}/{total}")
             next_yield += 1
             yield layer_index, layer
+
+
+def _preview_writing_iter(
+    base_iter: Iterator[tuple[int, LayerRaster]],
+    preview_dir: str,
+    scale: int,
+) -> Iterator[tuple[int, LayerRaster]]:
+    for layer_index, layer in base_iter:
+        png = layer.to_png_bytes(scale)
+        path = os.path.join(preview_dir, f"layer_{layer_index + 1:05d}.png")
+        with open(path, "wb") as fh:
+            fh.write(png)
+        yield layer_index, layer
 
 
 def _render_layer(

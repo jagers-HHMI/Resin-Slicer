@@ -20,6 +20,11 @@ contextBridge.exposeInMainWorld("slicer", {
     ipcRenderer.on("slice:progress", listener);
     return () => ipcRenderer.removeListener("slice:progress", listener);
   },
+  onPreviewProgress: (callback) => {
+    const listener = (_event, message) => callback(message);
+    ipcRenderer.on("preview:progress", listener);
+    return () => ipcRenderer.removeListener("preview:progress", listener);
+  },
   onFileReadProgress: (callback) => {
     const listener = (_event, message) => callback(message);
     ipcRenderer.on("file:read-progress", listener);

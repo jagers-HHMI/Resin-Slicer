@@ -132,6 +132,13 @@
           </div>
           <div id="viewerToast" class="viewer-toast" hidden></div>
           <div id="loadProgressPanel" class="load-progress-panel" hidden></div>
+          <div id="slicePreviewPanel" class="slice-preview-panel" hidden>
+            <input id="slicePreviewScrollbar" class="slice-preview-scrollbar" type="range" min="1" max="100" step="1" value="1" aria-label="Preview layer">
+            <div id="slicePreviewViewport" class="slice-preview-viewport">
+              <img id="slicePreviewImage" class="slice-preview-image" alt="">
+            </div>
+            <div id="slicePreviewInfo" class="slice-preview-info"></div>
+          </div>
         </section>
       </section>
 
@@ -169,6 +176,7 @@
           <button id="sliceButton" class="primary" type="button">Slice</button>
           <button id="sliceAllButton" type="button">Slice All</button>
           <button id="saveAllButton" type="button">Save All</button>
+          <button id="viewSliceButton" type="button" disabled>View Slice Preview</button>
         </section>
 
         <div class="settings-stack">

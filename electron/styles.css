@@ -435,6 +435,69 @@ body {
   display: none;
 }
 
+.slice-preview-panel {
+  position: absolute;
+  inset: 0;
+  z-index: 9;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+  background: #0a0c0e;
+  overflow: hidden;
+}
+
+.slice-preview-panel[hidden] {
+  display: none;
+}
+
+.slice-preview-scrollbar {
+  flex: 0 0 auto;
+  width: 28px;
+  height: calc(100% - 24px);
+  min-height: 150px;
+  padding: 0;
+  margin: 12px 8px;
+  writing-mode: vertical-lr;
+  direction: rtl;
+  align-self: center;
+}
+
+.slice-preview-viewport {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.slice-preview-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+  transform-origin: center center;
+  cursor: default;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.slice-preview-image.dragging {
+  cursor: grabbing;
+}
+
+.slice-preview-info {
+  position: absolute;
+  left: 50px;
+  bottom: 14px;
+  background: rgba(17, 20, 24, 0.84);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  padding: 7px 9px;
+  font-size: 13px;
+  color: #d9e1e8;
+  pointer-events: none;
+}
+
 .load-progress-item {
   display: grid;
   gap: 5px;

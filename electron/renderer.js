@@ -198,6 +198,15 @@ const defaultSupportPresets = {
   }
 };
 let supportPresets = cloneSettings(defaultSupportPresets);
+let dragState = null;
+let isGeneratingSupports = false;
+let isBusy = false;
+let slicePreviewActive = false;
+let previewLayerCache = new Map();
+let previewZoom = 1.0;
+let previewPanX = 0;
+let previewPanY = 0;
+let previewDragStart = null;
 
 async function init() {
   viewer = new Viewer($("viewer"));
@@ -254,6 +263,45 @@ async function init() {
   $("previewButton").addEventListener("click", generatePreview);
   $("sliceButton").addEventListener("click", slice);
   $("sliceAllButton").addEventListener("click", sliceAll);
+  $("viewSliceButton").addEventListener("click", toggleSlicePreview);
+  $("slicePreviewScrollbar").addEventListener("input", () => {
+    if (slicePreviewActive) setActivePlateClipLayer(Number($("slicePreviewScrollbar").value));
+  });
+  $("slicePreviewViewport").addEventListener("wheel", (event) => {
+    if (!slicePreviewActive) return;
+    event.preventDefault();
+    if (event.ctrlKey || event.metaKey) {
+      const rect = $("slicePreviewViewport").getBoundingClientRect();
+      const cx = event.clientX - rect.left - rect.width / 2;
+      const cy = event.clientY - rect.top - rect.height / 2;
+      const factor = event.deltaY > 0 ? 1 / 1.12 : 1.12;
+      previewPanX = cx - (cx - previewPanX) * factor;
+      previewPanY = cy - (cy - previewPanY) * factor;
+      previewZoom = Math.max(0.5, Math.min(20, previewZoom * factor));
+      applyPreviewTransform();
+    } else {
+      const step = event.shiftKey ? 10 : 1;
+      stepActiveClipLayer(event.deltaY > 0 ? -step : step);
+    }
+  }, { passive: false });
+  $("slicePreviewViewport").addEventListener("mousedown", (event) => {
+    if (!slicePreviewActive || event.button !== 0) return;
+    previewDragStart = { x: event.clientX - previewPanX, y: event.clientY - previewPanY };
+    $("slicePreviewImage").classList.add("dragging");
+    event.preventDefault();
+  });
+  $("slicePreviewViewport").addEventListener("mousemove", (event) => {
+    if (!previewDragStart) return;
+    previewPanX = event.clientX - previewDragStart.x;
+    previewPanY = event.clientY - previewDragStart.y;
+    applyPreviewTransform();
+  });
+  const endPreviewDrag = () => {
+    previewDragStart = null;
+    $("slicePreviewImage").classList.remove("dragging");
+  };
+  $("slicePreviewViewport").addEventListener("mouseup", endPreviewDrag);
+  $("slicePreviewViewport").addEventListener("mouseleave", endPreviewDrag);
   $("saveAllButton").addEventListener("click", saveAll);
   $("profile").addEventListener("change", () => {
     loadProfileDefaults();
@@ -1206,6 +1254,9 @@ function createBuildPlate(name, settings) {
     clipHeight: Number(settings.printer.sizeZ) || 160,
     clipEnabled: false,
     layersGenerated: false,
+    sliced: false,
+    sliceLayerCount: 0,
+    previewDir: null,
     supports: [],
     supportBraces: [],
     supportRaft: null,
@@ -1478,7 +1529,7 @@ function titleCase(value) {
 }
 
 function updatePlateControls(plate) {
-  const maxLayer = plateMaxLayer(plate);
+  const maxLayer = plateOccupiedMaxLayer(plate);
   const layer = clipHeightToLayer(plate, plate.clipHeight);
   $("clipHeight").min = 1;
   $("clipHeight").max = maxLayer;
@@ -2305,6 +2356,16 @@ function centerViewOnModel(modelId) {
 function handleModelDrag(drag) {
   const selection = selectedModels();
   if (!selection.length) return;
+  if (!dragState) {
+    dragState = {
+      type: "move-xy",
+      totalAngleDeg: 0,
+      snapshots: new Map(selection.map((m) => [m.id, {
+        translateX: m.transform.translateX,
+        translateY: m.transform.translateY
+      }]))
+    };
+  }
   for (const model of selection) {
     model.transform.translateX += drag.x;
     model.transform.translateY += drag.y;
@@ -2317,7 +2378,51 @@ function handleModelDragEnd() {
   const selection = selectedModels();
   if (!selection.length) return;
   snapModelsToDropOffset(selection);
-  invalidateGeneratedLayersForSelection(selection);
+  const state = dragState;
+  dragState = null;
+  if (state?.type === "move-xy") {
+    for (const model of selection) {
+      const plate = buildPlates.find((p) => p.id === model.plateId);
+      const snap = state.snapshots?.get(model.id);
+      if (!plate || !snap || (!plate.supports?.length && !plate.supportBraces?.length)) continue;
+      const dx = model.transform.translateX - snap.translateX;
+      const dy = model.transform.translateY - snap.translateY;
+      if (dx === 0 && dy === 0) continue;
+      const cur = expandedModelPlateBounds(model, plate, 2.5);
+      const oldBounds = { minX: cur.minX - dx, maxX: cur.maxX - dx, minY: cur.minY - dy, maxY: cur.maxY - dy, minZ: cur.minZ, maxZ: cur.maxZ };
+      plate.supports = plate.supports.map((s) => supportInsidePlateBounds(s, oldBounds) ? translateSupport(s, dx, dy) : s);
+      plate.supportBraces = plate.supportBraces.map((b) => braceInsidePlateBounds(b, oldBounds) ? translateBrace(b, dx, dy) : b);
+      plate.layersGenerated = false;
+      plate.supportRaft = null;
+    }
+  } else if (state?.type === "rotate-z") {
+    const angleRad = (state.totalAngleDeg ?? 0) * Math.PI / 180;
+    const cos = Math.cos(angleRad);
+    const sin = Math.sin(angleRad);
+    for (const model of selection) {
+      const plate = buildPlates.find((p) => p.id === model.plateId);
+      const snap = state.snapshots?.get(model.id);
+      if (!plate || !snap || (!plate.supports?.length && !plate.supportBraces?.length)) continue;
+      const savedRX = model.transform.rotateX, savedRY = model.transform.rotateY, savedRZ = model.transform.rotateZ;
+      model.transform.rotateX = snap.rotateX ?? savedRX;
+      model.transform.rotateY = snap.rotateY ?? savedRY;
+      model.transform.rotateZ = snap.rotateZ ?? savedRZ;
+      model.renderMesh = null;
+      const oldBounds = expandedModelPlateBounds(model, plate, 2.5);
+      const [cx, cy] = snap.plateCenter ?? modelPlateCenter(model, plate);
+      model.transform.rotateX = savedRX;
+      model.transform.rotateY = savedRY;
+      model.transform.rotateZ = savedRZ;
+      model.renderMesh = null;
+      plate.supports = plate.supports.map((s) => supportInsidePlateBounds(s, oldBounds) ? rotateSupportAround(s, cx, cy, cos, sin) : s);
+      plate.supportBraces = plate.supportBraces.map((b) => braceInsidePlateBounds(b, oldBounds) ? rotateBraceAround(b, cx, cy, cos, sin) : b);
+      plate.layersGenerated = false;
+      plate.supportRaft = null;
+    }
+  } else {
+    removeSupportStructureForModels(selection);
+    invalidateGeneratedLayersForSelection(selection);
+  }
   updatePlacementFieldsFromSelection();
   renderWorkspaceLists();
   updateScene();
@@ -2337,6 +2442,26 @@ function handleGizmoDrag(drag) {
   const translatesModel = drag.action.startsWith("move-");
   const rotatesModel = drag.action.startsWith("rotate-");
   const rotationDelta = rotatesModel ? viewer.gizmoRotationDelta(drag) : 0;
+  if (!dragState) {
+    const isXYOnly = drag.action === "move-x" || drag.action === "move-y" || drag.action === "move-xy";
+    const isZRotOnly = drag.action === "rotate-z";
+    const type = isXYOnly ? "move-xy" : (isZRotOnly ? "rotate-z" : "other");
+    dragState = {
+      type,
+      totalAngleDeg: 0,
+      snapshots: new Map(selection.map((m) => {
+        const plate = buildPlates.find((p) => p.id === m.plateId);
+        return [m.id, {
+          translateX: m.transform.translateX,
+          translateY: m.transform.translateY,
+          rotateX: m.transform.rotateX,
+          rotateY: m.transform.rotateY,
+          rotateZ: m.transform.rotateZ,
+          plateCenter: plate ? modelPlateCenter(m, plate) : [0, 0, 0]
+        }];
+      }))
+    };
+  }
   for (const model of selection) {
     if (drag.action === "move-x") model.transform.translateX += planeDelta.x;
     if (drag.action === "move-y") model.transform.translateY += planeDelta.y;
@@ -2357,6 +2482,9 @@ function handleGizmoDrag(drag) {
     if (drag.action === "rotate-y") applyGlobalRotationToTransform(model.transform, "y", -rotationDelta);
     if (drag.action === "rotate-z") applyGlobalRotationToTransform(model.transform, "z", rotationDelta);
     if (translatesModel) maybeMoveModelToPlateByCentroid(model);
+  }
+  if (drag.action === "rotate-z" && dragState?.type === "rotate-z") {
+    dragState.totalAngleDeg += rotationDelta;
   }
   requestSceneUpdate({ renderLists: false, updateStatus: false, skipDerivedGeometry: true });
 }
@@ -2403,6 +2531,13 @@ function applyPlacementFieldToSelected(fieldId) {
     || key === "translateZ"
     || key === "scale"
     || rotatesModel;
+  const priorTransforms = new Map(selection.map((m) => [m.id, {
+    translateX: m.transform.translateX,
+    translateY: m.transform.translateY,
+    rotateX: m.transform.rotateX,
+    rotateY: m.transform.rotateY,
+    rotateZ: m.transform.rotateZ
+  }]));
   for (const model of selection) {
     if (key === "translateX" || key === "translateY" || key === "translateZ") {
       model.transform[key] = value;
@@ -2414,7 +2549,73 @@ function applyPlacementFieldToSelected(fieldId) {
     maybeMoveModelToPlateByCentroid(model);
   }
   if (transformsModel) snapModelsToDropOffset(selection);
-  invalidateGeneratedLayersForSelection(selection);
+  const isXYTranslate = key === "translateX" || key === "translateY";
+  const isZRotate = key === "rotateZ";
+  if (isXYTranslate) {
+    for (const model of selection) {
+      const plate = buildPlates.find((p) => p.id === model.plateId);
+      const prior = priorTransforms.get(model.id);
+      if (!plate || !prior || (!plate.supports?.length && !plate.supportBraces?.length)) continue;
+      const dx = key === "translateX" ? value - prior.translateX : 0;
+      const dy = key === "translateY" ? value - prior.translateY : 0;
+      if (dx === 0 && dy === 0) continue;
+      const cur = expandedModelPlateBounds(model, plate, 2.5);
+      const oldBounds = { minX: cur.minX - dx, maxX: cur.maxX - dx, minY: cur.minY - dy, maxY: cur.maxY - dy, minZ: cur.minZ, maxZ: cur.maxZ };
+      plate.supports = plate.supports.map((s) => supportInsidePlateBounds(s, oldBounds) ? translateSupport(s, dx, dy) : s);
+      plate.supportBraces = plate.supportBraces.map((b) => braceInsidePlateBounds(b, oldBounds) ? translateBrace(b, dx, dy) : b);
+      plate.layersGenerated = false;
+      plate.supportRaft = null;
+    }
+  } else if (isZRotate) {
+    for (const model of selection) {
+      const plate = buildPlates.find((p) => p.id === model.plateId);
+      const prior = priorTransforms.get(model.id);
+      if (!plate || !prior || (!plate.supports?.length && !plate.supportBraces?.length)) continue;
+      const dAngleDeg = value - prior.rotateZ;
+      if (Math.abs(dAngleDeg) < 0.0001) continue;
+      const savedRX = model.transform.rotateX, savedRY = model.transform.rotateY, savedRZ = model.transform.rotateZ;
+      model.transform.rotateX = prior.rotateX;
+      model.transform.rotateY = prior.rotateY;
+      model.transform.rotateZ = prior.rotateZ;
+      model.renderMesh = null;
+      const oldBounds = expandedModelPlateBounds(model, plate, 2.5);
+      const center = modelPlateCenter(model, plate);
+      model.transform.rotateX = savedRX;
+      model.transform.rotateY = savedRY;
+      model.transform.rotateZ = savedRZ;
+      model.renderMesh = null;
+      const cos = Math.cos(dAngleDeg * Math.PI / 180);
+      const sin = Math.sin(dAngleDeg * Math.PI / 180);
+      plate.supports = plate.supports.map((s) => supportInsidePlateBounds(s, oldBounds) ? rotateSupportAround(s, center[0], center[1], cos, sin) : s);
+      plate.supportBraces = plate.supportBraces.map((b) => braceInsidePlateBounds(b, oldBounds) ? rotateBraceAround(b, center[0], center[1], cos, sin) : b);
+      plate.layersGenerated = false;
+      plate.supportRaft = null;
+    }
+  } else if (transformsModel) {
+    for (const model of selection) {
+      const plate = buildPlates.find((p) => p.id === model.plateId);
+      const prior = priorTransforms.get(model.id);
+      if (!plate || !prior) continue;
+      const savedTX = model.transform.translateX, savedTY = model.transform.translateY;
+      const savedRX = model.transform.rotateX, savedRY = model.transform.rotateY, savedRZ = model.transform.rotateZ;
+      const savedScale = model.transform.scale;
+      model.transform.translateX = prior.translateX;
+      model.transform.translateY = prior.translateY;
+      model.transform.rotateX = prior.rotateX;
+      model.transform.rotateY = prior.rotateY;
+      model.transform.rotateZ = prior.rotateZ;
+      model.renderMesh = null;
+      removeSupportStructureForModels([model]);
+      model.transform.translateX = savedTX;
+      model.transform.translateY = savedTY;
+      model.transform.rotateX = savedRX;
+      model.transform.rotateY = savedRY;
+      model.transform.rotateZ = savedRZ;
+      model.transform.scale = savedScale;
+      model.renderMesh = null;
+    }
+    invalidateGeneratedLayersForSelection(selection);
+  }
   renderWorkspaceLists();
   if (transformsModel) updatePlacementFieldsFromSelection();
 }
@@ -2555,6 +2756,25 @@ function translateBrace(brace, dx, dy) {
 
 function translateCoord(value, delta) {
   return Number.isFinite(value) ? value + delta : value;
+}
+
+function rotatePoint2d(x, y, cx, cy, cos, sin) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return { x, y };
+  const dx = x - cx, dy = y - cy;
+  return { x: cx + dx * cos - dy * sin, y: cy + dx * sin + dy * cos };
+}
+
+function rotateSupportAround(support, cx, cy, cos, sin) {
+  const tip = rotatePoint2d(support.x, support.y, cx, cy, cos, sin);
+  const base = rotatePoint2d(support.baseX ?? support.x, support.baseY ?? support.y, cx, cy, cos, sin);
+  const joint = rotatePoint2d(support.jointX ?? support.x, support.jointY ?? support.y, cx, cy, cos, sin);
+  return { ...cloneSettings(support), x: tip.x, y: tip.y, baseX: base.x, baseY: base.y, jointX: joint.x, jointY: joint.y };
+}
+
+function rotateBraceAround(brace, cx, cy, cos, sin) {
+  const p0 = rotatePoint2d(brace.x0, brace.y0, cx, cy, cos, sin);
+  const p1 = rotatePoint2d(brace.x1, brace.y1, cx, cy, cos, sin);
+  return { ...cloneSettings(brace), x0: p0.x, y0: p0.y, x1: p1.x, y1: p1.y };
 }
 
 function maybeMoveModelToPlateByCentroid(model) {
@@ -2975,8 +3195,47 @@ async function generatePreview() {
   const plate = activePlate();
   playSound("click-crisp");
   setBusy(true);
+  isGeneratingSupports = true;
+  $("supportStatus").textContent = `Generating supports for ${plate.name}...`;
   log(`Generating supports for ${plate.name}...`);
+
+  // Show supports as the Python analysis emits them, throttled so we are not
+  // rebuilding the scene geometry on every single anchor.
+  const streamed = [];
+  let pendingRender = false;
+  let lastRenderAt = 0;
+  const flushStreamed = () => {
+    pendingRender = false;
+    lastRenderAt = performance.now();
+    // Suppress any late-firing throttled render once generation has finished
+    // (the authoritative result has already been rendered by then).
+    if (!isGeneratingSupports || activePlate().id !== plate.id) return;
+    plate.supports = streamed.slice();
+    $("supportStatus").textContent = `Generating supports for ${plate.name}... ${streamed.length.toLocaleString()}`;
+    updateScene();
+  };
+  const scheduleRender = () => {
+    if (pendingRender) return;
+    pendingRender = true;
+    const wait = Math.max(0, 120 - (performance.now() - lastRenderAt));
+    setTimeout(() => {
+      if (pendingRender) flushStreamed();
+    }, wait);
+  };
+  const stopListening = window.slicer.onPreviewProgress((message) => {
+    if (!message) return;
+    if (message.type === "support" && message.support) {
+      streamed.push(message.support);
+      scheduleRender();
+    } else if (message.type === "progress" && message.message) {
+      if (!streamed.length) $("supportStatus").textContent = `Generating supports for ${plate.name}...`;
+    }
+  });
+
   try {
+    plate.supports = [];
+    plate.supportBraces = [];
+    plate.supportRaft = null;
     const result = await window.slicer.preview(collectPayloadForPlate(plate));
     plate.supports = result.supports || [];
     plate.supportBraces = result.braces || [];
@@ -2987,9 +3246,12 @@ async function generatePreview() {
     log(`Generated ${plate.name}: ${result.layers} layers, ${plate.supports.length} supports, ${plate.supportBraces.length} braces`);
     playSound("success");
   } catch (error) {
+    $("supportStatus").textContent = "Support generation failed";
     log(`Generate supports failed: ${error.message}`);
     showErrorPrompt("Generate Supports Failed", error);
   } finally {
+    stopListening();
+    isGeneratingSupports = false;
     setBusy(false);
   }
 }
@@ -3036,6 +3298,9 @@ async function slicePlates(platesToSlice, { forceSuffix = false, label = "Slicin
       log(`Slicing ${plate.name}...`);
       const result = await window.slicer.slice(payload);
       plate.layersGenerated = true;
+      plate.sliced = true;
+      plate.sliceLayerCount = result.layers || 0;
+      plate.previewDir = result.previewDir || null;
       log(`Done ${plate.name}: ${result.outputPath}`);
       log(`${result.layers} layers, ${result.supports} supports, ${result.materialMl.toFixed(2)} ml resin`);
     }
@@ -3505,24 +3770,40 @@ function updateScene({ renderLists = true, updateStatus = true, skipDerivedGeome
   $("meshStatus").textContent = selectedModelIds.size
     ? `${selectedModelIds.size.toLocaleString()} model${selectedModelIds.size === 1 ? "" : "s"} selected`
     : `${activeModels.length.toLocaleString()} object${activeModels.length === 1 ? "" : "s"} on ${active.name}`;
+  if (slicePreviewActive && !active.sliced) {
+    slicePreviewActive = false;
+    previewDragStart = null;
+    resetPreviewTransform();
+    $("slicePreviewPanel").hidden = true;
+    $("slicePreviewImage").src = "";
+    $("viewSliceButton").textContent = "View Slice Preview";
+  }
   if (active.layersGenerated) {
     $("supportStatus").textContent = `${active.supports.length.toLocaleString()} supports generated`;
+  } else if (isGeneratingSupports) {
+    // preserve the "Generating supports..." text set by generatePreview
   } else if (activeModels.some((model) => modelOutOfBounds(model, active))) {
     $("supportStatus").textContent = "Active plate has out-of-bounds geometry";
   } else {
     $("supportStatus").textContent = "Layer/support preview stale";
   }
+  if (!isBusy) $("viewSliceButton").disabled = !active.sliced;
 }
 
 function setActivePlateClipLayer(value) {
   const plate = activePlate();
-  const layer = clamp(Math.round(Number.isFinite(value) ? value : clipHeightToLayer(plate, plate.clipHeight)), 1, plateMaxLayer(plate));
+  const maxLayer = slicePreviewActive ? plateOccupiedMaxLayer(plate) : plateMaxLayer(plate);
+  const layer = clamp(Math.round(Number.isFinite(value) ? value : clipHeightToLayer(plate, plate.clipHeight)), 1, maxLayer);
   plate.clipEnabled = true;
   plate.clipHeight = layerToClipHeight(plate, layer);
   $("clipHeight").value = layer;
   $("clipHeightValue").value = layer;
   $("clipEnabled").checked = true;
-  updateScene();
+  if (slicePreviewActive) {
+    loadPreviewLayer(layer);
+  } else {
+    updateScene();
+  }
 }
 
 function setActivePlateClipHeight(value) {
@@ -3565,6 +3846,17 @@ function plateLayerHeight(plate) {
 
 function plateMaxLayer(plate) {
   return Math.max(1, Math.ceil((plate?.settings?.printer?.sizeZ || 160) / plateLayerHeight(plate)));
+}
+
+function plateOccupiedMaxLayer(plate) {
+  if (plate.sliceLayerCount) return plate.sliceLayerCount;
+  const plateModels = models.filter((m) => m.plateId === plate.id);
+  if (!plateModels.length) return plateMaxLayer(plate);
+  const zValues = plateModels.map((m) => modelWorldBounds(m).maxZ).filter(Number.isFinite);
+  if (!zValues.length) return plateMaxLayer(plate);
+  const maxZ = Math.max(...zValues);
+  if (maxZ <= 0) return plateMaxLayer(plate);
+  return Math.max(1, Math.ceil(maxZ / plateLayerHeight(plate)));
 }
 
 function buildScene({ skipDerivedGeometry = false } = {}) {
@@ -4029,24 +4321,49 @@ function makeSupportRaftGeometry(raft) {
   }
   const width = x1 - x0;
   const depth = y1 - y0;
-  const z = Math.max(0.22, Number(raft.thickness) || 0.35) + 0.08;
+  // Render the raft as a real slab sitting on the plate (z=0 up to its
+  // thickness) so it is clearly visible rather than a flat translucent film.
+  const topZ = Math.max(0.4, Number(raft.thickness) || 0.35);
   const radius = Math.max(1.2, Math.min(width, depth) * 0.045);
   const path = roundedRectPath(x0, y0, x1, y1, radius, 9);
-  const center = [(x0 + x1) / 2, (y0 + y1) / 2, z];
+  const cx = (x0 + x1) / 2;
+  const cy = (y0 + y1) / 2;
+  const center = [cx, cy, topZ];
   const vertices = [];
   const normals = [];
+  // Top face (fan), facing up.
   for (let i = 0; i < path.length; i++) {
     const next = (i + 1) % path.length;
     pushTri(
       vertices,
       normals,
       center,
-      [path[i][0], path[i][1], z],
-      [path[next][0], path[next][1], z],
+      [path[i][0], path[i][1], topZ],
+      [path[next][0], path[next][1], topZ],
       [0, 0, 1],
       [0, 0, 1],
       [0, 0, 1]
     );
+  }
+  // Perimeter walls from the plate up to the top face.
+  for (let i = 0; i < path.length; i++) {
+    const next = (i + 1) % path.length;
+    const ax = path[i][0];
+    const ay = path[i][1];
+    const bx = path[next][0];
+    const by = path[next][1];
+    let nx = ay - by;
+    let ny = bx - ax;
+    const len = Math.hypot(nx, ny) || 1;
+    nx /= len;
+    ny /= len;
+    if (nx * ((ax + bx) / 2 - cx) + ny * ((ay + by) / 2 - cy) < 0) {
+      nx = -nx;
+      ny = -ny;
+    }
+    const n = [nx, ny, 0];
+    pushTri(vertices, normals, [ax, ay, 0], [bx, by, 0], [bx, by, topZ], n, n, n);
+    pushTri(vertices, normals, [ax, ay, 0], [bx, by, topZ], [ax, ay, topZ], n, n, n);
   }
   return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
 }
@@ -4197,12 +4514,90 @@ function nextFrame() {
   return new Promise((resolve) => requestAnimationFrame(resolve));
 }
 
+function applyPreviewTransform() {
+  $("slicePreviewImage").style.transform = `translate(${previewPanX}px, ${previewPanY}px) scale(${previewZoom})`;
+}
+
+function resetPreviewTransform() {
+  previewZoom = 1.0;
+  previewPanX = 0;
+  previewPanY = 0;
+  $("slicePreviewImage").style.transform = "";
+}
+
+function uint8ArrayToDataUrl(bytes) {
+  const chunks = [];
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    chunks.push(String.fromCharCode(...bytes.subarray(i, i + chunkSize)));
+  }
+  return "data:image/png;base64," + btoa(chunks.join(""));
+}
+
+async function loadPreviewLayer(layer) {
+  const plate = activePlate();
+  if (!plate.previewDir || !plate.sliceLayerCount) return;
+  const clamped = clamp(layer, 1, plate.sliceLayerCount);
+  $("slicePreviewInfo").textContent = `Layer ${clamped} / ${plate.sliceLayerCount}`;
+  $("slicePreviewScrollbar").value = clamped;
+  if (previewLayerCache.has(clamped)) {
+    $("slicePreviewImage").src = previewLayerCache.get(clamped);
+    return;
+  }
+  const padded = String(clamped).padStart(5, "0");
+  const path = `${plate.previewDir}/layer_${padded}.png`.replace(/\\/g, "/");
+  try {
+    const buffer = await window.slicer.readFile(path);
+    if (!buffer || !buffer.byteLength) return;
+    const dataUrl = uint8ArrayToDataUrl(new Uint8Array(buffer));
+    previewLayerCache.set(clamped, dataUrl);
+    if (slicePreviewActive) $("slicePreviewImage").src = dataUrl;
+  } catch (_e) {
+    // layer file unavailable
+  }
+}
+
+function enterSlicePreview() {
+  const plate = activePlate();
+  if (!plate.sliced || !plate.previewDir) return;
+  slicePreviewActive = true;
+  previewLayerCache.clear();
+  resetPreviewTransform();
+  const scrollbar = $("slicePreviewScrollbar");
+  scrollbar.min = 1;
+  scrollbar.max = plate.sliceLayerCount;
+  $("slicePreviewPanel").hidden = false;
+  $("viewSliceButton").textContent = "Close Slice Preview";
+  updatePlateControls(plate);
+  loadPreviewLayer(clipHeightToLayer(plate, plate.clipHeight));
+}
+
+function exitSlicePreview() {
+  slicePreviewActive = false;
+  previewDragStart = null;
+  resetPreviewTransform();
+  $("slicePreviewPanel").hidden = true;
+  $("slicePreviewImage").src = "";
+  $("viewSliceButton").textContent = "View Slice Preview";
+  updateScene();
+}
+
+function toggleSlicePreview() {
+  if (slicePreviewActive) {
+    exitSlicePreview();
+  } else {
+    enterSlicePreview();
+  }
+}
+
 function setBusy(busy) {
+  isBusy = busy;
   $("previewButton").disabled = busy;
   $("saveProjectButton").disabled = busy;
   $("sliceButton").disabled = busy;
   $("sliceAllButton").disabled = busy;
   $("saveAllButton").disabled = busy;
+  $("viewSliceButton").disabled = busy || !activePlate().sliced;
 }
 
 function parseMesh(path, bytes) {
@@ -5055,7 +5450,7 @@ class Viewer {
       : null;
     this.meshes.supports = makeMesh(this.gl, makeSupportGeometry(scene.supports, scene.supportBraces), [1.0, 0.63, 0.18, 1], this.gl.TRIANGLES);
     this.meshes.supportRaft = scene.supportRaft
-      ? makeMesh(this.gl, makeSupportRaftGeometry(scene.supportRaft), [1.0, 0.64, 0.18, scene.supportRaft.type === "skate" ? 0.28 : 0.36], this.gl.TRIANGLES, { unlit: true })
+      ? makeMesh(this.gl, makeSupportRaftGeometry(scene.supportRaft), [1.0, 0.62, 0.16, scene.supportRaft.type === "skate" ? 0.45 : 0.62], this.gl.TRIANGLES)
       : null;
     this.meshes.clipPlane = scene.clip.enabled ? {
       surface: makeMesh(this.gl, makeClipPlaneSurfaceGeometry(scene.clip.plate, scene.clip.z), [1.0, 0.86, 0.16, 0.2], this.gl.TRIANGLES, { unlit: true }),

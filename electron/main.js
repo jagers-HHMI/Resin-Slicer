@@ -234,7 +234,9 @@ ipcMain.handle("uvtools:read-printer", async (_event, printerPath) => {
 });
 
 ipcMain.handle("bridge:profiles", async () => runBridge("profiles", {}));
-ipcMain.handle("bridge:preview", async (_event, payload) => runBridge("preview", payload));
+ipcMain.handle("bridge:preview", async (event, payload) => {
+  return runBridge("preview", payload, (message) => event.sender.send("preview:progress", message));
+});
 ipcMain.handle("bridge:slice", async (event, payload) => {
   return runBridge("slice", payload, (message) => event.sender.send("slice:progress", message));
 });
@@ -395,7 +397,7 @@ function runBridge(command, payload, onMessage) {
         stderr += line + "\n";
         return;
       }
-      if (message.type === "progress" && onMessage) {
+      if ((message.type === "progress" || message.type === "support") && onMessage) {
         onMessage(message);
       } else {
         finalPayload = message;

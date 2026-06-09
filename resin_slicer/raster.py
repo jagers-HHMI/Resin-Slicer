@@ -185,6 +185,33 @@ class LayerRaster:
         return components
 
 
+    def to_png_bytes(self, scale: int = 1) -> bytes:
+        import struct, zlib
+
+        out_w = max(1, self.width // scale)
+        out_h = max(1, self.height // scale)
+        src = self.pixels
+        src_w = self.width
+        raw = bytearray(out_h * (out_w + 1))
+        for py in range(out_h):
+            row_off = py * (out_w + 1)
+            raw[row_off] = 0
+            src_row = py * scale * src_w
+            for px in range(out_w):
+                raw[row_off + 1 + px] = 255 if src[src_row + px * scale] else 0
+        compressed = zlib.compress(bytes(raw), 1)
+
+        def chunk(tag: bytes, data: bytes) -> bytes:
+            return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
+
+        return (
+            b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack(">IIBBBBB", out_w, out_h, 8, 0, 0, 0, 0))
+            + chunk(b"IDAT", compressed)
+            + chunk(b"IEND", b"")
+        )
+
+
 def dilate_mask(layer: LayerRaster, radius: int) -> bytearray:
     width = layer.width
     height = layer.height
