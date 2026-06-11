@@ -68,33 +68,7 @@ def slice_to_file(
     )
     mesh = apply_transform(job.mesh, orientation)
     model_lift = support_config.model_lift_mm if support_config.enabled else 0.0
-    prepared = prepare_mesh(
-        mesh,
-        config,
-        z_offset_mm=model_lift + job.transform.translate_z_mm,
-        xy_offset_mm=(job.transform.translate_x_mm, job.transform.translate_y_mm),
-        preserve_coordinates=job.preserve_coordinates,
-    )
-    model_prepared: PreparedMesh | None = prepared
-    if job.raster_mesh is not None:
-        raster_mesh = apply_transform(job.raster_mesh, orientation)
-        model_prepared = prepare_mesh(
-            raster_mesh,
-            config,
-            z_offset_mm=model_lift + job.transform.translate_z_mm,
-            xy_offset_mm=(job.transform.translate_x_mm, job.transform.translate_y_mm),
-            preserve_coordinates=job.preserve_coordinates,
-        )
-    elif job.cad_slice_mode == "brep" and job.cad_models:
-        model_prepared = None
-    cad_source = None
-    if job.cad_slice_mode == "brep" and job.cad_models:
-        if prepare_cad_slice_source is None:
-            raise FormatError("B-rep slicing requires OpenCascade/build123d")
-        cad_source = prepare_cad_slice_source(
-            job.cad_models,
-            z_offset_mm=model_lift + job.transform.translate_z_mm,
-        )
+    prepared, model_prepared, cad_source = _prepare_slice_sources(job, mesh, orientation, config, model_lift)
     output = Path(output_path)
     fmt = fmt.lower().lstrip(".")
     if fmt not in {"goo", "ctb"}:
@@ -104,6 +78,7 @@ def slice_to_file(
         progress(f"prepared mesh: {prepared.layer_count} layers")
 
     support_plan = SupportPlan((), 0, 0, 0, 0.0, 0)
+    supports_enabled = support_config.enabled
     if support_config.enabled:
         if progress:
             progress("planning supports")
@@ -116,10 +91,16 @@ def slice_to_file(
         )
         if progress:
             progress(f"planned {len(support_plan.anchors)} supports")
+        supports_enabled = _support_plan_has_geometry(support_plan)
+        if not supports_enabled and model_lift > 0:
+            if progress:
+                progress("no support structure generated; dropping model to build plate")
+            model_lift = 0.0
+            prepared, model_prepared, cad_source = _prepare_slice_sources(job, mesh, orientation, config, model_lift)
 
     if progress:
         progress(f"writing {fmt}")
-    layer_gen = _layer_iter(prepared, model_prepared, config, support_config.enabled, support_plan, progress, layer_workers, cad_source)
+    layer_gen = _layer_iter(prepared, model_prepared, config, supports_enabled, support_plan, progress, layer_workers, cad_source)
     if preview_dir:
         layer_gen = _preview_writing_iter(layer_gen, preview_dir, preview_scale)
     if fmt == "goo":
@@ -134,6 +115,46 @@ def slice_to_file(
         output_path=output,
         preview_dir=preview_dir,
     )
+
+
+def _prepare_slice_sources(
+    job: SliceJob,
+    mesh: Mesh,
+    orientation: MeshTransform,
+    config: PrintConfig,
+    model_lift: float,
+) -> tuple[PreparedMesh, PreparedMesh | None, CadSliceSource | None]:
+    z_offset = model_lift + job.transform.translate_z_mm
+    prepared = prepare_mesh(
+        mesh,
+        config,
+        z_offset_mm=z_offset,
+        xy_offset_mm=(job.transform.translate_x_mm, job.transform.translate_y_mm),
+        preserve_coordinates=job.preserve_coordinates,
+    )
+    model_prepared: PreparedMesh | None = prepared
+    if job.raster_mesh is not None:
+        raster_mesh = apply_transform(job.raster_mesh, orientation)
+        model_prepared = prepare_mesh(
+            raster_mesh,
+            config,
+            z_offset_mm=z_offset,
+            xy_offset_mm=(job.transform.translate_x_mm, job.transform.translate_y_mm),
+            preserve_coordinates=job.preserve_coordinates,
+        )
+    elif job.cad_slice_mode == "brep" and job.cad_models:
+        model_prepared = None
+
+    cad_source = None
+    if job.cad_slice_mode == "brep" and job.cad_models:
+        if prepare_cad_slice_source is None:
+            raise FormatError("B-rep slicing requires OpenCascade/build123d")
+        cad_source = prepare_cad_slice_source(job.cad_models, z_offset_mm=z_offset)
+    return prepared, model_prepared, cad_source
+
+
+def _support_plan_has_geometry(plan: SupportPlan) -> bool:
+    return bool(plan.anchors or plan.braces or plan.raft_mask)
 
 
 def _progress_interval(total: int) -> int:

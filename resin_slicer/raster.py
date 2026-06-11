@@ -188,17 +188,30 @@ class LayerRaster:
     def to_png_bytes(self, scale: int = 1) -> bytes:
         import struct, zlib
 
-        out_w = max(1, self.width // scale)
-        out_h = max(1, self.height // scale)
+        scale = max(1, int(scale))
+        out_w = max(1, ceil(self.width / scale))
+        out_h = max(1, ceil(self.height / scale))
         src = self.pixels
         src_w = self.width
         raw = bytearray(out_h * (out_w + 1))
         for py in range(out_h):
             row_off = py * (out_w + 1)
             raw[row_off] = 0
-            src_row = py * scale * src_w
-            for px in range(out_w):
-                raw[row_off + 1 + px] = 255 if src[src_row + px * scale] else 0
+            y0 = py * scale
+            y1 = min(self.height, y0 + scale)
+            out_row_start = row_off + 1
+            for sy in range(y0, y1):
+                src_row_start = sy * src_w
+                src_row_end = src_row_start + src_w
+                span_start = src.find(255, src_row_start, src_row_end)
+                while span_start != -1:
+                    span_end = src.find(0, span_start, src_row_end)
+                    if span_end == -1:
+                        span_end = src_row_end
+                    out_x0 = (span_start - src_row_start) // scale
+                    out_x1 = (span_end - 1 - src_row_start) // scale
+                    raw[out_row_start + out_x0 : out_row_start + out_x1 + 1] = b"\xff" * (out_x1 - out_x0 + 1)
+                    span_start = src.find(255, span_end, src_row_end)
         compressed = zlib.compress(bytes(raw), 1)
 
         def chunk(tag: bytes, data: bytes) -> bytes:

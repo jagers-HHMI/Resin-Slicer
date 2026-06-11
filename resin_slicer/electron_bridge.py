@@ -84,6 +84,16 @@ def _preview(request: dict[str, Any]) -> None:
             include_raft_mask=False,
             on_anchor=_emit_support,
         )
+        if not _preview_support_has_geometry(plan, support) and model_lift > 0:
+            model_lift = 0.0
+            prepared = prepare_mesh(
+                mesh,
+                config,
+                z_offset_mm=transform.translate_z_mm,
+                xy_offset_mm=(transform.translate_x_mm, transform.translate_y_mm),
+                preserve_coordinates=has_model_entries,
+            )
+            plan = SupportPlan((), 0, 0, 0, 0.0, 0)
 
     bounds = prepared.mesh.bounds()
     _write_json(
@@ -122,7 +132,7 @@ def _slice(request: dict[str, Any]) -> None:
             translate_z_mm=transform.translate_z_mm,
         )
     config = _config_from_request(request)
-    preview_scale = max(1, config.resolution_x // 480)
+    preview_scale = 1
     preview_dir = tempfile.mkdtemp(prefix="rspreview_")
     result = slice_to_file(
         SliceJob(
@@ -176,6 +186,10 @@ def _mesh_from_request(request: dict[str, Any], *, include_step: bool = True) ->
     if not include_step and _is_step_path(request.get("inputPath", "")):
         return None
     return load_mesh(request["inputPath"])
+
+
+def _preview_support_has_geometry(plan: SupportPlan, support: SupportConfig) -> bool:
+    return bool(plan.anchors or plan.braces or support.bed_interface in {"raft", "skate"})
 
 
 def _cad_slice_mode_from_request(request: dict[str, Any]) -> str:

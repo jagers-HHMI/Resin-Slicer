@@ -1,9 +1,11 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from resin_slicer.electron_bridge import _cad_models_from_request, _cad_slice_mode_from_request, _mesh_from_request
+from resin_slicer.config import profile
+from resin_slicer.electron_bridge import _cad_models_from_request, _cad_slice_mode_from_request, _mesh_from_request, _slice
 from resin_slicer.mesh import Mesh, cube_mesh
 
 
@@ -49,6 +51,20 @@ class ElectronBridgeTests(unittest.TestCase):
 
     def test_tessellated_mode_is_default(self) -> None:
         self.assertEqual(_cad_slice_mode_from_request({}), "tessellated")
+
+    def test_slice_preview_uses_full_printer_resolution(self) -> None:
+        result = SimpleNamespace(output_path=Path("out.goo"), layer_count=1, support_count=0, material_ml=0.1)
+
+        with (
+            patch("resin_slicer.electron_bridge._mesh_from_request", return_value=cube_mesh(1)),
+            patch("resin_slicer.electron_bridge._config_from_request", return_value=profile("generic-2k")),
+            patch("resin_slicer.electron_bridge.tempfile.mkdtemp", return_value="preview-dir"),
+            patch("resin_slicer.electron_bridge._write_json"),
+            patch("resin_slicer.electron_bridge.slice_to_file", return_value=result) as slice_to_file,
+        ):
+            _slice({"outputPath": "out.goo", "format": "goo"})
+
+        self.assertEqual(slice_to_file.call_args.kwargs["preview_scale"], 1)
 
 
 def _write_ascii_stl(path: Path, mesh: Mesh) -> None:

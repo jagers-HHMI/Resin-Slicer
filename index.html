@@ -133,16 +133,16 @@
           <div id="viewerToast" class="viewer-toast" hidden></div>
           <div id="loadProgressPanel" class="load-progress-panel" hidden></div>
           <div id="slicePreviewPanel" class="slice-preview-panel" hidden>
-            <input id="slicePreviewScrollbar" class="slice-preview-scrollbar" type="range" min="1" max="100" step="1" value="1" aria-label="Preview layer">
             <div id="slicePreviewViewport" class="slice-preview-viewport">
               <img id="slicePreviewImage" class="slice-preview-image" alt="">
             </div>
             <div id="slicePreviewInfo" class="slice-preview-info"></div>
+            <button id="slicePreviewCloseButton" class="slice-preview-close" type="button">Close Slice Preview</button>
           </div>
         </section>
       </section>
 
-      <aside id="rightPanel" class="panel right-panel">
+      <aside id="rightPanel" class="panel right-panel menu-focused">
         <div class="sidebar-header">
           <div>
             <h1>Resin Slicer</h1>
@@ -150,7 +150,7 @@
           </div>
         </div>
 
-        <section id="menuJob" class="group workflow right-menu-section" data-right-menu-section="job">
+        <section id="menuJob" class="group workflow right-menu-section active-menu-section" data-right-menu-section="job">
           <h2>Job</h2>
           <button id="openButton" type="button">Open Mesh Files</button>
           <div class="row">
@@ -171,7 +171,7 @@
           <label>Output <input id="outputPath"></label>
         </section>
 
-        <section class="actions right-menu-section" data-right-menu-section="job">
+        <section class="actions right-menu-section active-menu-section" data-right-menu-section="job">
           <button id="saveProjectButton" type="button">Save Project</button>
           <button id="sliceButton" class="primary" type="button">Slice</button>
           <button id="sliceAllButton" type="button">Slice All</button>

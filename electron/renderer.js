@@ -26,6 +26,7 @@ const profileStorageKeys = {
   machines: "resinSlicer.machineProfiles",
   deletedMachines: "resinSlicer.deletedMachineProfiles",
   resins: "resinSlicer.resinProfilesByMachine",
+  selectedMachine: "resinSlicer.selectedMachineProfile",
   placementUnit: "resinSlicer.placementUnit",
   supportPresets: "resinSlicer.supportPresets"
 };
@@ -35,6 +36,7 @@ let profiles = {};
 let userMachineProfiles = {};
 let deletedMachineProfileIds = [];
 let resinProfilesByMachine = {};
+let selectedMachineProfileKey = "";
 let models = [];
 let selectedModelIds = new Set();
 let lastSelectedModelId = null;
@@ -54,11 +56,12 @@ let soundInitError = null;
 let sceneUpdateFrame = null;
 let toastTimer = null;
 let themedPromptResolver = null;
-let activeRightMenuId = "placement";
+let activeRightMenuId = "job";
 let placementUnit = "mm";
 let activeSupportPreset = "normal";
 const loadProgressItems = new Map();
 const fileReadProgressHandlers = new Map();
+const previewLayerReadPromises = new Map();
 
 const soundAssetRoot = "../src/assets/electron-sound-kit/";
 const soundStorageKeys = {
@@ -202,6 +205,8 @@ let dragState = null;
 let isGeneratingSupports = false;
 let isBusy = false;
 let slicePreviewActive = false;
+let slicePreviewPlateId = null;
+let slicePreviewSession = 0;
 let previewLayerCache = new Map();
 let previewZoom = 1.0;
 let previewPanX = 0;
@@ -264,9 +269,7 @@ async function init() {
   $("sliceButton").addEventListener("click", slice);
   $("sliceAllButton").addEventListener("click", sliceAll);
   $("viewSliceButton").addEventListener("click", toggleSlicePreview);
-  $("slicePreviewScrollbar").addEventListener("input", () => {
-    if (slicePreviewActive) setActivePlateClipLayer(Number($("slicePreviewScrollbar").value));
-  });
+  $("slicePreviewCloseButton").addEventListener("click", exitSlicePreview);
   $("slicePreviewViewport").addEventListener("wheel", (event) => {
     if (!slicePreviewActive) return;
     event.preventDefault();
@@ -304,6 +307,7 @@ async function init() {
   $("slicePreviewViewport").addEventListener("mouseleave", endPreviewDrag);
   $("saveAllButton").addEventListener("click", saveAll);
   $("profile").addEventListener("change", () => {
+    persistSelectedMachinePreference();
     loadProfileDefaults();
     persistSelectedResinForCurrentMachine();
     applyCurrentMachineProfileToAllBuildPlates();
@@ -350,7 +354,8 @@ async function init() {
     builtinProfiles = profilePayload.profiles || {};
     loadStoredProfileState();
     loadStoredSupportPresets();
-    renderMachineProfileOptions(profiles["generic-2k"] ? "generic-2k" : Object.keys(profiles)[0] || "");
+    renderMachineProfileOptions(preferredMachineProfileKey(profiles["generic-2k"] ? "generic-2k" : Object.keys(profiles)[0] || ""));
+    persistSelectedMachinePreference();
     loadProfileDefaults();
     writeSupportPresetFields("normal");
     ensureInitialBuildPlate();
@@ -384,7 +389,8 @@ async function init() {
     };
     loadStoredProfileState();
     loadStoredSupportPresets();
-    renderMachineProfileOptions("generic-2k");
+    renderMachineProfileOptions(preferredMachineProfileKey("generic-2k"));
+    persistSelectedMachinePreference();
     loadProfileDefaults();
     writeSupportPresetFields("normal");
     ensureInitialBuildPlate();
@@ -546,9 +552,12 @@ function resizeViewerThroughPanelTransition() {
 
 function bindAccordionMenus() {
   const groups = [...document.querySelectorAll(".right-panel details.group")];
-  const initiallyOpen = groups.find((details) => details.open) || groups[0];
+  const initialMenuId = activeRightMenuId || "job";
+  const initiallyOpen = groups.find((details) => details.open && details.dataset.rightMenuSection === initialMenuId)
+    || groups.find((details) => details.dataset.rightMenuSection === initialMenuId)
+    || null;
   for (const details of groups) {
-    details.open = details === initiallyOpen;
+    details.open = details === initiallyOpen && details.dataset.rightMenuSection === initialMenuId;
     details.addEventListener("toggle", () => {
       if (!details.open) return;
       for (const other of groups) {
@@ -557,11 +566,10 @@ function bindAccordionMenus() {
       setActiveRightMenu(details.dataset.rightMenuSection || activeRightMenuId);
     });
   }
-  setActiveRightMenu(initiallyOpen?.dataset.rightMenuSection || activeRightMenuId);
-  syncRightMenuRail();
+  openRightMenu(initialMenuId, { scroll: false, resize: false });
 }
 
-function openRightMenu(menuId) {
+function openRightMenu(menuId, { scroll = true, resize = true } = {}) {
   const shell = $("appShell");
   const panel = $("rightPanel");
   const targets = [...document.querySelectorAll(`[data-right-menu-section="${menuId}"]`)];
@@ -579,10 +587,12 @@ function openRightMenu(menuId) {
   }
   setActiveRightMenu(target.dataset.rightMenuSection || menuId);
   syncRightMenuRail();
-  resizeViewerThroughPanelTransition();
-  requestAnimationFrame(() => {
-    target.scrollIntoView({ behavior: "smooth", block: "start" });
-  });
+  if (resize) resizeViewerThroughPanelTransition();
+  if (scroll) {
+    requestAnimationFrame(() => {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
 }
 
 function toggleRightMenu(menuId) {
@@ -742,6 +752,7 @@ function loadStoredProfileState() {
   userMachineProfiles = readStoredJson(profileStorageKeys.machines, {}) || {};
   deletedMachineProfileIds = readStoredJson(profileStorageKeys.deletedMachines, []) || [];
   resinProfilesByMachine = readStoredJson(profileStorageKeys.resins, {}) || {};
+  selectedMachineProfileKey = localStorageValue(profileStorageKeys.selectedMachine, "");
   mergeMachineProfiles();
 }
 
@@ -749,6 +760,7 @@ function persistProfileStorage() {
   writeStoredJson(profileStorageKeys.machines, userMachineProfiles);
   writeStoredJson(profileStorageKeys.deletedMachines, deletedMachineProfileIds);
   writeStoredJson(profileStorageKeys.resins, resinProfilesByMachine);
+  persistSelectedMachinePreference(profiles[selectedMachineProfileKey] ? selectedMachineProfileKey : currentMachineProfileKey(), { validate: true });
 }
 
 function mergeMachineProfiles() {
@@ -777,6 +789,20 @@ function renderMachineProfileOptions(preferredKey = currentMachineProfileKey()) 
     select.appendChild(option);
   }
   select.value = profiles[previous] ? previous : keys[0] || "";
+}
+
+function preferredMachineProfileKey(fallback = "") {
+  mergeMachineProfiles();
+  if (selectedMachineProfileKey && profiles[selectedMachineProfileKey]) return selectedMachineProfileKey;
+  if (fallback && profiles[fallback]) return fallback;
+  return Object.keys(profiles)[0] || "";
+}
+
+function persistSelectedMachinePreference(machineKey = currentMachineProfileKey(), { validate = true } = {}) {
+  const key = String(machineKey || "");
+  if (validate && key && !profiles[key]) return;
+  selectedMachineProfileKey = key;
+  if (key) storeValue(profileStorageKeys.selectedMachine, key);
 }
 
 function machineProfileLabel(key, cfg) {
@@ -987,9 +1013,10 @@ function saveCurrentMachineProfile({ key = "", createNew = false } = {}) {
   deletedMachineProfileIds = deletedMachineProfileIds.filter((id) => id !== targetKey);
   mergeMachineProfiles();
   upsertCurrentResinProfileForMachine(targetKey, { select: true, persist: false });
-  persistProfileStorage();
   renderMachineProfileOptions(targetKey);
   $("profile").value = targetKey;
+  persistSelectedMachinePreference(targetKey);
+  persistProfileStorage();
   syncTopbarResinOptionsToForm({ persist: false });
   writeActivePlateSettingsFromForm();
   updateBuildPlateLayout({ force: true });
@@ -1021,8 +1048,10 @@ async function deleteSelectedMachineProfile() {
   if (builtinProfiles[key] && !deletedMachineProfileIds.includes(key)) deletedMachineProfileIds.push(key);
   delete resinProfilesByMachine[key];
   mergeMachineProfiles();
+  const nextKey = preferredMachineProfileKey(Object.keys(profiles)[0] || "");
+  renderMachineProfileOptions(nextKey);
+  persistSelectedMachinePreference($("profile").value);
   persistProfileStorage();
-  renderMachineProfileOptions(Object.keys(profiles)[0] || "");
   loadProfileDefaults();
   applyCurrentMachineProfileToAllBuildPlates();
   syncSceneSettingCommits();
@@ -3770,14 +3799,7 @@ function updateScene({ renderLists = true, updateStatus = true, skipDerivedGeome
   $("meshStatus").textContent = selectedModelIds.size
     ? `${selectedModelIds.size.toLocaleString()} model${selectedModelIds.size === 1 ? "" : "s"} selected`
     : `${activeModels.length.toLocaleString()} object${activeModels.length === 1 ? "" : "s"} on ${active.name}`;
-  if (slicePreviewActive && !active.sliced) {
-    slicePreviewActive = false;
-    previewDragStart = null;
-    resetPreviewTransform();
-    $("slicePreviewPanel").hidden = true;
-    $("slicePreviewImage").src = "";
-    $("viewSliceButton").textContent = "View Slice Preview";
-  }
+  if (slicePreviewActive && (!active.sliced || slicePreviewPlateId !== active.id)) closeSlicePreview();
   if (active.layersGenerated) {
     $("supportStatus").textContent = `${active.supports.length.toLocaleString()} supports generated`;
   } else if (isGeneratingSupports) {
@@ -3800,7 +3822,11 @@ function setActivePlateClipLayer(value) {
   $("clipHeightValue").value = layer;
   $("clipEnabled").checked = true;
   if (slicePreviewActive) {
-    loadPreviewLayer(layer);
+    if (slicePreviewPlateId === plate.id) {
+      loadPreviewLayer(layer, { session: slicePreviewSession, plateId: plate.id });
+    } else {
+      closeSlicePreview({ refreshScene: true });
+    }
   } else {
     updateScene();
   }
@@ -3861,6 +3887,14 @@ function plateOccupiedMaxLayer(plate) {
 
 function buildScene({ skipDerivedGeometry = false } = {}) {
   const active = activePlate();
+  const activeClipLayer = clipHeightToLayer(active, active.clipHeight);
+  const clipSliceCacheKey = active.sliced && active.previewDir
+    ? previewLayerCacheKey(active, activeClipLayer)
+    : null;
+  const clipSliceDataUrl = clipSliceCacheKey ? previewLayerCache.get(clipSliceCacheKey) : null;
+  if (!skipDerivedGeometry && active.clipEnabled && active.sliced && active.previewDir && !clipSliceDataUrl) {
+    ensureClipSliceLayerLoaded(active, activeClipLayer);
+  }
   const modelItems = [];
   const selectionBoxes = [];
   const gizmoModel = widgetModel();
@@ -3943,9 +3977,18 @@ function buildScene({ skipDerivedGeometry = false } = {}) {
         width: active.settings.printer.sizeX || 120,
         depth: active.settings.printer.sizeY || 67.5
       },
-      showLayer: active.layersGenerated,
-      layerLines: !skipDerivedGeometry && active.layersGenerated ? makeLayerLines(active, active.clipHeight) : null,
-      intersectionFill: !skipDerivedGeometry && active.clipEnabled ? makeClipIntersectionFill(active, active.clipHeight) : null
+      showLayer: active.sliced,
+      layerLines: null,
+      intersectionFill: null,
+      sliceImage: !skipDerivedGeometry && active.clipEnabled && active.sliced && clipSliceDataUrl ? {
+        cacheKey: clipSliceCacheKey,
+        dataUrl: clipSliceDataUrl,
+        x: active.origin.x,
+        y: active.origin.y,
+        width: active.settings.printer.sizeX || 120,
+        depth: active.settings.printer.sizeY || 67.5,
+        z: active.clipHeight
+      } : null
     }
   };
 }
@@ -4216,8 +4259,17 @@ function modelPlacementOffset(model, plate = buildPlates.find((item) => item.id 
 function modelLiftForPlate(plate) {
   const support = plate?.settings?.support;
   if (!support?.enabled) return 0;
+  if (!plateHasGeneratedSupportStructure(plate)) return 0;
   const lift = Number(support.modelLift);
   return Math.max(0, Number.isFinite(lift) ? lift : 0);
+}
+
+function plateHasGeneratedSupportStructure(plate) {
+  return !!(plate?.layersGenerated && (
+    (plate.supports?.length || 0) > 0
+    || (plate.supportBraces?.length || 0) > 0
+    || plate.supportRaft
+  ));
 }
 
 function modelPlacementWorldBounds(model) {
@@ -4401,32 +4453,6 @@ function offsetSupportRaft(raft, origin) {
   };
 }
 
-function makeLayerLines(plate, z) {
-  const vertices = [];
-  const normals = [];
-  for (const model of models.filter((item) => item.plateId === plate.id)) {
-    const world = modelWorldMesh(model);
-    for (let i = 0; i < world.vertices.length; i += 9) {
-      const tri = [
-        [world.vertices[i], world.vertices[i + 1], world.vertices[i + 2]],
-        [world.vertices[i + 3], world.vertices[i + 4], world.vertices[i + 5]],
-        [world.vertices[i + 6], world.vertices[i + 7], world.vertices[i + 8]]
-      ];
-      const points = [];
-      for (const [a, b] of [[tri[0], tri[1]], [tri[1], tri[2]], [tri[2], tri[0]]]) {
-        const point = edgePlaneIntersection(a, b, z);
-        if (point) points.push(point);
-      }
-      if (points.length === 2 && length(sub(points[0], points[1])) > 0.001) {
-        vertices.push(...points[0], ...points[1]);
-        normals.push(0, 0, 1, 0, 0, 1);
-      }
-    }
-  }
-  if (!vertices.length) return null;
-  return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
-}
-
 function edgePlaneIntersection(a, b, z) {
   const az = a[2];
   const bz = b[2];
@@ -4534,55 +4560,121 @@ function uint8ArrayToDataUrl(bytes) {
   return "data:image/png;base64," + btoa(chunks.join(""));
 }
 
-async function loadPreviewLayer(layer) {
+function isPreviewRequestCurrent(session, plateId) {
+  return slicePreviewActive && slicePreviewSession === session && slicePreviewPlateId === plateId;
+}
+
+function previewLayerCacheKey(plate, layer) {
+  return `${plate.id}:${plate.previewDir || "preview"}:${layer}`;
+}
+
+function setPreviewLayerCache(key, dataUrl) {
+  previewLayerCache.set(key, dataUrl);
+  while (previewLayerCache.size > 12) {
+    previewLayerCache.delete(previewLayerCache.keys().next().value);
+  }
+}
+
+async function readPreviewLayerDataUrl(plate, layer) {
+  if (!plate?.previewDir || !plate.sliceLayerCount) return null;
+  const clamped = clamp(layer, 1, plate.sliceLayerCount);
+  const cacheKey = previewLayerCacheKey(plate, clamped);
+  if (previewLayerCache.has(cacheKey)) return previewLayerCache.get(cacheKey);
+  if (previewLayerReadPromises.has(cacheKey)) return previewLayerReadPromises.get(cacheKey);
+  const padded = String(clamped).padStart(5, "0");
+  const path = `${plate.previewDir}/layer_${padded}.png`.replace(/\\/g, "/");
+  const promise = window.slicer.readFile(path)
+    .then((buffer) => {
+      if (!buffer || !buffer.byteLength) return null;
+      const dataUrl = uint8ArrayToDataUrl(new Uint8Array(buffer));
+      setPreviewLayerCache(cacheKey, dataUrl);
+      return dataUrl;
+    })
+    .catch(() => null)
+    .finally(() => previewLayerReadPromises.delete(cacheKey));
+  previewLayerReadPromises.set(cacheKey, promise);
+  return promise;
+}
+
+function ensureClipSliceLayerLoaded(plate, layer) {
+  if (!plate?.sliced || !plate.previewDir) return;
+  const clamped = clamp(layer, 1, plate.sliceLayerCount || 1);
+  const cacheKey = previewLayerCacheKey(plate, clamped);
+  if (previewLayerCache.has(cacheKey) || previewLayerReadPromises.has(cacheKey)) return;
+  readPreviewLayerDataUrl(plate, clamped).then((dataUrl) => {
+    if (!dataUrl) return;
+    const current = activePlate();
+    const currentLayer = clipHeightToLayer(current, current.clipHeight);
+    if (current.id === plate.id && current.clipEnabled && current.sliced && currentLayer === clamped) {
+      updateScene({ renderLists: false, updateStatus: false });
+    }
+  });
+}
+
+function closeSlicePreview({ refreshScene = false } = {}) {
+  slicePreviewSession += 1;
+  slicePreviewActive = false;
+  slicePreviewPlateId = null;
+  previewDragStart = null;
+  previewLayerCache.clear();
+  resetPreviewTransform();
+  $("slicePreviewPanel").hidden = true;
+  $("slicePreviewImage").removeAttribute("src");
+  $("slicePreviewInfo").textContent = "";
+  $("viewSliceButton").textContent = "View Slice Preview";
+  $("viewSliceButton").disabled = isBusy || !activePlate().sliced;
+  if (refreshScene) updateScene();
+}
+
+async function loadPreviewLayer(layer, request = {}) {
   const plate = activePlate();
+  const session = request.session ?? slicePreviewSession;
+  const plateId = request.plateId ?? plate.id;
+  if (!isPreviewRequestCurrent(session, plateId)) return;
   if (!plate.previewDir || !plate.sliceLayerCount) return;
   const clamped = clamp(layer, 1, plate.sliceLayerCount);
   $("slicePreviewInfo").textContent = `Layer ${clamped} / ${plate.sliceLayerCount}`;
-  $("slicePreviewScrollbar").value = clamped;
-  if (previewLayerCache.has(clamped)) {
-    $("slicePreviewImage").src = previewLayerCache.get(clamped);
+  $("clipHeight").value = clamped;
+  $("clipHeightValue").value = clamped;
+  const cacheKey = previewLayerCacheKey(plate, clamped);
+  if (previewLayerCache.has(cacheKey)) {
+    if (isPreviewRequestCurrent(session, plateId)) $("slicePreviewImage").src = previewLayerCache.get(cacheKey);
     return;
   }
-  const padded = String(clamped).padStart(5, "0");
-  const path = `${plate.previewDir}/layer_${padded}.png`.replace(/\\/g, "/");
-  try {
-    const buffer = await window.slicer.readFile(path);
-    if (!buffer || !buffer.byteLength) return;
-    const dataUrl = uint8ArrayToDataUrl(new Uint8Array(buffer));
-    previewLayerCache.set(clamped, dataUrl);
-    if (slicePreviewActive) $("slicePreviewImage").src = dataUrl;
-  } catch (_e) {
-    // layer file unavailable
+  const dataUrl = await readPreviewLayerDataUrl(plate, clamped);
+  if (dataUrl && isPreviewRequestCurrent(session, plateId)) {
+    if (isPreviewRequestCurrent(session, plateId)) $("slicePreviewImage").src = dataUrl;
   }
 }
 
 function enterSlicePreview() {
   const plate = activePlate();
   if (!plate.sliced || !plate.previewDir) return;
+  slicePreviewSession += 1;
   slicePreviewActive = true;
+  slicePreviewPlateId = plate.id;
   previewLayerCache.clear();
   resetPreviewTransform();
-  const scrollbar = $("slicePreviewScrollbar");
-  scrollbar.min = 1;
-  scrollbar.max = plate.sliceLayerCount;
+  $("clipHeight").min = 1;
+  $("clipHeight").max = plate.sliceLayerCount;
+  $("clipHeightValue").min = 1;
+  $("clipHeightValue").max = plate.sliceLayerCount;
   $("slicePreviewPanel").hidden = false;
   $("viewSliceButton").textContent = "Close Slice Preview";
   updatePlateControls(plate);
-  loadPreviewLayer(clipHeightToLayer(plate, plate.clipHeight));
+  loadPreviewLayer(clipHeightToLayer(plate, plate.clipHeight), {
+    session: slicePreviewSession,
+    plateId: plate.id
+  });
 }
 
 function exitSlicePreview() {
-  slicePreviewActive = false;
-  previewDragStart = null;
-  resetPreviewTransform();
-  $("slicePreviewPanel").hidden = true;
-  $("slicePreviewImage").src = "";
-  $("viewSliceButton").textContent = "View Slice Preview";
-  updateScene();
+  closeSlicePreview({ refreshScene: true });
 }
 
-function toggleSlicePreview() {
+function toggleSlicePreview(event) {
+  event?.preventDefault();
+  event?.stopPropagation();
   if (slicePreviewActive) {
     exitSlicePreview();
   } else {
@@ -4877,8 +4969,10 @@ class Viewer {
     this.canvas = canvas;
     this.gl = canvas.getContext("webgl", { antialias: true });
     this.program = createProgram(this.gl);
+    this.textureProgram = createTextureProgram(this.gl);
     this.meshes = {};
     this.modelMeshCache = new Map();
+    this.sliceTextureCache = new Map();
     this.bed = { x: 120, y: 67.5, z: 160 };
     this.yaw = -0.65;
     this.pitch = 0.68;
@@ -5450,7 +5544,7 @@ class Viewer {
       : null;
     this.meshes.supports = makeMesh(this.gl, makeSupportGeometry(scene.supports, scene.supportBraces), [1.0, 0.63, 0.18, 1], this.gl.TRIANGLES);
     this.meshes.supportRaft = scene.supportRaft
-      ? makeMesh(this.gl, makeSupportRaftGeometry(scene.supportRaft), [1.0, 0.62, 0.16, scene.supportRaft.type === "skate" ? 0.45 : 0.62], this.gl.TRIANGLES)
+      ? makeMesh(this.gl, makeSupportRaftGeometry(scene.supportRaft), scene.supportRaft.type === "skate" ? [0.95, 0.7, 0.2, 1] : [1.0, 0.62, 0.16, 1], this.gl.TRIANGLES)
       : null;
     this.meshes.clipPlane = scene.clip.enabled ? {
       surface: makeMesh(this.gl, makeClipPlaneSurfaceGeometry(scene.clip.plate, scene.clip.z), [1.0, 0.86, 0.16, 0.2], this.gl.TRIANGLES, { unlit: true }),
@@ -5461,6 +5555,9 @@ class Viewer {
     } : null;
     this.meshes.layerLines = scene.clip.enabled && scene.clip.showLayer && scene.clip.layerLines
       ? makeMesh(this.gl, scene.clip.layerLines, [1.0, 0.95, 0.45, 1], this.gl.LINES)
+      : null;
+    this.meshes.sliceLayer = scene.clip.enabled && scene.clip.sliceImage
+      ? this.sliceLayerMesh(scene.clip.sliceImage)
       : null;
     this.meshes.gizmo = scene.transformGizmo ? makeTransformGizmo(this.gl, scene.transformGizmo) : null;
     this.clipZ = scene.clip.z;
@@ -5511,6 +5608,46 @@ class Viewer {
         }
       }] : [])
     ];
+  }
+
+  sliceLayerMesh(sliceImage) {
+    if (!sliceImage?.cacheKey || !sliceImage.dataUrl) return null;
+    let cached = this.sliceTextureCache.get(sliceImage.cacheKey);
+    if (!cached) {
+      cached = { texture: null, loading: true, mesh: null, geometryKey: "" };
+      const image = new Image();
+      image.onload = () => {
+        try {
+          cached.texture = createTextureFromImage(this.gl, image);
+        } catch (error) {
+          log(`Could not show sliced layer on clip plane: ${error.message}`);
+        }
+        cached.loading = false;
+        cached.mesh = null;
+        this.renderFrame();
+      };
+      image.onerror = () => {
+        cached.loading = false;
+      };
+      image.src = sliceImage.dataUrl;
+      this.sliceTextureCache.set(sliceImage.cacheKey, cached);
+      while (this.sliceTextureCache.size > 12) {
+        this.sliceTextureCache.delete(this.sliceTextureCache.keys().next().value);
+      }
+    }
+    if (!cached.texture) return null;
+    const geometryKey = [
+      sliceImage.x,
+      sliceImage.y,
+      sliceImage.width,
+      sliceImage.depth,
+      sliceImage.z
+    ].map((value) => Number(value || 0).toFixed(4)).join("|");
+    if (!cached.mesh || cached.geometryKey !== geometryKey) {
+      cached.mesh = makeTextureMesh(this.gl, makeSliceLayerGeometry(sliceImage), cached.texture);
+      cached.geometryKey = geometryKey;
+    }
+    return cached.mesh;
   }
 
   recenter() {
@@ -5579,12 +5716,13 @@ class Viewer {
         drawMesh(gl, this.program, action.icon, mvp, this.clipZ);
       }
     }
-    if (this.meshes.supportRaft) this.drawTransparentMesh(this.meshes.supportRaft, mvp);
+    if (this.meshes.supportRaft) drawMesh(gl, this.program, this.meshes.supportRaft, mvp, this.clipZ);
     if (this.meshes.supports) drawMesh(gl, this.program, this.meshes.supports, mvp, this.clipZ);
     for (const item of this.meshes.models || []) {
       this.drawModelItem(item, mvp);
     }
     if (this.meshes.clipPlane) this.drawClipPlane(mvp);
+    if (this.meshes.sliceLayer) this.drawSliceLayer(mvp);
     if (this.meshes.layerLines) drawMesh(gl, this.program, this.meshes.layerLines, mvp, this.clipZ);
     if (this.meshes.selection) drawMesh(gl, this.program, this.meshes.selection, mvp, this.clipZ);
     if (deferPlateSurfaces) this.drawTransparentBuildPlateSurfaces(mvp);
@@ -5655,6 +5793,15 @@ class Viewer {
     drawMesh(gl, this.program, clip.surface, mvp, this.clipZ);
     if (clip.intersection) drawMesh(gl, this.program, clip.intersection, mvp, this.clipZ);
     drawMesh(gl, this.program, clip.outline, mvp, this.clipZ);
+    gl.enable(gl.CULL_FACE);
+    gl.depthMask(true);
+  }
+
+  drawSliceLayer(mvp) {
+    const gl = this.gl;
+    gl.depthMask(false);
+    gl.disable(gl.CULL_FACE);
+    drawTextureMesh(gl, this.textureProgram, this.meshes.sliceLayer, mvp);
     gl.enable(gl.CULL_FACE);
     gl.depthMask(true);
   }
@@ -6848,6 +6995,64 @@ function makeMesh(gl, geometry, color, mode, options = {}) {
   return vao;
 }
 
+function makeSliceLayerGeometry(sliceImage) {
+  const z = (sliceImage.z || 0) + 0.18;
+  const x0 = sliceImage.x || 0;
+  const y0 = sliceImage.y || 0;
+  const x1 = x0 + (sliceImage.width || 1);
+  const y1 = y0 + (sliceImage.depth || 1);
+  return {
+    vertices: new Float32Array([
+      x0, y0, z,
+      x1, y0, z,
+      x1, y1, z,
+      x0, y0, z,
+      x1, y1, z,
+      x0, y1, z
+    ]),
+    texCoords: new Float32Array([
+      0, 1,
+      1, 1,
+      1, 0,
+      0, 1,
+      1, 0,
+      0, 0
+    ])
+  };
+}
+
+function makeTextureMesh(gl, geometry, texture) {
+  const mesh = {
+    count: geometry.vertices.length / 3,
+    mode: gl.TRIANGLES,
+    texture,
+    positions: gl.createBuffer(),
+    texCoords: gl.createBuffer()
+  };
+  gl.bindBuffer(gl.ARRAY_BUFFER, mesh.positions);
+  gl.bufferData(gl.ARRAY_BUFFER, geometry.vertices, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ARRAY_BUFFER, mesh.texCoords);
+  gl.bufferData(gl.ARRAY_BUFFER, geometry.texCoords, gl.STATIC_DRAW);
+  return mesh;
+}
+
+function createTextureFromImage(gl, image) {
+  const maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+  if (image.width > maxTextureSize || image.height > maxTextureSize) {
+    throw new Error(`slice image ${image.width}x${image.height} exceeds WebGL texture limit ${maxTextureSize}`);
+  }
+  const texture = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, texture);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.bindTexture(gl.TEXTURE_2D, null);
+  return texture;
+}
+
 function createProgram(gl) {
   const vs = `
     attribute vec3 aPosition;
@@ -6938,6 +7143,44 @@ function createProgram(gl) {
   };
 }
 
+function createTextureProgram(gl) {
+  const vs = `
+    attribute vec3 aPosition;
+    attribute vec2 aTexCoord;
+    uniform mat4 uMvp;
+    varying vec2 vTexCoord;
+    void main() {
+      vTexCoord = aTexCoord;
+      gl_Position = uMvp * vec4(aPosition, 1.0);
+    }
+  `;
+  const fs = `
+    precision highp float;
+    uniform sampler2D uTexture;
+    uniform float uAlpha;
+    varying vec2 vTexCoord;
+    void main() {
+      vec4 sampleColor = texture2D(uTexture, vTexCoord);
+      float mask = max(sampleColor.r, sampleColor.a < 1.0 ? sampleColor.a : 0.0);
+      if (mask < 0.01) discard;
+      gl_FragColor = vec4(1.0, 0.92, 0.22, uAlpha * mask);
+    }
+  `;
+  const program = gl.createProgram();
+  gl.attachShader(program, shader(gl, gl.VERTEX_SHADER, vs));
+  gl.attachShader(program, shader(gl, gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(program);
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(program));
+  return {
+    handle: program,
+    aPosition: gl.getAttribLocation(program, "aPosition"),
+    aTexCoord: gl.getAttribLocation(program, "aTexCoord"),
+    uMvp: gl.getUniformLocation(program, "uMvp"),
+    uTexture: gl.getUniformLocation(program, "uTexture"),
+    uAlpha: gl.getUniformLocation(program, "uAlpha")
+  };
+}
+
 function shader(gl, type, source) {
   const out = gl.createShader(type);
   gl.shaderSource(out, source);
@@ -6971,6 +7214,23 @@ function drawMesh(gl, program, mesh, mvp, clipZ = 0) {
   gl.enableVertexAttribArray(program.aNormal);
   gl.vertexAttribPointer(program.aNormal, 3, gl.FLOAT, false, 0, 0);
   gl.drawArrays(mesh.mode, 0, mesh.count);
+}
+
+function drawTextureMesh(gl, program, mesh, mvp) {
+  gl.useProgram(program.handle);
+  gl.uniformMatrix4fv(program.uMvp, false, mvp);
+  gl.uniform1f(program.uAlpha, 0.86);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, mesh.texture);
+  gl.uniform1i(program.uTexture, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, mesh.positions);
+  gl.enableVertexAttribArray(program.aPosition);
+  gl.vertexAttribPointer(program.aPosition, 3, gl.FLOAT, false, 0, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, mesh.texCoords);
+  gl.enableVertexAttribArray(program.aTexCoord);
+  gl.vertexAttribPointer(program.aTexCoord, 2, gl.FLOAT, false, 0, 0);
+  gl.drawArrays(mesh.mode, 0, mesh.count);
+  gl.bindTexture(gl.TEXTURE_2D, null);
 }
 
 function perspective(fovy, aspect, near, far) {
