@@ -31,15 +31,16 @@
           <div class="topbar-menu">
             <button id="modifyPrinterButton" class="topbar-menu-button" type="button" data-topbar-menu-button="printerTopbarMenu" aria-expanded="false">Modify Printer</button>
             <section id="printerTopbarMenu" class="topbar-menu-panel" hidden>
-              <label>Machine <input id="machineName" value="Generic MSLA"></label>
+              <label>Machine <input id="machineName" list="machineNameOptions" value="Generic MSLA"></label>
+              <datalist id="machineNameOptions"></datalist>
               <div class="row">
                 <button id="importUvtoolsMachineButton" type="button">Import Printer</button>
                 <button id="exportMachineButton" type="button">Export Printer</button>
               </div>
               <div class="row profile-actions">
-                <button id="saveMachineProfileButton" type="button">Save As Printer</button>
-                <button id="updateMachineProfileButton" type="button">Update Selected</button>
-                <button id="deleteMachineProfileButton" type="button">Delete Selected</button>
+                <button id="saveMachineProfileButton" type="button">Save As New</button>
+                <button id="updateMachineProfileButton" type="button">Save Current</button>
+                <button id="deleteMachineProfileButton" class="danger" type="button">Delete</button>
               </div>
               <div class="grid two">
                 <label>X pixels <input id="resolutionX" type="number"></label>
@@ -54,15 +55,16 @@
           <div class="topbar-menu">
             <button id="modifyResinButton" class="topbar-menu-button" type="button" data-topbar-menu-button="resinTopbarMenu" aria-expanded="false">Modify Resin</button>
             <section id="resinTopbarMenu" class="topbar-menu-panel wide" hidden>
-              <label>Resin <input id="resinName" value="Standard"></label>
+              <label>Resin <input id="resinName" list="resinNameOptions" value="Standard"></label>
+              <datalist id="resinNameOptions"></datalist>
               <div class="row">
                 <button id="importResinButton" type="button">Import Resin</button>
                 <button id="exportResinButton" type="button">Export Resin</button>
               </div>
               <div class="row profile-actions">
-                <button id="saveResinProfileButton" type="button">Save Resin</button>
-                <button id="updateResinProfileButton" type="button">Update Selected</button>
-                <button id="deleteResinProfileButton" type="button">Delete Selected</button>
+                <button id="saveResinProfileButton" type="button">Save As New</button>
+                <button id="updateResinProfileButton" type="button">Save Current</button>
+                <button id="deleteResinProfileButton" class="danger" type="button">Delete</button>
               </div>
               <div class="grid two">
                 <label>Normal exposure <input id="exposure" type="number" step="0.01" value="2.5"></label>

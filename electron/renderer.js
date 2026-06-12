@@ -223,12 +223,14 @@ async function init() {
   $("importMachineButton").addEventListener("click", browseMachineProfile);
   $("importUvtoolsMachineButton").addEventListener("click", importUvtoolsMachine);
   $("exportMachineButton").addEventListener("click", () => exportProfile("machine"));
+  $("machineName").addEventListener("change", applySelectedMachineName);
   $("saveMachineProfileButton").addEventListener("click", () => saveCurrentMachineProfile({ createNew: true }));
   $("updateMachineProfileButton").addEventListener("click", () => saveCurrentMachineProfile({ key: currentMachineProfileKey() }));
   $("deleteMachineProfileButton").addEventListener("click", deleteSelectedMachineProfile);
   $("topbarResinSelect").addEventListener("change", applySelectedTopbarResin);
   $("importResinButton").addEventListener("click", () => importProfile("resin"));
   $("exportResinButton").addEventListener("click", () => exportProfile("resin"));
+  $("resinName").addEventListener("change", applySelectedResinName);
   $("saveResinProfileButton").addEventListener("click", () => saveCurrentResinProfile({ createNew: true }));
   $("updateResinProfileButton").addEventListener("click", () => saveCurrentResinProfile({ key: currentResinProfileKey() }));
   $("deleteResinProfileButton").addEventListener("click", deleteSelectedResinProfile);
@@ -789,6 +791,39 @@ function renderMachineProfileOptions(preferredKey = currentMachineProfileKey()) 
     select.appendChild(option);
   }
   select.value = profiles[previous] ? previous : keys[0] || "";
+  renderMachineNameOptions();
+}
+
+function renderMachineNameOptions() {
+  const list = $("machineNameOptions");
+  if (!list) return;
+  list.innerHTML = "";
+  const keys = Object.keys(profiles).sort((a, b) => machineProfileLabel(a, profiles[a]).localeCompare(machineProfileLabel(b, profiles[b])));
+  for (const key of keys) {
+    const option = document.createElement("option");
+    option.value = machineProfileLabel(key, profiles[key]);
+    option.label = key;
+    list.appendChild(option);
+  }
+}
+
+function findMachineProfileKeyByLabel(label) {
+  const target = String(label || "").trim().toLowerCase();
+  if (!target) return "";
+  return Object.keys(profiles).find((key) => machineProfileLabel(key, profiles[key]).trim().toLowerCase() === target) || "";
+}
+
+function applySelectedMachineName() {
+  const key = findMachineProfileKeyByLabel($("machineName").value);
+  if (!key || key === currentMachineProfileKey()) return;
+  $("profile").value = key;
+  persistSelectedMachinePreference(key);
+  loadProfileDefaults();
+  persistSelectedResinForCurrentMachine();
+  applyCurrentMachineProfileToAllBuildPlates();
+  syncSceneSettingCommits();
+  updateScene();
+  playSound("click-soft");
 }
 
 function preferredMachineProfileKey(fallback = "") {
@@ -933,6 +968,21 @@ function renderTopbarResinOptions(machineKey = currentMachineProfileKey(), prefe
     select.appendChild(option);
   }
   select.value = bucket.selected || keys[0] || "";
+  renderResinNameOptions(machineKey);
+}
+
+function renderResinNameOptions(machineKey = currentMachineProfileKey()) {
+  const list = $("resinNameOptions");
+  if (!list) return;
+  const bucket = machineResinBucket(machineKey);
+  list.innerHTML = "";
+  const keys = Object.keys(bucket.items).sort((a, b) => resinProfileLabel(bucket.items[a]).localeCompare(resinProfileLabel(bucket.items[b])));
+  for (const key of keys) {
+    const option = document.createElement("option");
+    option.value = resinProfileLabel(bucket.items[key]);
+    option.label = key;
+    list.appendChild(option);
+  }
 }
 
 function resinProfileLabel(resin) {
@@ -997,6 +1047,23 @@ function applySelectedTopbarResin() {
   if (!resin) return;
   bucket.selected = key;
   persistProfileStorage();
+  applyResinProfileToForm(resin);
+  writeActivePlateSettingsFromForm();
+  syncSceneSettingCommits();
+  updateScene();
+  playSound("click-soft");
+}
+
+function applySelectedResinName() {
+  const machineKey = currentMachineProfileKey();
+  const key = findResinProfileKey(machineKey, $("resinName").value);
+  if (!key) return;
+  const bucket = machineResinBucket(machineKey);
+  const resin = bucket.items[key];
+  if (!resin) return;
+  bucket.selected = key;
+  persistProfileStorage();
+  renderTopbarResinOptions(machineKey, key);
   applyResinProfileToForm(resin);
   writeActivePlateSettingsFromForm();
   syncSceneSettingCommits();

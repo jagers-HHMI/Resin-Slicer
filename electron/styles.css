@@ -202,6 +202,17 @@ body {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.topbar-menu-panel button.danger {
+  border-color: rgba(190, 72, 72, 0.72);
+  background: #5a1f25;
+  color: #ffe9ec;
+}
+
+.topbar-menu-panel button.danger:hover {
+  border-color: rgba(255, 128, 128, 0.9);
+  background: #7a2830;
+}
+
 .topbar-menu-panel .grid {
   margin-top: 2px;
 }
