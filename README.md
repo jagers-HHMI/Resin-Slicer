@@ -120,6 +120,21 @@ $env:RESIN_SLICER_LAYER_WORKERS = "8"
 
 ## Development
 
+### Prerequisites
+
+- **Node.js** (LTS). Install from https://nodejs.org or, on Windows:
+
+  ```powershell
+  winget install OpenJS.NodeJS.LTS
+  ```
+
+  After installing, sign out and back in (or reboot) so `node`/`npm` are on `PATH`.
+
+- **Python 3.10 or newer** for the slicing backend. The Electron app auto-detects a
+  suitable interpreter (via the `py` launcher, then `python`/`python3`), so you do
+  not normally need to configure anything. If detection picks the wrong one, set the
+  `PYTHON` environment variable to the interpreter you want and it takes priority.
+
 Run tests:
 
 ```powershell
@@ -132,6 +147,10 @@ Run the Electron app from source with Vite hot renderer updates:
 npm install
 npm run dev
 ```
+
+`npm install` runs a `postinstall` step (`tools/ensure-electron.js`) that guarantees the
+Electron binary is unpacked, working around environments where Electron's own installer
+downloads the binary but fails to extract it.
 
 The double-click `Launch Resin Slicer.vbs` launcher also starts this development flow. It launches the Vite dev server on `http://127.0.0.1:5178` and then starts Electron with `VITE_DEV_SERVER_URL` pointed at that server.
 

@@ -42,8 +42,11 @@ End If
 
 nodeCheck = shell.Run("cmd.exe /d /c where node.exe >nul 2>nul", 0, True)
 If nodeCheck <> 0 Then
-    ShowThemedPrompt "Node.js is required to run Resin Slicer from source." & vbCrLf & _
-                     "Install Node.js, then run this launcher again."
+    ShowThemedPrompt "Node.js is required to run Resin Slicer from source." & vbCrLf & vbCrLf & _
+                     "Install the LTS build from https://nodejs.org, or run this in PowerShell:" & vbCrLf & _
+                     "    winget install OpenJS.NodeJS.LTS" & vbCrLf & vbCrLf & _
+                     "After installing, sign out and back in (or reboot) so Node is on PATH," & vbCrLf & _
+                     "then run this launcher again."
     WScript.Quit 1
 End If
 
