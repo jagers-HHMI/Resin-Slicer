@@ -24,11 +24,17 @@ class FormatStats:
 class GooLayer:
     z_mm: float
     exposure_s: float
+    rest_before_lift_s: float
+    rest_after_lift_s: float
     after_retract_s: float
     lift_distance_mm: float
     lift_speed_mm_min: float
+    lift_distance2_mm: float
+    lift_speed2_mm_min: float
     retract_distance_mm: float
     retract_speed_mm_min: float
+    retract_distance2_mm: float
+    retract_speed2_mm_min: float
     light_pwm: int
     data: bytes
 
@@ -160,16 +166,23 @@ def decode_rle(data: bytes) -> list[Run]:
 
 
 def _encode_layer(layer_index: int, raster: LayerRaster, config: PrintConfig) -> GooLayer:
-    exposure = config.bottom_exposure_time_s if layer_index < config.bottom_layers else config.exposure_time_s
-    pwm = config.bottom_light_pwm if layer_index < config.bottom_layers else config.light_pwm
+    bottom = layer_index < config.bottom_layers
+    exposure = config.bottom_exposure_time_s if bottom else config.exposure_time_s
+    pwm = config.bottom_light_pwm if bottom else config.light_pwm
     return GooLayer(
         z_mm=config.layer_height_mm * (layer_index + 1),
         exposure_s=exposure,
+        rest_before_lift_s=config.rest_before_lift_s,
+        rest_after_lift_s=config.rest_after_lift_s,
         after_retract_s=config.wait_after_retract_s,
-        lift_distance_mm=config.lift_distance_mm,
-        lift_speed_mm_min=config.lift_speed_mm_min,
-        retract_distance_mm=config.retract_distance_mm,
-        retract_speed_mm_min=config.retract_speed_mm_min,
+        lift_distance_mm=config.lift_distance_for(bottom=bottom),
+        lift_speed_mm_min=config.lift_speed_for(bottom=bottom),
+        lift_distance2_mm=config.lift_distance2_mm,
+        lift_speed2_mm_min=config.lift_speed2_mm_min,
+        retract_distance_mm=config.retract_distance_for(bottom=bottom),
+        retract_speed_mm_min=config.retract_speed_for(bottom=bottom),
+        retract_distance2_mm=config.retract_distance2_mm,
+        retract_speed2_mm_min=config.retract_speed2_mm_min,
         light_pwm=pwm,
         data=encode_rle(raster.runs()),
     )
@@ -202,23 +215,23 @@ def _write_header(writer: ByteWriter, config: PrintConfig, layer_count: int, mat
     writer.write_f32_be(config.layer_height_mm)
     writer.write_f32_be(config.exposure_time_s)
     writer.write_u8(1)
-    writer.write_f32_be(0.0)
-    writer.write_f32_be(0.0)
-    writer.write_f32_be(0.0)
+    writer.write_f32_be(0.0)  # bottom layer off time
+    writer.write_f32_be(config.rest_before_lift_s)
+    writer.write_f32_be(config.rest_after_lift_s)
     writer.write_f32_be(config.wait_after_retract_s)
-    writer.write_f32_be(0.0)
-    writer.write_f32_be(0.0)
+    writer.write_f32_be(config.rest_before_lift_s)
+    writer.write_f32_be(config.rest_after_lift_s)
     writer.write_f32_be(config.wait_after_retract_s)
     writer.write_f32_be(config.bottom_exposure_time_s)
     writer.write_u32_be(config.bottom_layers)
     writer.write_f32_be(config.lift_distance_mm)
     writer.write_f32_be(config.lift_speed_mm_min)
-    writer.write_f32_be(config.lift_distance_mm)
-    writer.write_f32_be(config.lift_speed_mm_min)
+    writer.write_f32_be(config.lift_distance2_mm or config.lift_distance_mm)
+    writer.write_f32_be(config.lift_speed2_mm_min or config.lift_speed_mm_min)
     writer.write_f32_be(config.retract_distance_mm)
     writer.write_f32_be(config.retract_speed_mm_min)
-    writer.write_f32_be(config.retract_distance_mm)
-    writer.write_f32_be(config.retract_speed_mm_min)
+    writer.write_f32_be(config.retract_distance2_mm or config.retract_distance_mm)
+    writer.write_f32_be(config.retract_speed2_mm_min or config.retract_speed_mm_min)
     for _ in range(8):
         writer.write_f32_be(0.0)
     writer.write_u16_be(config.bottom_light_pwm)
@@ -239,18 +252,18 @@ def _write_layer(writer: ByteWriter, layer: GooLayer) -> None:
     writer.write_f32_be(200.0)
     writer.write_f32_be(layer.z_mm)
     writer.write_f32_be(layer.exposure_s)
-    writer.write_f32_be(0.0)
-    writer.write_f32_be(0.0)
-    writer.write_f32_be(0.0)
+    writer.write_f32_be(0.0)  # layer off time
+    writer.write_f32_be(layer.rest_before_lift_s)
+    writer.write_f32_be(layer.rest_after_lift_s)
     writer.write_f32_be(layer.after_retract_s)
     writer.write_f32_be(layer.lift_distance_mm)
     writer.write_f32_be(layer.lift_speed_mm_min)
-    writer.write_f32_be(0.0)
-    writer.write_f32_be(0.0)
+    writer.write_f32_be(layer.lift_distance2_mm)
+    writer.write_f32_be(layer.lift_speed2_mm_min)
     writer.write_f32_be(layer.retract_distance_mm)
     writer.write_f32_be(layer.retract_speed_mm_min)
-    writer.write_f32_be(0.0)
-    writer.write_f32_be(0.0)
+    writer.write_f32_be(layer.retract_distance2_mm)
+    writer.write_f32_be(layer.retract_speed2_mm_min)
     writer.write_u16_be(layer.light_pwm)
     writer.write_bytes(DELIMITER)
     writer.write_u32_be(len(layer.data) + 2)

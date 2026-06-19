@@ -83,6 +83,7 @@ def _preview(request: dict[str, Any]) -> None:
             progress=lambda message: _write_json({"type": "progress", "message": message}),
             include_raft_mask=False,
             on_anchor=_emit_support,
+            manual_points=_manual_points_from_request(request),
         )
         if not _preview_support_has_geometry(plan, support) and model_lift > 0:
             model_lift = 0.0
@@ -144,6 +145,7 @@ def _slice(request: dict[str, Any]) -> None:
             raster_mesh=raster_mesh,
             cad_models=cad_models,
             cad_slice_mode=cad_slice_mode,
+            manual_support_points=_manual_points_from_request(request),
         ),
         request["outputPath"],
         request.get("format", "goo"),
@@ -213,6 +215,21 @@ def _is_step_path(path: object) -> bool:
     return str(path or "").lower().endswith((".stp", ".step"))
 
 
+def _manual_points_from_request(request: dict[str, Any]) -> tuple[tuple[float, float, float], ...]:
+    raw = request.get("manualSupports") or ()
+    points: list[tuple[float, float, float]] = []
+    for entry in raw:
+        try:
+            if isinstance(entry, dict):
+                point = (float(entry["x"]), float(entry["y"]), float(entry["z"]))
+            else:
+                point = (float(entry[0]), float(entry[1]), float(entry[2]))
+        except (KeyError, IndexError, TypeError, ValueError):
+            continue
+        points.append(point)
+    return tuple(points)
+
+
 def _layer_workers_from_request(request: dict[str, Any]) -> int | None:
     value = request.get("layerWorkers")
     if value in (None, ""):
@@ -259,6 +276,16 @@ def _config_from_request(request: dict[str, Any]) -> PrintConfig:
         retract_distance_mm=float(printer.get("retractDistance", cfg.retract_distance_mm)),
         retract_speed_mm_min=float(printer.get("retractSpeed", cfg.retract_speed_mm_min)),
         wait_after_retract_s=float(printer.get("waitAfterRetract", cfg.wait_after_retract_s)),
+        rest_before_lift_s=float(printer.get("restBeforeLift", cfg.rest_before_lift_s)),
+        rest_after_lift_s=float(printer.get("restAfterLift", cfg.rest_after_lift_s)),
+        lift_distance2_mm=float(printer.get("liftDistance2", cfg.lift_distance2_mm)),
+        lift_speed2_mm_min=float(printer.get("liftSpeed2", cfg.lift_speed2_mm_min)),
+        retract_distance2_mm=float(printer.get("retractDistance2", cfg.retract_distance2_mm)),
+        retract_speed2_mm_min=float(printer.get("retractSpeed2", cfg.retract_speed2_mm_min)),
+        bottom_lift_distance_mm=float(printer.get("bottomLiftDistance", cfg.bottom_lift_distance_mm)),
+        bottom_lift_speed_mm_min=float(printer.get("bottomLiftSpeed", cfg.bottom_lift_speed_mm_min)),
+        bottom_retract_distance_mm=float(printer.get("bottomRetractDistance", cfg.bottom_retract_distance_mm)),
+        bottom_retract_speed_mm_min=float(printer.get("bottomRetractSpeed", cfg.bottom_retract_speed_mm_min)),
         light_pwm=int(printer.get("lightPwm", cfg.light_pwm)),
         bottom_light_pwm=int(printer.get("bottomLightPwm", cfg.bottom_light_pwm)),
         machine_name=str(printer.get("machineName", cfg.machine_name)),

@@ -50,6 +50,26 @@ class SliceSupportTests(unittest.TestCase):
         self.assertGreater(len(plan.anchors), 0)
         self.assertGreater(prepared.layer_count, 8)
 
+    def test_manual_point_adds_routed_anchor(self) -> None:
+        config = profile("small-test").with_overrides(layer_height_mm=1.0)
+        # A cube lifted off the plate so a manual support has room to route down.
+        prepared = prepare_mesh(cube_mesh(8).transformed((20, 10, 6)), config, preserve_coordinates=True)
+        support = SupportConfig(enabled=True, support_spacing_mm=4.0, min_island_area_mm2=0.01)
+        bounds = prepared.mesh.bounds()
+        click = ((bounds.min_x + bounds.max_x) / 2, (bounds.min_y + bounds.max_y) / 2, bounds.min_z + 0.5)
+
+        base = plan_supports(prepared, config, support, prepared.layer_count)
+        with_manual = plan_supports(prepared, config, support, prepared.layer_count, manual_points=(click,))
+
+        manual_anchors = [anchor for anchor in with_manual.anchors if anchor.role == "manual"]
+        self.assertEqual(len(with_manual.anchors), len(base.anchors) + len(manual_anchors))
+        self.assertEqual(len(manual_anchors), 1)
+        anchor = manual_anchors[0]
+        # The routed anchor's tip lands at the clicked location and reaches the plate.
+        self.assertAlmostEqual((anchor.x + 0.5) * config.pixel_size_x_mm, click[0], delta=config.pixel_size_x_mm * 2)
+        self.assertAlmostEqual((anchor.y + 0.5) * config.pixel_size_y_mm, click[1], delta=config.pixel_size_y_mm * 2)
+        self.assertEqual(anchor.base_layer, 0)
+
     def test_higher_overhang_angle_generates_more_supports(self) -> None:
         config = profile("small-test").with_overrides(layer_height_mm=1.0)
         prepared = prepare_mesh(_ledge_mesh(), config, z_offset_mm=4.0)

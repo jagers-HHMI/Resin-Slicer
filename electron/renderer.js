@@ -4,6 +4,9 @@ const fields = [
   "machineName", "resolutionX", "resolutionY", "sizeX", "sizeY", "sizeZ", "layerHeight",
   "resinName", "exposure", "bottomExposure", "bottomLayers", "transitionLayers",
   "liftDistance", "liftSpeed", "retractDistance", "retractSpeed",
+  "liftDistance2", "liftSpeed2", "retractDistance2", "retractSpeed2",
+  "bottomLiftDistance", "bottomLiftSpeed", "bottomRetractDistance", "bottomRetractSpeed",
+  "restBeforeLift", "restAfterLift",
   "waitAfterRetract", "resinDensity", "lightPwm", "bottomLightPwm",
   "rotateX", "rotateY", "rotateZ", "translateX", "translateY", "translateZ",
   "scale", "modelLift", "overhangAngle", "supportSpacing", "postDiameter",
@@ -204,6 +207,7 @@ let supportPresets = cloneSettings(defaultSupportPresets);
 let dragState = null;
 let isGeneratingSupports = false;
 let isBusy = false;
+let manualSupportMode = false;
 let slicePreviewActive = false;
 let slicePreviewPlateId = null;
 let slicePreviewSession = 0;
@@ -234,6 +238,7 @@ async function init() {
   $("saveResinProfileButton").addEventListener("click", () => saveCurrentResinProfile({ createNew: true }));
   $("updateResinProfileButton").addEventListener("click", () => saveCurrentResinProfile({ key: currentResinProfileKey() }));
   $("deleteResinProfileButton").addEventListener("click", deleteSelectedResinProfile);
+  $("deleteAllResinsButton").addEventListener("click", deleteAllResinProfiles);
   $("importSupportButton").addEventListener("click", () => importProfile("support"));
   $("exportSupportButton").addEventListener("click", () => exportProfile("support"));
   for (const button of document.querySelectorAll("[data-support-preset]")) {
@@ -268,6 +273,8 @@ async function init() {
   $("clipLayerUp").addEventListener("click", () => stepActiveClipLayer(1));
   $("clipLayerDown").addEventListener("click", () => stepActiveClipLayer(-1));
   $("previewButton").addEventListener("click", generatePreview);
+  $("addSupportButton").addEventListener("click", toggleManualSupportMode);
+  $("clearManualSupportButton").addEventListener("click", clearManualSupports);
   $("sliceButton").addEventListener("click", slice);
   $("sliceAllButton").addEventListener("click", sliceAll);
   $("viewSliceButton").addEventListener("click", toggleSlicePreview);
@@ -317,17 +324,25 @@ async function init() {
     updateScene();
   });
   $("format").addEventListener("change", () => {
-    if (models.length && !$("outputPath").value) setDefaultOutput();
+    const ext = $("format").value;
+    const current = $("outputPath").value.trim();
+    if (current) {
+      $("outputPath").value = replaceExtension(current, ext);
+    } else if (models.length) {
+      setDefaultOutput();
+    }
   });
   for (const id of ["centerModel", "supportsEnabled", "primarySupportsEnabled", "sphericalContactEnabled", "enforcersEnabled", "braceEnabled"]) {
     $(id).addEventListener("change", () => {
       if (id === "sphericalContactEnabled") syncSphericalContactFields();
+      if (id === "primarySupportsEnabled") syncPrimarySupportFields();
       writeActivePlateSettingsFromForm();
       updateScene();
     });
   }
   $("sphericalContactInsetPercent").addEventListener("input", syncSphericalContactFields);
   syncSphericalContactFields();
+  syncPrimarySupportFields();
   initPlacementUnits();
   bindSceneSettingUpdates();
   bindPanelToggles();
@@ -339,6 +354,7 @@ async function init() {
   initGlobalShortcuts();
   viewer.onScenePick = handleScenePick;
   viewer.onSceneDoubleClick = handleSceneDoubleClick;
+  viewer.onPlaceSupport = handleManualSupportClick;
   viewer.onModelDrag = handleModelDrag;
   viewer.onModelDragEnd = handleModelDragEnd;
   viewer.onGizmoDrag = handleGizmoDrag;
@@ -875,7 +891,7 @@ function machineProfileConfigFromForm() {
     size_x_mm: number("sizeX"),
     size_y_mm: number("sizeY"),
     size_z_mm: number("sizeZ"),
-    layer_height_mm: number("layerHeight"),
+    layer_height_mm: resin.layerHeight ?? number("layerHeight"),
     resin_name: resin.resinName || "Standard",
     exposure_time_s: resin.exposure,
     bottom_exposure_time_s: resin.bottomExposure,
@@ -899,12 +915,14 @@ function applyMachineConfigToForm(cfg) {
   $("sizeX").value = cfg.size_x_mm ?? 120;
   $("sizeY").value = cfg.size_y_mm ?? 67.5;
   $("sizeZ").value = cfg.size_z_mm ?? 160;
-  $("layerHeight").value = cfg.layer_height_mm ?? 0.05;
+  // Layer height is a resin setting (applied via the resin profile), not a
+  // machine setting, so selecting a printer leaves it untouched.
 }
 
 function resinProfileFromConfig(cfg = {}) {
   return {
     resinName: cfg.resin_name || "Standard",
+    layerHeight: cfg.layer_height_mm ?? 0.05,
     exposure: cfg.exposure_time_s ?? 2.5,
     bottomExposure: cfg.bottom_exposure_time_s ?? 35,
     bottomLayers: cfg.bottom_layers ?? 6,
@@ -913,6 +931,16 @@ function resinProfileFromConfig(cfg = {}) {
     liftSpeed: cfg.lift_speed_mm_min ?? 65,
     retractDistance: cfg.retract_distance_mm ?? 5,
     retractSpeed: cfg.retract_speed_mm_min ?? 150,
+    liftDistance2: cfg.lift_distance2_mm ?? 0,
+    liftSpeed2: cfg.lift_speed2_mm_min ?? 0,
+    retractDistance2: cfg.retract_distance2_mm ?? 0,
+    retractSpeed2: cfg.retract_speed2_mm_min ?? 0,
+    bottomLiftDistance: cfg.bottom_lift_distance_mm ?? 0,
+    bottomLiftSpeed: cfg.bottom_lift_speed_mm_min ?? 0,
+    bottomRetractDistance: cfg.bottom_retract_distance_mm ?? 0,
+    bottomRetractSpeed: cfg.bottom_retract_speed_mm_min ?? 0,
+    restBeforeLift: cfg.rest_before_lift_s ?? 0,
+    restAfterLift: cfg.rest_after_lift_s ?? 0,
     waitAfterRetract: cfg.wait_after_retract_s ?? 0.2,
     resinDensity: cfg.resin_density_g_ml ?? 1.1,
     lightPwm: cfg.light_pwm ?? 255,
@@ -922,6 +950,7 @@ function resinProfileFromConfig(cfg = {}) {
 
 function applyResinProfileToForm(resin = {}) {
   $("resinName").value = resin.resinName || "Standard";
+  if (resin.layerHeight !== undefined && resin.layerHeight !== null) $("layerHeight").value = resin.layerHeight;
   $("exposure").value = resin.exposure ?? 2.5;
   $("bottomExposure").value = resin.bottomExposure ?? 35;
   $("bottomLayers").value = resin.bottomLayers ?? 6;
@@ -930,6 +959,16 @@ function applyResinProfileToForm(resin = {}) {
   $("liftSpeed").value = resin.liftSpeed ?? 65;
   $("retractDistance").value = resin.retractDistance ?? 5;
   $("retractSpeed").value = resin.retractSpeed ?? 150;
+  $("liftDistance2").value = resin.liftDistance2 ?? 0;
+  $("liftSpeed2").value = resin.liftSpeed2 ?? 0;
+  $("retractDistance2").value = resin.retractDistance2 ?? 0;
+  $("retractSpeed2").value = resin.retractSpeed2 ?? 0;
+  $("bottomLiftDistance").value = resin.bottomLiftDistance ?? 0;
+  $("bottomLiftSpeed").value = resin.bottomLiftSpeed ?? 0;
+  $("bottomRetractDistance").value = resin.bottomRetractDistance ?? 0;
+  $("bottomRetractSpeed").value = resin.bottomRetractSpeed ?? 0;
+  $("restBeforeLift").value = resin.restBeforeLift ?? 0;
+  $("restAfterLift").value = resin.restAfterLift ?? 0;
   $("waitAfterRetract").value = resin.waitAfterRetract ?? 0.2;
   $("resinDensity").value = resin.resinDensity ?? 1.1;
   $("lightPwm").value = resin.lightPwm ?? 255;
@@ -969,6 +1008,104 @@ function renderTopbarResinOptions(machineKey = currentMachineProfileKey(), prefe
   }
   select.value = bucket.selected || keys[0] || "";
   renderResinNameOptions(machineKey);
+  renderResinManager(machineKey);
+}
+
+// A compact list of every resin for the current printer, each row selectable
+// with a delete button, so resins can be pruned quickly (e.g. before re-import).
+function renderResinManager(machineKey = currentMachineProfileKey()) {
+  const list = $("resinManagerList");
+  if (!list) return;
+  const bucket = machineResinBucket(machineKey);
+  const keys = Object.keys(bucket.items).sort((a, b) => resinProfileLabel(bucket.items[a]).localeCompare(resinProfileLabel(bucket.items[b])));
+  list.innerHTML = "";
+  for (const key of keys) {
+    const item = document.createElement("li");
+    item.className = "resin-list-item" + (key === bucket.selected ? " active" : "");
+    const name = document.createElement("button");
+    name.type = "button";
+    name.className = "resin-list-name";
+    name.textContent = resinProfileLabel(bucket.items[key]);
+    name.title = name.textContent;
+    name.addEventListener("click", () => selectResinProfileByKey(machineKey, key));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "resin-list-delete";
+    remove.textContent = "×";
+    remove.title = "Delete this resin";
+    remove.setAttribute("aria-label", `Delete ${name.textContent}`);
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      deleteResinProfileByKey(machineKey, key);
+    });
+    item.append(name, remove);
+    list.appendChild(item);
+  }
+  const deleteAll = $("deleteAllResinsButton");
+  if (deleteAll) deleteAll.disabled = keys.length === 0;
+}
+
+function selectResinProfileByKey(machineKey, key) {
+  const bucket = machineResinBucket(machineKey);
+  if (!bucket.items[key]) return;
+  bucket.selected = key;
+  persistProfileStorage();
+  applyResinProfileToForm(bucket.items[key]);
+  renderTopbarResinOptions(machineKey, key);
+  writeActivePlateSettingsFromForm();
+  syncSceneSettingCommits();
+  updateScene();
+  playSound("click-soft");
+}
+
+// Quick delete (no confirm prompt) — resins are cheap to re-import. Keeps at
+// least one resin so the form always has a valid selection.
+function deleteResinProfileByKey(machineKey, key) {
+  const bucket = machineResinBucket(machineKey);
+  if (!bucket.items[key]) return;
+  if (Object.keys(bucket.items).length <= 1) {
+    logAndPrompt("Cannot Delete Resin", "At least one resin must remain. Use \"Delete all\" to reset this printer's resins.", "warning");
+    return;
+  }
+  const label = resinProfileLabel(bucket.items[key]);
+  delete bucket.items[key];
+  if (bucket.selected === key) bucket.selected = Object.keys(bucket.items)[0] || "";
+  resinProfilesByMachine[machineKey] = bucket;
+  persistProfileStorage();
+  renderTopbarResinOptions(machineKey, bucket.selected);
+  applyResinProfileToForm(selectedResinProfile(machineKey));
+  writeActivePlateSettingsFromForm();
+  syncSceneSettingCommits();
+  updateScene();
+  log(`Deleted resin profile: ${label}`);
+  playSound("delete");
+}
+
+async function deleteAllResinProfiles() {
+  const machineKey = currentMachineProfileKey();
+  const bucket = machineResinBucket(machineKey);
+  const count = Object.keys(bucket.items).length;
+  if (!count) return;
+  const confirmed = await showThemedConfirm({
+    title: "Delete All Resins?",
+    message: `Remove all ${count} resin profile${count === 1 ? "" : "s"} for this printer? A single default resin will remain.`,
+    kind: "warning",
+    confirmText: "Delete all",
+    cancelText: "Cancel"
+  });
+  if (!confirmed) return;
+  bucket.items = {};
+  bucket.selected = "";
+  resinProfilesByMachine[machineKey] = bucket;
+  // machineResinBucket() recreates a default resin when the list is empty.
+  renderTopbarResinOptions(machineKey);
+  persistProfileStorage();
+  applyResinProfileToForm(selectedResinProfile(machineKey));
+  writeActivePlateSettingsFromForm();
+  syncSceneSettingCommits();
+  updateScene();
+  log(`Deleted all resin profiles (${count}).`);
+  playSound("delete");
 }
 
 function renderResinNameOptions(machineKey = currentMachineProfileKey()) {
@@ -1356,6 +1493,7 @@ function createBuildPlate(name, settings) {
     supports: [],
     supportBraces: [],
     supportRaft: null,
+    manualSupports: [],
     dropAnimation: null
   };
 }
@@ -1387,6 +1525,16 @@ function buildPlateSettingsFromForm() {
       liftSpeed: number("liftSpeed"),
       retractDistance: number("retractDistance"),
       retractSpeed: number("retractSpeed"),
+      liftDistance2: number("liftDistance2"),
+      liftSpeed2: number("liftSpeed2"),
+      retractDistance2: number("retractDistance2"),
+      retractSpeed2: number("retractSpeed2"),
+      bottomLiftDistance: number("bottomLiftDistance"),
+      bottomLiftSpeed: number("bottomLiftSpeed"),
+      bottomRetractDistance: number("bottomRetractDistance"),
+      bottomRetractSpeed: number("bottomRetractSpeed"),
+      restBeforeLift: number("restBeforeLift"),
+      restAfterLift: number("restAfterLift"),
       waitAfterRetract: number("waitAfterRetract"),
       resinDensity: number("resinDensity"),
       lightPwm: intNumber("lightPwm"),
@@ -1486,6 +1634,16 @@ function applyBuildPlateSettingsToForm(plate) {
   $("liftSpeed").value = printer.liftSpeed;
   $("retractDistance").value = printer.retractDistance;
   $("retractSpeed").value = printer.retractSpeed;
+  $("liftDistance2").value = printer.liftDistance2 ?? 0;
+  $("liftSpeed2").value = printer.liftSpeed2 ?? 0;
+  $("retractDistance2").value = printer.retractDistance2 ?? 0;
+  $("retractSpeed2").value = printer.retractSpeed2 ?? 0;
+  $("bottomLiftDistance").value = printer.bottomLiftDistance ?? 0;
+  $("bottomLiftSpeed").value = printer.bottomLiftSpeed ?? 0;
+  $("bottomRetractDistance").value = printer.bottomRetractDistance ?? 0;
+  $("bottomRetractSpeed").value = printer.bottomRetractSpeed ?? 0;
+  $("restBeforeLift").value = printer.restBeforeLift ?? 0;
+  $("restAfterLift").value = printer.restAfterLift ?? 0;
   $("waitAfterRetract").value = printer.waitAfterRetract;
   $("lightPwm").value = printer.lightPwm;
   $("bottomLightPwm").value = printer.bottomLightPwm;
@@ -1524,9 +1682,19 @@ function applyBuildPlateSettingsToForm(plate) {
   $("braceHeight").value = support.braceHeight;
   $("braceDistance").value = support.braceDistance;
   syncSphericalContactFields();
+  syncPrimarySupportFields();
   updatePlacementFieldsFromSelection();
   updatePlateControls(plate);
   syncSceneSettingCommits();
+}
+
+function syncPrimarySupportFields() {
+  const fields = $("primarySupportFields");
+  if (!fields) return;
+  // The primary density / diameter / max-extra fields only affect support
+  // generation when "Primary extras" is enabled, so keep them hidden until
+  // then to avoid the appearance that they do nothing.
+  fields.hidden = !$("primarySupportsEnabled").checked;
 }
 
 function syncSphericalContactFields() {
@@ -1602,6 +1770,7 @@ function writeSupportPresetFields(name) {
     button.classList.toggle("active", button.dataset.supportPreset === name);
   }
   syncSphericalContactFields();
+  syncPrimarySupportFields();
   return true;
 }
 
@@ -2949,6 +3118,7 @@ async function loadStlPaths(paths, { append = false, sound = append ? "drop" : "
       plate.supports = [];
       plate.supportBraces = [];
       plate.supportRaft = null;
+      plate.manualSupports = [];
       plate.layersGenerated = false;
     }
     $("outputPath").value = "";
@@ -3120,7 +3290,8 @@ function buildProjectSnapshot() {
       settings: cloneSettings(plate.settings),
       supports: cloneSettings(plate.supports || []),
       supportBraces: cloneSettings(plate.supportBraces || []),
-      supportRaft: cloneSettings(plate.supportRaft || null)
+      supportRaft: cloneSettings(plate.supportRaft || null),
+      manualSupports: cloneSettings(plate.manualSupports || [])
     })),
     models: models.map((model) => ({
       id: model.id,
@@ -3246,6 +3417,17 @@ async function importProfile(kind) {
       log(`Import ${kind} canceled.`);
       return;
     }
+    // A batch resin file (e.g. a CHITUBOX/ELEGOO .cfgx with many resins) creates
+    // one resin profile per resin instead of importing only the active one.
+    if (kind === "resin") {
+      const batch = chituboxResinBatchFromText(file.text);
+      if (batch.length > 1) {
+        const count = importChituboxResinBatch(batch);
+        log(`Imported ${count} resin profiles from ${file.path}`);
+        playSound("confirm");
+        return;
+      }
+    }
     const imported = parseImportedProfile(file.text);
     const changed = applyImportedProfile(kind, imported.flat);
     if (!changed) {
@@ -3352,6 +3534,154 @@ async function generatePreview() {
   }
 }
 
+function toggleManualSupportMode() {
+  manualSupportMode = !manualSupportMode;
+  viewer.setSupportEditMode(manualSupportMode);
+  $("addSupportButton").classList.toggle("active", manualSupportMode);
+  const hint = $("manualSupportHint");
+  if (hint) hint.hidden = !manualSupportMode;
+  if (manualSupportMode) {
+    playSound("toggle-on");
+    log("Add-support mode on: click the model to place supports, click a marker to remove.");
+  } else {
+    playSound("toggle-off");
+  }
+}
+
+function clearManualSupports() {
+  const plate = activePlate();
+  if (!plate || !(plate.manualSupports || []).length) return;
+  plate.manualSupports = [];
+  playSound("delete");
+  afterManualSupportsChanged(plate);
+  log("Cleared manual supports.");
+}
+
+function afterManualSupportsChanged(plate) {
+  const count = (plate.manualSupports || []).length;
+  $("supportStatus").textContent = count
+    ? `${count} manual support${count === 1 ? "" : "s"} placed — Generate Supports to route them`
+    : "Supports not generated";
+  updateScene();
+}
+
+// Place (or remove) a manual support where the user clicked. The contact point
+// is found by ray-casting against the active plate's models; it is stored in
+// plate-local mm (matching plate.supports and the backend mesh coordinates) and
+// routed to a real anchor by the Python backend at preview/slice time.
+function handleManualSupportClick(clientX, clientY) {
+  const plate = activePlate();
+  if (!plate) return;
+  const ray = viewer.screenRay(clientX, clientY);
+  if (!ray) return;
+  plate.manualSupports = plate.manualSupports || [];
+  // Manual points are stored in unlifted, plate-local mm. The UI raises the
+  // model by modelLift only once supports exist, while the backend always
+  // raises it during slicing; storing without the lift keeps the point glued to
+  // the model surface regardless of which lift is currently applied.
+  const uiLift = modelLiftForPlate(plate);
+
+  let removeIndex = -1;
+  let removeDist = 1.2;
+  for (let i = 0; i < plate.manualSupports.length; i++) {
+    const point = plate.manualSupports[i];
+    const world = [point.x + plate.origin.x, point.y + plate.origin.y, point.z + uiLift];
+    const dist = pointToRayDistance(world, ray);
+    if (dist < removeDist) {
+      removeDist = dist;
+      removeIndex = i;
+    }
+  }
+  if (removeIndex >= 0) {
+    plate.manualSupports.splice(removeIndex, 1);
+    playSound("delete");
+    afterManualSupportsChanged(plate);
+    return;
+  }
+
+  const hit = raycastActivePlateModels(ray);
+  if (!hit) {
+    log("Manual support: click directly on the model surface.");
+    return;
+  }
+  plate.manualSupports.push({
+    x: hit.point[0] - plate.origin.x,
+    y: hit.point[1] - plate.origin.y,
+    z: hit.point[2] - uiLift
+  });
+  playSound("click-soft");
+  afterManualSupportsChanged(plate);
+}
+
+function raycastActivePlateModels(ray) {
+  const plate = activePlate();
+  if (!plate) return null;
+  let best = null;
+  for (const model of models) {
+    if (model.plateId !== plate.id) continue;
+    const world = modelWorldMesh(model);
+    const v = world.vertices;
+    for (let i = 0; i + 8 < v.length; i += 9) {
+      const t = rayTriangleIntersect(
+        ray.origin,
+        ray.direction,
+        [v[i], v[i + 1], v[i + 2]],
+        [v[i + 3], v[i + 4], v[i + 5]],
+        [v[i + 6], v[i + 7], v[i + 8]]
+      );
+      if (t !== null && (!best || t < best.t)) {
+        best = {
+          t,
+          point: [
+            ray.origin[0] + ray.direction[0] * t,
+            ray.origin[1] + ray.direction[1] * t,
+            ray.origin[2] + ray.direction[2] * t
+          ]
+        };
+      }
+    }
+  }
+  return best;
+}
+
+// Moeller-Trumbore ray/triangle intersection. Returns the ray parameter t (>0)
+// of the front-facing hit, or null.
+function rayTriangleIntersect(orig, dir, a, b, c) {
+  const EPS = 1e-7;
+  const e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+  const p = [
+    dir[1] * e2[2] - dir[2] * e2[1],
+    dir[2] * e2[0] - dir[0] * e2[2],
+    dir[0] * e2[1] - dir[1] * e2[0]
+  ];
+  const det = e1[0] * p[0] + e1[1] * p[1] + e1[2] * p[2];
+  if (det > -EPS && det < EPS) return null;
+  const inv = 1 / det;
+  const tvec = [orig[0] - a[0], orig[1] - a[1], orig[2] - a[2]];
+  const u = (tvec[0] * p[0] + tvec[1] * p[1] + tvec[2] * p[2]) * inv;
+  if (u < 0 || u > 1) return null;
+  const q = [
+    tvec[1] * e1[2] - tvec[2] * e1[1],
+    tvec[2] * e1[0] - tvec[0] * e1[2],
+    tvec[0] * e1[1] - tvec[1] * e1[0]
+  ];
+  const vv = (dir[0] * q[0] + dir[1] * q[1] + dir[2] * q[2]) * inv;
+  if (vv < 0 || u + vv > 1) return null;
+  const t = (e2[0] * q[0] + e2[1] * q[1] + e2[2] * q[2]) * inv;
+  return t > EPS ? t : null;
+}
+
+function pointToRayDistance(point, ray) {
+  const o = ray.origin;
+  const d = ray.direction;
+  const w = [point[0] - o[0], point[1] - o[1], point[2] - o[2]];
+  const dd = d[0] * d[0] + d[1] * d[1] + d[2] * d[2] || 1;
+  const tproj = (w[0] * d[0] + w[1] * d[1] + w[2] * d[2]) / dd;
+  const closest = [o[0] + d[0] * tproj, o[1] + d[1] * tproj, o[2] + d[2] * tproj];
+  return Math.hypot(point[0] - closest[0], point[1] - closest[1], point[2] - closest[2]);
+}
+
 async function slice() {
   if (!ensureReady(true, true)) return;
   await slicePlates([activePlate()], { forceSuffix: false, label: "Slicing" });
@@ -3391,6 +3721,13 @@ async function slicePlates(platesToSlice, { forceSuffix = false, label = "Slicin
   try {
     for (const plate of occupied) {
       const payload = collectPayloadForPlate(plate, outputPathForPlate(plate, { forceSuffix }));
+      // If the user never generated supports (and placed none manually), slice
+      // the part flat on the build plate: no auto supports, no model lift.
+      const hasSupportIntent = plate.layersGenerated || (plate.manualSupports?.length || 0) > 0;
+      if (!hasSupportIntent) {
+        payload.support = { ...payload.support, enabled: false };
+        payload.manualSupports = [];
+      }
       log(`Slicing ${plate.name}...`);
       const result = await window.slicer.slice(payload);
       plate.layersGenerated = true;
@@ -3464,8 +3801,21 @@ function basePayload(plate = activePlate(), outputPath = $("outputPath").value.t
       translateZ: 0,
       scale: 1
     },
-    support: cloneSettings(settings.support)
+    support: cloneSettings(settings.support),
+    manualSupports: manualSupportsForBackend(plate)
   };
+}
+
+// Convert stored (unlifted) manual points into the backend's mesh space, which
+// always raises the model by model_lift when supports are enabled.
+function manualSupportsForBackend(plate) {
+  const support = plate.settings.support;
+  const backendLift = support?.enabled ? Math.max(0, Number(support.modelLift) || 0) : 0;
+  return (plate.manualSupports || []).map((point) => ({
+    x: point.x,
+    y: point.y,
+    z: point.z + backendLift
+  }));
 }
 
 function outputPathForPlate(plate, { forceSuffix = false } = {}) {
@@ -3482,11 +3832,211 @@ function safeFileStem(value) {
 }
 
 function parseImportedProfile(text) {
+  const trimmed = String(text || "").trim();
+  if (trimmed.startsWith("<")) {
+    const xml = parseXmlProfile(trimmed);
+    if (xml) return { flat: flattenProfile(xml) };
+  }
   try {
-    return { flat: flattenProfile(JSON.parse(text)) };
+    const parsed = JSON.parse(text);
+    const chitubox = chituboxConfigToProfile(parsed);
+    if (chitubox) return { flat: flattenProfile(chitubox) };
+    return { flat: flattenProfile(parsed) };
   } catch (_error) {
     return { flat: flattenProfile(parseKeyValueProfile(text)) };
   }
+}
+
+// CHITUBOX / ELEGOO ".cfgx" exports are JSON with a distinctive shape: machine
+// settings live under "printerinfo", resin/print settings live inside
+// material[].slice[] arrays, and every leaf value is wrapped as
+// { "currentvalue": <value> }. The generic flattener can't see through the
+// arrays or the wrapper, so we map them explicitly here.
+function isChituboxConfig(root) {
+  return !!(root && typeof root === "object" && !Array.isArray(root) && (root.printerinfo || Array.isArray(root.material)));
+}
+
+function chituboxValue(section, key) {
+  const entry = section && section[key];
+  if (entry && typeof entry === "object" && "currentvalue" in entry) return entry.currentvalue;
+  return entry;
+}
+
+function chituboxNumber(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return undefined;
+  if (parsed === 0) return 0;
+  // CHITUBOX stores float32 values; read back as doubles they carry trailing
+  // noise (e.g. 0.05 -> 0.05000000074505806). Round to 6 significant figures
+  // (float32's real precision) to restore the nominal value.
+  return Number(parsed.toPrecision(6));
+}
+
+// Build one resin profile (the renderer's camelCase shape) from a single
+// material[].slice[] entry. Returns null if it has no usable settings.
+function chituboxSliceResin(slice) {
+  if (!slice || typeof slice !== "object") return null;
+  const print = slice.print || {};
+  const resin = slice.resin || {};
+  const advanced = slice.advanced || {};
+  const cv = chituboxValue;
+  const num = chituboxNumber;
+  const out = {};
+  const set = (key, value) => {
+    if (value === undefined || value === null || value === "") return;
+    out[key] = value;
+  };
+  set("resinName", slice.name || cv(resin, "name"));
+  set("layerHeight", num(cv(print, "layerheight")));
+  set("exposure", num(cv(print, "normalexposuretime")));
+  set("bottomExposure", num(cv(print, "bottomlayerexposuretime")));
+  set("bottomLayers", num(cv(print, "bottomlayercount")));
+  set("transitionLayers", num(cv(print, "transitionlayercount")));
+  // CHITUBOX models a two-stage (TSMC) lift: a short slow first segment near the
+  // part plus a longer fast second segment. Map both segments and the bottom
+  // overrides directly; retract distance mirrors the lift.
+  const liftA = num(cv(print, "normallayerliftheight")) || 0;
+  const liftB = num(cv(print, "normallayerliftheight2")) || 0;
+  if (liftA > 0) set("liftDistance", liftA);
+  if (liftB > 0) {
+    set("liftDistance2", liftB);
+    set("retractDistance2", liftB);
+  }
+  set("liftSpeed", num(cv(print, "normallayerliftspeed")));
+  set("liftSpeed2", num(cv(print, "normallayerliftspeed2")));
+  set("retractDistance", (liftA + liftB) || undefined);
+  set("retractSpeed", num(cv(print, "normallayerdropspeed")));
+  set("retractSpeed2", num(cv(print, "normallayerdropspeed2")));
+  set("bottomLiftDistance", num(cv(print, "bottomlayerliftheight")));
+  set("bottomLiftSpeed", num(cv(print, "bottomlayerliftspeed")));
+  set("bottomRetractSpeed", num(cv(print, "bottomlayerdropspeed")));
+  const bottomLiftA = num(cv(print, "bottomlayerliftheight")) || 0;
+  const bottomLiftB = num(cv(print, "bottomlayerliftheight2")) || 0;
+  if (bottomLiftA + bottomLiftB > 0) set("bottomRetractDistance", bottomLiftA + bottomLiftB);
+  set("restBeforeLift", num(cv(print, "normalresttimebeforelift")));
+  set("restAfterLift", num(cv(print, "normalresttimeafterlift")));
+  set("waitAfterRetract", num(cv(print, "normalresttimeafterretract")));
+  set("resinDensity", num(cv(resin, "resindensity")));
+  set("lightPwm", num(cv(advanced, "normallightintensitypwm")));
+  set("bottomLightPwm", num(cv(advanced, "bottomlightintensitypwm")));
+  return Object.keys(out).length ? out : null;
+}
+
+function chituboxResinBatchFromText(text) {
+  try {
+    return chituboxResinProfiles(JSON.parse(text));
+  } catch (_error) {
+    return [];
+  }
+}
+
+// Add a batch of imported resin profiles to the current machine's resin list,
+// filling any missing fields with that machine's defaults. Returns the count.
+function importChituboxResinBatch(resins) {
+  const machineKey = currentMachineProfileKey();
+  const bucket = machineResinBucket(machineKey);
+  const defaults = resinProfileFromConfig(profiles[machineKey] || builtinProfiles[machineKey] || {});
+  let firstKey = "";
+  for (const partial of resins) {
+    const resin = { ...defaults, ...partial };
+    const targetKey = uniqueProfileKey(profileKeyFromName(resin.resinName, "resin"), bucket.items);
+    bucket.items[targetKey] = resin;
+    if (!firstKey) firstKey = targetKey;
+  }
+  if (firstKey) bucket.selected = firstKey;
+  resinProfilesByMachine[machineKey] = bucket;
+  persistProfileStorage();
+  applyResinProfileToForm(bucket.items[bucket.selected]);
+  renderTopbarResinOptions(machineKey, bucket.selected);
+  writeActivePlateSettingsFromForm();
+  syncSceneSettingCommits();
+  updateScene();
+  return resins.length;
+}
+
+// Every resin slice across all materials, for batch import. Returns [] if not a
+// CHITUBOX config.
+function chituboxResinProfiles(root) {
+  if (!isChituboxConfig(root)) return [];
+  const profilesOut = [];
+  for (const material of Array.isArray(root.material) ? root.material : []) {
+    for (const slice of Array.isArray(material.slice) ? material.slice : []) {
+      const resin = chituboxSliceResin(slice);
+      if (resin) profilesOut.push(resin);
+    }
+  }
+  return profilesOut;
+}
+
+// Machine fields plus the active slice's resin settings, for a single-profile
+// import. Returns null for non-CHITUBOX JSON so it falls back to the generic
+// flattener.
+function chituboxConfigToProfile(root) {
+  if (!isChituboxConfig(root)) return null;
+  const cv = chituboxValue;
+  const num = chituboxNumber;
+  const out = {};
+  const set = (key, value) => {
+    if (value === undefined || value === null || value === "") return;
+    out[key] = value;
+  };
+  const pickIndex = (value, length) => {
+    const index = Math.floor(Number(value));
+    return Number.isFinite(index) && index >= 0 && index < length ? index : 0;
+  };
+
+  const printer = root.printerinfo || {};
+  set("machineName", cv(printer, "machinename") || cv(printer, "machinetype"));
+  set("resolutionX", num(cv(printer, "resolutionx")));
+  set("resolutionY", num(cv(printer, "resolutiony")));
+  set("sizeX", num(cv(printer, "machinewidth")));
+  set("sizeY", num(cv(printer, "machinedepth")));
+  set("sizeZ", num(cv(printer, "machineheight")));
+
+  const materials = Array.isArray(root.material) ? root.material : [];
+  const material = materials[pickIndex(root.current_material, materials.length)];
+  if (material) {
+    const slices = Array.isArray(material.slice) ? material.slice : [];
+    const resin = chituboxSliceResin(slices[pickIndex(material.current_slice, slices.length)]);
+    if (resin) Object.assign(out, resin);
+  }
+
+  return Object.keys(out).length ? out : null;
+}
+
+// Some printer-config exports (e.g. older XML-style profiles) are XML rather
+// than JSON. Parse them into a nested object so the same key-alias matching used
+// for JSON/INI imports can pick up recognizable settings (element tag names and
+// attributes become keys).
+function parseXmlProfile(text) {
+  try {
+    const doc = new DOMParser().parseFromString(text, "application/xml");
+    if (doc.getElementsByTagName("parsererror").length) return null;
+    const root = doc.documentElement;
+    return root ? xmlElementToObject(root) : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function xmlElementToObject(element) {
+  const obj = {};
+  for (const attr of Array.from(element.attributes || [])) {
+    obj[attr.name] = coerceImportedValue(attr.value);
+  }
+  const childElements = Array.from(element.children || []);
+  if (!childElements.length) {
+    const textValue = (element.textContent || "").trim();
+    if (!Object.keys(obj).length) return coerceImportedValue(textValue);
+    if (textValue) obj.value = coerceImportedValue(textValue);
+    return obj;
+  }
+  for (const child of childElements) {
+    // Keep the first occurrence of any repeated tag, matching flattenProfile's
+    // first-wins behavior for duplicate keys.
+    if (obj[child.nodeName] === undefined) obj[child.nodeName] = xmlElementToObject(child);
+  }
+  return obj;
 }
 
 function parseKeyValueProfile(text) {
@@ -3551,13 +4101,13 @@ function applyMachineProfile(flat) {
   changed += applyNumberValue("sizeX", flat, ["sizeX", "size_x_mm", "displayWidth", "display_width", "machineWidth", "buildPlateX", "buildVolumeX", "printX", "xSize"]);
   changed += applyNumberValue("sizeY", flat, ["sizeY", "size_y_mm", "displayHeight", "display_height", "machineDepth", "machineLength", "buildPlateY", "buildVolumeY", "printY", "ySize"]);
   changed += applyNumberValue("sizeZ", flat, ["sizeZ", "size_z_mm", "maxPrintHeight", "max_print_height", "machineHeight", "buildVolumeZ", "printZ", "zSize"]);
-  changed += applyNumberValue("layerHeight", flat, ["layerHeight", "layer_height_mm", "layerThickness"]);
   return changed;
 }
 
 function applyResinProfile(flat) {
   let changed = 0;
   changed += applyTextValue("resinName", flat, ["resinName", "materialName", "profileName", "name"]);
+  changed += applyNumberValue("layerHeight", flat, ["layerHeight", "layer_height_mm", "layerThickness"]);
   changed += applyNumberValue("exposure", flat, ["exposure", "exposureTime", "exposure_time_s", "normalExposure", "normalExposureTime"]);
   changed += applyNumberValue("bottomExposure", flat, ["bottomExposure", "bottomExposureTime", "bottom_exposure_time_s", "baseExposure"]);
   changed += applyNumberValue("bottomLayers", flat, ["bottomLayers", "bottomLayerCount", "bottom_layers", "baseLayers"], Math.round);
@@ -3566,7 +4116,17 @@ function applyResinProfile(flat) {
   changed += applyNumberValue("liftSpeed", flat, ["liftSpeed", "liftingSpeed", "lift_speed_mm_min", "normalLiftSpeed"]);
   changed += applyNumberValue("retractDistance", flat, ["retractDistance", "retract_distance_mm", "retractHeight"]);
   changed += applyNumberValue("retractSpeed", flat, ["retractSpeed", "retract_speed_mm_min", "zRetractSpeed"]);
-  changed += applyNumberValue("waitAfterRetract", flat, ["waitAfterRetract", "wait_after_retract_s", "restTimeAfterRetract", "lightOffDelay", "offTime"]);
+  changed += applyNumberValue("waitAfterRetract", flat, ["waitAfterRetract", "wait_after_retract_s", "restTimeAfterRetract", "normalResttimeAfterRetract", "lightOffDelay", "offTime"]);
+  changed += applyNumberValue("liftDistance2", flat, ["liftDistance2", "lift_distance2_mm", "liftHeight2", "normalLayerLiftHeight2", "secondLiftDistance"]);
+  changed += applyNumberValue("liftSpeed2", flat, ["liftSpeed2", "lift_speed2_mm_min", "normalLayerLiftSpeed2", "secondLiftSpeed"]);
+  changed += applyNumberValue("retractDistance2", flat, ["retractDistance2", "retract_distance2_mm", "normalLayerDropHeight2", "secondRetractDistance"]);
+  changed += applyNumberValue("retractSpeed2", flat, ["retractSpeed2", "retract_speed2_mm_min", "normalLayerDropSpeed2", "secondRetractSpeed"]);
+  changed += applyNumberValue("bottomLiftDistance", flat, ["bottomLiftDistance", "bottom_lift_distance_mm", "bottomLayerLiftHeight", "bottomLiftHeight"]);
+  changed += applyNumberValue("bottomLiftSpeed", flat, ["bottomLiftSpeed", "bottom_lift_speed_mm_min", "bottomLayerLiftSpeed"]);
+  changed += applyNumberValue("bottomRetractDistance", flat, ["bottomRetractDistance", "bottom_retract_distance_mm", "bottomLayerDropHeight2"]);
+  changed += applyNumberValue("bottomRetractSpeed", flat, ["bottomRetractSpeed", "bottom_retract_speed_mm_min", "bottomLayerDropSpeed"]);
+  changed += applyNumberValue("restBeforeLift", flat, ["restBeforeLift", "rest_before_lift_s", "restTimeBeforeLift", "normalResttimeBeforeLift"]);
+  changed += applyNumberValue("restAfterLift", flat, ["restAfterLift", "rest_after_lift_s", "restTimeAfterLift", "normalResttimeAfterLift"]);
   changed += applyNumberValue("resinDensity", flat, ["resinDensity", "density", "resin_density_g_ml"]);
   changed += applyNumberValue("lightPwm", flat, ["lightPwm", "lightPWM", "normalLightPwm", "normalLightPWM", "pwm"], Math.round);
   changed += applyNumberValue("bottomLightPwm", flat, ["bottomLightPwm", "bottomLightPWM", "bottom_light_pwm", "bottomPwm", "bottomPWM"], Math.round);
@@ -3607,6 +4167,7 @@ function applySupportProfile(flat) {
   changed += applyNumberValue("braceHeight", flat, ["braceHeight", "brace_height_mm"]);
   changed += applyNumberValue("braceDistance", flat, ["braceDistance", "brace_max_distance_mm"]);
   syncSphericalContactFields();
+  syncPrimarySupportFields();
   return changed;
 }
 
@@ -3714,8 +4275,7 @@ function buildExportProfile(kind) {
         resolutionY: settings.resolutionY,
         machineWidth: settings.sizeX,
         machineDepth: settings.sizeY,
-        machineHeight: settings.sizeZ,
-        layerHeight: settings.layerHeight
+        machineHeight: settings.sizeZ
       }
     };
   }
@@ -3728,6 +4288,7 @@ function buildExportProfile(kind) {
       settings,
       chitubox: {
         resinName: settings.resinName,
+        layerHeight: settings.layerHeight,
         normalExposureTime: settings.exposure,
         bottomExposureTime: settings.bottomExposure,
         bottomLayerCount: settings.bottomLayers,
@@ -3757,14 +4318,14 @@ function currentMachineProfile() {
     resolutionY: intNumber("resolutionY"),
     sizeX: number("sizeX"),
     sizeY: number("sizeY"),
-    sizeZ: number("sizeZ"),
-    layerHeight: number("layerHeight")
+    sizeZ: number("sizeZ")
   };
 }
 
 function currentResinProfile() {
   return {
     resinName: $("resinName").value.trim(),
+    layerHeight: number("layerHeight"),
     exposure: number("exposure"),
     bottomExposure: number("bottomExposure"),
     bottomLayers: intNumber("bottomLayers"),
@@ -3773,6 +4334,16 @@ function currentResinProfile() {
     liftSpeed: number("liftSpeed"),
     retractDistance: number("retractDistance"),
     retractSpeed: number("retractSpeed"),
+    liftDistance2: number("liftDistance2"),
+    liftSpeed2: number("liftSpeed2"),
+    retractDistance2: number("retractDistance2"),
+    retractSpeed2: number("retractSpeed2"),
+    bottomLiftDistance: number("bottomLiftDistance"),
+    bottomLiftSpeed: number("bottomLiftSpeed"),
+    bottomRetractDistance: number("bottomRetractDistance"),
+    bottomRetractSpeed: number("bottomRetractSpeed"),
+    restBeforeLift: number("restBeforeLift"),
+    restAfterLift: number("restAfterLift"),
     waitAfterRetract: number("waitAfterRetract"),
     resinDensity: number("resinDensity"),
     lightPwm: intNumber("lightPwm"),
@@ -4032,6 +4603,7 @@ function buildScene({ skipDerivedGeometry = false } = {}) {
     models: modelItems,
     selectionBoxes,
     supports: skipDerivedGeometry ? null : offsetSupports(active.supports, active.origin),
+    manualSupports: skipDerivedGeometry ? null : offsetManualSupports(active.manualSupports, active.origin, modelLiftForPlate(active)),
     supportBraces: skipDerivedGeometry ? null : offsetBraces(active.supportBraces, active.origin),
     supportRaft: skipDerivedGeometry ? null : offsetSupportRaft(active.supportRaft, active.origin),
     transformGizmo,
@@ -4496,6 +5068,14 @@ function offsetSupports(items, origin) {
     baseY: item.baseY + origin.y,
     jointX: item.jointX + origin.x,
     jointY: item.jointY + origin.y
+  }));
+}
+
+function offsetManualSupports(points, origin, lift = 0) {
+  return (points || []).map((point) => ({
+    x: point.x + origin.x,
+    y: point.y + origin.y,
+    z: point.z + lift
   }));
 }
 
@@ -5054,6 +5634,8 @@ class Viewer {
     this.pickRects = [];
     this.onScenePick = null;
     this.onSceneDoubleClick = null;
+    this.onPlaceSupport = null;
+    this.supportEditMode = false;
     this.onModelDrag = null;
     this.onModelDragEnd = null;
     this.onGizmoDrag = null;
@@ -5106,12 +5688,16 @@ class Viewer {
       } else if (isLeft && hit?.type === "model") {
         mode = "model";
       }
-      this.pressedHit = isLeft && hit && (hit.type === "plate" || hit.type === "add-plate" || hit.type === "plate-action") ? hit : null;
+      // In support-edit mode a left click places/removes a manual support
+      // instead of selecting or dragging a model.
+      const placeSupport = isLeft && this.supportEditMode;
+      if (placeSupport) mode = "press";
+      this.pressedHit = !placeSupport && isLeft && hit && (hit.type === "plate" || hit.type === "add-plate" || hit.type === "plate-action") ? hit : null;
       const dragPlaneZ = mode === "model"
         ? (hit?.bounds ? boundsCenter(hit.bounds)[2] : (this.activePartFocus?.[2] || 0))
         : 0;
       this.drag = { x: event.clientX, y: event.clientY, mode, moved: false, action: mode === "gizmo" ? this.activeGizmoAction : null, planeZ: dragPlaneZ };
-      this.pointerStart = { x: event.clientX, y: event.clientY, additive, hit, clickable: isLeft && mode !== "gizmo" };
+      this.pointerStart = { x: event.clientX, y: event.clientY, additive, hit, clickable: isLeft && mode !== "gizmo", placeSupport };
       if (mode === "model" && this.onScenePick) {
         this.onScenePick({ type: "model", id: hit.id, plateId: hit.plateId, additive, dragStart: true });
       }
@@ -5158,7 +5744,13 @@ class Viewer {
     });
     this.canvas.addEventListener("pointerup", (event) => {
       const finishedDrag = this.drag;
-      if (this.pointerStart?.clickable) {
+      if (this.pointerStart?.placeSupport) {
+        const dx = event.clientX - this.pointerStart.x;
+        const dy = event.clientY - this.pointerStart.y;
+        if (Math.hypot(dx, dy) < 5 && this.onPlaceSupport) {
+          this.onPlaceSupport(event.clientX, event.clientY);
+        }
+      } else if (this.pointerStart?.clickable) {
         const dx = event.clientX - this.pointerStart.x;
         const dy = event.clientY - this.pointerStart.y;
         if (Math.hypot(dx, dy) < 4 && this.pointerStart.hit?.type !== "model") {
@@ -5381,12 +5973,12 @@ class Viewer {
   orbit(dx, dy) {
     if (this.navigationMode === "trackball") {
       this.yaw -= dx * 0.008;
-      this.pitch = clamp(this.pitch - dy * 0.007, deg(-84), deg(84));
+      this.pitch = clamp(this.pitch + dy * 0.007, deg(-84), deg(84));
       this.roll = normalizeAngle(this.roll - dx * 0.003 + dy * 0.0015);
     } else {
       this.roll = 0;
       this.yaw -= dx * 0.008;
-      this.pitch = clamp(this.pitch - dy * 0.006, deg(10), deg(82));
+      this.pitch = clamp(this.pitch + dy * 0.006, deg(10), deg(82));
     }
   }
 
@@ -5610,6 +6202,7 @@ class Viewer {
       ? makeMesh(this.gl, makeSelectionBoxGeometry(scene.selectionBoxes), [1.0, 0.86, 0.26, 1], this.gl.LINES)
       : null;
     this.meshes.supports = makeMesh(this.gl, makeSupportGeometry(scene.supports, scene.supportBraces), [1.0, 0.63, 0.18, 1], this.gl.TRIANGLES);
+    this.setManualSupportMarkers(scene.manualSupports);
     this.meshes.supportRaft = scene.supportRaft
       ? makeMesh(this.gl, makeSupportRaftGeometry(scene.supportRaft), scene.supportRaft.type === "skate" ? [0.95, 0.7, 0.2, 1] : [1.0, 0.62, 0.16, 1], this.gl.TRIANGLES)
       : null;
@@ -5743,6 +6336,17 @@ class Viewer {
     this.meshes.supports = makeMesh(this.gl, makeSupportGeometry(items, braces), [1.0, 0.63, 0.18, 1], this.gl.TRIANGLES);
   }
 
+  setSupportEditMode(on) {
+    this.supportEditMode = !!on;
+    this.canvas.style.cursor = this.supportEditMode ? "crosshair" : "";
+  }
+
+  setManualSupportMarkers(points) {
+    this.meshes.manualMarkers = points && points.length
+      ? makeMesh(this.gl, makeManualMarkerGeometry(points), [0.95, 0.3, 0.85, 1], this.gl.TRIANGLES)
+      : null;
+  }
+
   renderFrame() {
     const gl = this.gl;
     gl.enable(gl.DEPTH_TEST);
@@ -5785,6 +6389,7 @@ class Viewer {
     }
     if (this.meshes.supportRaft) drawMesh(gl, this.program, this.meshes.supportRaft, mvp, this.clipZ);
     if (this.meshes.supports) drawMesh(gl, this.program, this.meshes.supports, mvp, this.clipZ);
+    if (this.meshes.manualMarkers) drawMesh(gl, this.program, this.meshes.manualMarkers, mvp, this.clipZ);
     for (const item of this.meshes.models || []) {
       this.drawModelItem(item, mvp);
     }
@@ -6553,6 +7158,16 @@ function makeSelectionBoxGeometry(boxes) {
   const normals = new Float32Array(vertices.length);
   for (let i = 2; i < normals.length; i += 3) normals[i] = 1;
   return { vertices, normals };
+}
+
+function makeManualMarkerGeometry(points) {
+  const vertices = [];
+  const normals = [];
+  for (const point of points || []) {
+    const center = [point.x, point.y, Math.max(0.1, point.z)];
+    addSphere(vertices, normals, center, 0.6, 20, 10);
+  }
+  return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
 }
 
 function makeSupportGeometry(items, braces) {

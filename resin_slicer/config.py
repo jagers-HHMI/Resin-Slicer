@@ -25,6 +25,19 @@ class PrintConfig:
     retract_distance_mm: float = 5.0
     retract_speed_mm_min: float = 150.0
     wait_after_retract_s: float = 0.2
+    # Rest times (apply on top of the lift/retract motion). 0 = none.
+    rest_before_lift_s: float = 0.0
+    rest_after_lift_s: float = 0.0
+    # Optional second lift/retract segment (two-stage / TSMC). 0 = single stage.
+    lift_distance2_mm: float = 0.0
+    lift_speed2_mm_min: float = 0.0
+    retract_distance2_mm: float = 0.0
+    retract_speed2_mm_min: float = 0.0
+    # Bottom-layer lift/retract overrides. 0 = reuse the normal value.
+    bottom_lift_distance_mm: float = 0.0
+    bottom_lift_speed_mm_min: float = 0.0
+    bottom_retract_distance_mm: float = 0.0
+    bottom_retract_speed_mm_min: float = 0.0
     light_pwm: int = 255
     bottom_light_pwm: int = 255
     machine_name: str = "Generic MSLA"
@@ -47,6 +60,26 @@ class PrintConfig:
 
     def layer_count_for_height(self, height_mm: float) -> int:
         return max(1, int(ceil(height_mm / self.layer_height_mm)))
+
+    def lift_distance_for(self, *, bottom: bool) -> float:
+        if bottom and self.bottom_lift_distance_mm > 0:
+            return self.bottom_lift_distance_mm
+        return self.lift_distance_mm
+
+    def lift_speed_for(self, *, bottom: bool) -> float:
+        if bottom and self.bottom_lift_speed_mm_min > 0:
+            return self.bottom_lift_speed_mm_min
+        return self.lift_speed_mm_min
+
+    def retract_distance_for(self, *, bottom: bool) -> float:
+        if bottom and self.bottom_retract_distance_mm > 0:
+            return self.bottom_retract_distance_mm
+        return self.retract_distance_mm
+
+    def retract_speed_for(self, *, bottom: bool) -> float:
+        if bottom and self.bottom_retract_speed_mm_min > 0:
+            return self.bottom_retract_speed_mm_min
+        return self.retract_speed_mm_min
 
     def validate(self) -> None:
         ints = {
@@ -81,6 +114,16 @@ class PrintConfig:
             "lift_distance_mm": self.lift_distance_mm,
             "retract_distance_mm": self.retract_distance_mm,
             "wait_after_retract_s": self.wait_after_retract_s,
+            "rest_before_lift_s": self.rest_before_lift_s,
+            "rest_after_lift_s": self.rest_after_lift_s,
+            "lift_distance2_mm": self.lift_distance2_mm,
+            "lift_speed2_mm_min": self.lift_speed2_mm_min,
+            "retract_distance2_mm": self.retract_distance2_mm,
+            "retract_speed2_mm_min": self.retract_speed2_mm_min,
+            "bottom_lift_distance_mm": self.bottom_lift_distance_mm,
+            "bottom_lift_speed_mm_min": self.bottom_lift_speed_mm_min,
+            "bottom_retract_distance_mm": self.bottom_retract_distance_mm,
+            "bottom_retract_speed_mm_min": self.bottom_retract_speed_mm_min,
         }
         for name, value in nonnegative.items():
             if value < 0:

@@ -108,6 +108,7 @@ def plan_supports(
     progress: Progress | None = None,
     include_raft_mask: bool = True,
     on_anchor: Callable[[SupportAnchor], None] | None = None,
+    manual_points: tuple[tuple[float, float, float], ...] = (),
 ) -> SupportPlan:
     support.validate()
     output_pixel_mm = min(config.pixel_size_x_mm, config.pixel_size_y_mm)
@@ -205,6 +206,23 @@ def plan_supports(
         history.append(current)
         occupied_layers.append(occupied)
 
+    if manual_points:
+        _append_manual_anchors(
+            manual_points,
+            prepared,
+            anchors,
+            occupied_layers,
+            analysis_config,
+            config,
+            support,
+            surface_normals,
+            body_collision_radius,
+            collision_radius,
+            placed_points,
+            on_anchor,
+            layer_count,
+        )
+
     braces = _plan_braces(anchors, prepared, config, support, layer_count, brace_radius, bed_interface_layers)
     return SupportPlan(
         tuple(anchors),
@@ -229,6 +247,68 @@ def plan_supports(
         raft_chamfer_width_mm=support.raft_chamfer_width_mm,
         raft_chamfer_angle_deg=support.raft_chamfer_angle_deg,
     )
+
+
+def _append_manual_anchors(
+    manual_points: tuple[tuple[float, float, float], ...],
+    prepared: PreparedMesh,
+    anchors: list[SupportAnchor],
+    occupied_layers: list[_OccupiedLayer],
+    analysis_config: PrintConfig,
+    config: PrintConfig,
+    support: SupportConfig,
+    surface_normals: "_SurfaceNormalSampler",
+    body_collision_radius: int,
+    collision_radius: int,
+    placed_points: "_PlacedPointIndex",
+    on_anchor: Callable[[SupportAnchor], None] | None,
+    layer_count: int,
+) -> None:
+    """Route user-placed support points using the same machinery as the auto
+    planner, so a manual support behaves exactly as an automatic one would if it
+    had chosen to anchor at that spot.
+
+    Each point is the (x, y, z) contact location in millimetres (the same world
+    coordinates the renderer draws supports in)."""
+    pixel_x = analysis_config.pixel_size_x_mm
+    pixel_y = analysis_config.pixel_size_y_mm
+    layer_height = analysis_config.layer_height_mm
+    for point in manual_points:
+        x_mm, y_mm, z_mm = float(point[0]), float(point[1]), float(point[2])
+        x = min(max(0, int(round(x_mm / pixel_x - 0.5))), analysis_config.resolution_x - 1)
+        y = min(max(0, int(round(y_mm / pixel_y - 0.5))), analysis_config.resolution_y - 1)
+        layer_index = min(max(0, int(round(z_mm / layer_height - 0.5))), max(0, layer_count - 1))
+
+        current = render_prepared_layer(prepared, analysis_config, layer_index)
+        below = (
+            render_prepared_layer(prepared, analysis_config, layer_index - 1)
+            if layer_index > 0
+            else LayerRaster(analysis_config.resolution_x, analysis_config.resolution_y)
+        )
+        fallback_normal = _estimate_surface_normal(current, below, analysis_config, x, y)
+        contact_point = (x_mm, y_mm, z_mm)
+        normal = surface_normals.normal_at_contact(contact_point, fallback_normal)
+
+        route = _find_support_route(
+            occupied_layers,
+            analysis_config,
+            support,
+            x,
+            y,
+            layer_index,
+            normal,
+            body_collision_radius,
+            collision_radius,
+            "manual",
+        )
+        if route is None:
+            continue
+
+        out_anchor = _scale_anchor_to_output(route, analysis_config, config)
+        placed_points.add(out_anchor.x, out_anchor.y)
+        anchors.append(out_anchor)
+        if on_anchor is not None:
+            on_anchor(out_anchor)
 
 
 def apply_supports(layer: LayerRaster, layer_index: int, plan: SupportPlan) -> None:

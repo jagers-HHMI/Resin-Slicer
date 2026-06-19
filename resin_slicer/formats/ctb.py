@@ -47,7 +47,13 @@ class CtbLayer:
     exposure_s: float
     lift_height_mm: float
     lift_speed_mm_min: float
+    lift_height2_mm: float
+    lift_speed2_mm_min: float
     retract_speed_mm_min: float
+    retract_height2_mm: float
+    retract_speed2_mm_min: float
+    rest_before_lift_s: float
+    rest_after_lift_s: float
     rest_after_retract_s: float
     light_pwm: float
     data: bytes
@@ -137,9 +143,15 @@ def _encode_layer(layer_index: int, raster: LayerRaster, config: PrintConfig) ->
     return CtbLayer(
         position_z_mm=config.layer_height_mm * (layer_index + 1),
         exposure_s=config.bottom_exposure_time_s if bottom else config.exposure_time_s,
-        lift_height_mm=config.lift_distance_mm,
-        lift_speed_mm_min=config.lift_speed_mm_min,
-        retract_speed_mm_min=config.retract_speed_mm_min,
+        lift_height_mm=config.lift_distance_for(bottom=bottom),
+        lift_speed_mm_min=config.lift_speed_for(bottom=bottom),
+        lift_height2_mm=config.lift_distance2_mm,
+        lift_speed2_mm_min=config.lift_speed2_mm_min,
+        retract_speed_mm_min=config.retract_speed_for(bottom=bottom),
+        retract_height2_mm=config.retract_distance2_mm,
+        retract_speed2_mm_min=config.retract_speed2_mm_min,
+        rest_before_lift_s=config.rest_before_lift_s,
+        rest_after_lift_s=config.rest_after_lift_s,
         rest_after_retract_s=config.wait_after_retract_s,
         light_pwm=float(config.bottom_light_pwm if bottom else config.light_pwm),
         data=encode_rle(raster.runs()),
@@ -240,8 +252,8 @@ def _build_settings(config: PrintConfig, layers: list[CtbLayer], material_mm3: f
     settings.write_u32_le(1)
     settings.write_f32_le(config.lift_distance_mm)
     settings.write_f32_le(config.lift_speed_mm_min)
-    settings.write_f32_le(config.lift_distance_mm)
-    settings.write_f32_le(config.lift_speed_mm_min)
+    settings.write_f32_le(config.lift_distance2_mm or config.lift_distance_mm)
+    settings.write_f32_le(config.lift_speed2_mm_min or config.lift_speed_mm_min)
     settings.write_f32_le(config.retract_speed_mm_min)
     settings.write_f32_le(material_mm3 / 1000.0)
     settings.write_f32_le(material_mm3 / 1000.0 * config.resin_density_g_ml)
@@ -300,13 +312,13 @@ def _write_layer(writer: ByteWriter, layer: CtbLayer, layer_index: int, page_num
     _write_section(writer, 0, 0)
     writer.write_f32_le(layer.lift_height_mm)
     writer.write_f32_le(layer.lift_speed_mm_min)
-    writer.write_f32_le(0.0)
-    writer.write_f32_le(0.0)
+    writer.write_f32_le(layer.lift_height2_mm)
+    writer.write_f32_le(layer.lift_speed2_mm_min)
     writer.write_f32_le(layer.retract_speed_mm_min)
-    writer.write_f32_le(0.0)
-    writer.write_f32_le(0.0)
-    writer.write_f32_le(0.0)
-    writer.write_f32_le(0.0)
+    writer.write_f32_le(layer.retract_height2_mm)
+    writer.write_f32_le(layer.retract_speed2_mm_min)
+    writer.write_f32_le(layer.rest_before_lift_s)
+    writer.write_f32_le(layer.rest_after_lift_s)
     writer.write_f32_le(layer.rest_after_retract_s)
     writer.write_f32_le(layer.light_pwm)
     writer.write_u32_le(0)

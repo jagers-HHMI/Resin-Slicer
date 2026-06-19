@@ -36,6 +36,7 @@ class SliceJob:
     raster_mesh: Mesh | None = None
     cad_models: tuple[CadSliceModel, ...] = ()
     cad_slice_mode: str = "tessellated"
+    manual_support_points: tuple[tuple[float, float, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,7 @@ def slice_to_file(
             support_config,
             prepared.layer_count,
             progress=progress,
+            manual_points=job.manual_support_points,
         )
         if progress:
             progress(f"planned {len(support_plan.anchors)} supports")
