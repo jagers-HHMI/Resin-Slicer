@@ -118,7 +118,7 @@ ipcMain.handle("dialog:open-profile", async (_event, kind) => {
     title: `Import ${profileKindLabel(kind)} profile`,
     properties: ["openFile"],
     filters: [
-      { name: "Profile Files", extensions: ["json", "cfg", "ini", "txt", "chitubox", "cbprofile"] },
+      { name: "Profile Files", extensions: ["json", "cfg", "cfgx", "cfgd", "xml", "ini", "txt", "chitubox", "cbprofile"] },
       { name: "All Files", extensions: ["*"] }
     ]
   });

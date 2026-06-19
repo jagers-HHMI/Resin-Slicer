@@ -48,7 +48,6 @@
                 <label>X mm <input id="sizeX" type="number" step="0.01"></label>
                 <label>Y mm <input id="sizeY" type="number" step="0.01"></label>
                 <label>Z mm <input id="sizeZ" type="number" step="0.01"></label>
-                <label>Layer mm <input id="layerHeight" type="number" step="0.01"></label>
               </div>
             </section>
           </div>
@@ -66,19 +65,46 @@
                 <button id="updateResinProfileButton" type="button">Save Current</button>
                 <button id="deleteResinProfileButton" class="danger" type="button">Delete</button>
               </div>
+              <div class="resin-manager">
+                <div class="resin-manager-head">
+                  <span>Resins for this printer</span>
+                  <button id="deleteAllResinsButton" class="danger" type="button">Delete all</button>
+                </div>
+                <ul id="resinManagerList" class="resin-list"></ul>
+              </div>
               <div class="grid two">
+                <label>Layer height mm <input id="layerHeight" type="number" step="0.01" value="0.05"></label>
+                <label>Density g/ml <input id="resinDensity" type="number" step="0.01" value="1.1"></label>
                 <label>Normal exposure <input id="exposure" type="number" step="0.01" value="2.5"></label>
                 <label>Bottom exposure <input id="bottomExposure" type="number" step="0.1" value="35"></label>
                 <label>Bottom layers <input id="bottomLayers" type="number" step="1" value="6"></label>
                 <label>Transition layers <input id="transitionLayers" type="number" step="1" value="6"></label>
-                <label>Lift distance <input id="liftDistance" type="number" step="0.1" value="5"></label>
-                <label>Lift speed <input id="liftSpeed" type="number" step="1" value="65"></label>
-                <label>Retract distance <input id="retractDistance" type="number" step="0.1" value="5"></label>
-                <label>Retract speed <input id="retractSpeed" type="number" step="1" value="150"></label>
-                <label>Wait after retract <input id="waitAfterRetract" type="number" step="0.1" value="0.2"></label>
-                <label>Density g/ml <input id="resinDensity" type="number" step="0.01" value="1.1"></label>
                 <label>Light PWM <input id="lightPwm" type="number" step="1" value="255"></label>
                 <label>Bottom PWM <input id="bottomLightPwm" type="number" step="1" value="255"></label>
+              </div>
+              <h3 class="resin-subhead">Lift &amp; retract (normal layers)</h3>
+              <div class="grid two">
+                <label>Lift distance <input id="liftDistance" type="number" step="0.1" value="5"></label>
+                <label>Lift speed <input id="liftSpeed" type="number" step="1" value="65"></label>
+                <label>Lift distance 2 <input id="liftDistance2" type="number" step="0.1" value="0"></label>
+                <label>Lift speed 2 <input id="liftSpeed2" type="number" step="1" value="0"></label>
+                <label>Retract distance <input id="retractDistance" type="number" step="0.1" value="5"></label>
+                <label>Retract speed <input id="retractSpeed" type="number" step="1" value="150"></label>
+                <label>Retract distance 2 <input id="retractDistance2" type="number" step="0.1" value="0"></label>
+                <label>Retract speed 2 <input id="retractSpeed2" type="number" step="1" value="0"></label>
+              </div>
+              <h3 class="resin-subhead">Bottom layers (0 = use normal)</h3>
+              <div class="grid two">
+                <label>Bottom lift distance <input id="bottomLiftDistance" type="number" step="0.1" value="0"></label>
+                <label>Bottom lift speed <input id="bottomLiftSpeed" type="number" step="1" value="0"></label>
+                <label>Bottom retract distance <input id="bottomRetractDistance" type="number" step="0.1" value="0"></label>
+                <label>Bottom retract speed <input id="bottomRetractSpeed" type="number" step="1" value="0"></label>
+              </div>
+              <h3 class="resin-subhead">Rest times</h3>
+              <div class="grid two">
+                <label>Rest before lift <input id="restBeforeLift" type="number" step="0.1" value="0"></label>
+                <label>Rest after lift <input id="restAfterLift" type="number" step="0.1" value="0"></label>
+                <label>Wait after retract <input id="waitAfterRetract" type="number" step="0.1" value="0.2"></label>
               </div>
             </section>
           </div>
@@ -210,6 +236,11 @@
           <section id="menuSupportActions" class="group support-toolbar right-menu-section" data-right-menu-section="support-basics">
             <h2>Supports</h2>
             <button id="previewButton" class="primary" type="button">Generate Supports</button>
+            <div class="preset-row">
+              <button id="addSupportButton" type="button">Add Supports</button>
+              <button id="clearManualSupportButton" type="button">Clear Manual</button>
+            </div>
+            <small id="manualSupportHint" class="manual-support-hint" hidden>Click the model to add a support; click a marker to remove it.</small>
             <label class="check"><input id="supportsEnabled" type="checkbox" checked> Enable supports</label>
             <div class="preset-row">
               <button type="button" data-support-preset="light">Light</button>
@@ -233,9 +264,11 @@
               <label>Overhang deg <input id="overhangAngle" type="number" step="1" value="45"></label>
               <label>Spacing mm <input id="supportSpacing" type="number" step="0.1" value="3"></label>
               <label class="check"><input id="primarySupportsEnabled" type="checkbox"> Primary extras</label>
-              <label>Primary density <input id="primaryDensityMultiplier" type="number" step="0.1" value="2"></label>
-              <label>Primary diameter <input id="primaryAreaDiameter" type="number" step="0.1" value="8"></label>
-              <label>Max primary extra <input id="primaryMaxExtra" type="number" step="1" value="8"></label>
+              <div id="primarySupportFields" class="grid two nested-fields" hidden>
+                <label>Primary density <input id="primaryDensityMultiplier" type="number" step="0.1" value="2"></label>
+                <label>Primary diameter <input id="primaryAreaDiameter" type="number" step="0.1" value="8"></label>
+                <label>Max primary extra <input id="primaryMaxExtra" type="number" step="1" value="8"></label>
+              </div>
               <label>Post diameter <input id="postDiameter" type="number" step="0.01" value="0.56"></label>
               <label>Tip diameter <input id="tipDiameter" type="number" step="0.01" value="0.36"></label>
               <label>Tip type
