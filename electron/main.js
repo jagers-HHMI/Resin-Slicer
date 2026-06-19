@@ -1,5 +1,5 @@
 const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
-const { spawn } = require("child_process");
+const { spawn, execFileSync } = require("child_process");
 const fsSync = require("fs");
 const fs = require("fs/promises");
 const { createReadStream } = require("fs");
@@ -241,10 +241,65 @@ ipcMain.handle("bridge:slice", async (event, payload) => {
   return runBridge("slice", payload, (message) => event.sender.send("slice:progress", message));
 });
 
+let cachedPython = null;
+
+// Returns the concrete interpreter path for a candidate command if it is a
+// Python >= 3.10, otherwise null. `py -3.12` etc. are resolved to the real
+// python.exe so callers can spawn it with `-m` directly.
+function probePython(command, args) {
+  try {
+    const script = "import sys;print('%d.%d|%s' % (sys.version_info[0], sys.version_info[1], sys.executable))";
+    const out = execFileSync(command, [...args, "-c", script], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"]
+    }).trim();
+    const [version, executable] = out.split("|");
+    const [major, minor] = version.split(".").map((n) => parseInt(n, 10));
+    if (major > 3 || (major === 3 && minor >= 10)) {
+      return executable || command;
+    }
+  } catch {
+    // not present / wrong version
+  }
+  return null;
+}
+
 function pythonExecutable() {
+  // Packaged build ships its own interpreter next to the app.
   const bundled = path.resolve(__dirname, "..", "..", "..", "python", "python.exe");
   if (fsSync.existsSync(bundled)) return bundled;
-  return process.env.PYTHON || "python";
+
+  if (cachedPython) return cachedPython;
+
+  // Detect a usable Python >= 3.10 rather than trusting bare `python`, which on
+  // some machines resolves to an unrelated/old interpreter (e.g. a CAD suite's
+  // bundled Python). An explicit PYTHON override is honored first if it's valid.
+  const candidates = [];
+  if (process.env.PYTHON) candidates.push([process.env.PYTHON, []]);
+  if (process.platform === "win32") {
+    candidates.push(
+      ["py", ["-3.12"]],
+      ["py", ["-3.11"]],
+      ["py", ["-3.10"]],
+      ["py", ["-3"]],
+      ["python", []],
+      ["python3", []]
+    );
+  } else {
+    candidates.push(["python3", []], ["python", []]);
+  }
+
+  for (const [command, args] of candidates) {
+    const resolved = probePython(command, args);
+    if (resolved) {
+      cachedPython = resolved;
+      return cachedPython;
+    }
+  }
+
+  // Last resort: preserve previous behavior so the bridge surfaces a clear error.
+  cachedPython = process.env.PYTHON || "python";
+  return cachedPython;
 }
 
 function stepPythonExecutable() {

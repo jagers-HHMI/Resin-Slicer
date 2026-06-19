@@ -8,7 +8,8 @@
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on tcp:5178 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5178 electron .\"",
     "build": "vite build",
     "start": "electron .",
-    "check": "node --check electron/main.js && node --check electron/preload.js && node --check electron/renderer.js && vite build"
+    "postinstall": "node tools/ensure-electron.js",
+    "check": "node --check electron/main.js && node --check electron/preload.js && node --check electron/renderer.js && node --check tools/ensure-electron.js && vite build"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",
