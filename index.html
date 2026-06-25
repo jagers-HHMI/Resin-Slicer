@@ -231,6 +231,20 @@
             <label>Scale <input id="scale" type="number" step="0.01" value="1.00"></label>
             <label>Vertical offset <input id="dropOffset" type="number" min="0" step="0.01" value="0.05"></label>
             <label class="check"><input id="centerModel" type="checkbox" checked> Center on build plate</label>
+            <div class="arrange-block">
+              <div class="arrange-head"><span>Auto Arrange</span><small>Click a build-plate region</small></div>
+              <div class="arrange-grid">
+                <button type="button" data-arrange-region="back-left" title="Back-left">↖</button>
+                <button type="button" data-arrange-region="back" title="Back">↑</button>
+                <button type="button" data-arrange-region="back-right" title="Back-right">↗</button>
+                <button type="button" data-arrange-region="left" title="Left">←</button>
+                <button class="active" type="button" data-arrange-region="center" title="Center">●</button>
+                <button type="button" data-arrange-region="right" title="Right">→</button>
+                <button type="button" data-arrange-region="front-left" title="Front-left">↙</button>
+                <button type="button" data-arrange-region="front" title="Front">↓</button>
+                <button type="button" data-arrange-region="front-right" title="Front-right">↘</button>
+              </div>
+            </div>
           </details>
 
           <section id="menuSupportActions" class="group support-toolbar right-menu-section" data-right-menu-section="support-basics">
@@ -238,9 +252,10 @@
             <button id="previewButton" class="primary" type="button">Generate Supports</button>
             <div class="preset-row">
               <button id="addSupportButton" type="button">Add Supports</button>
+              <button id="generateManualSupportButton" type="button">Generate Manual</button>
               <button id="clearManualSupportButton" type="button">Clear Manual</button>
             </div>
-            <small id="manualSupportHint" class="manual-support-hint" hidden>Click the model to add a support; click a marker to remove it.</small>
+            <small id="manualSupportHint" class="manual-support-hint" hidden>Click the model to add a support; click a marker to remove it. Use Generate Manual to route them onto the model.</small>
             <label class="check"><input id="supportsEnabled" type="checkbox" checked> Enable supports</label>
             <div class="preset-row">
               <button type="button" data-support-preset="light">Light</button>

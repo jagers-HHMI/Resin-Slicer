@@ -70,6 +70,26 @@ class SliceSupportTests(unittest.TestCase):
         self.assertAlmostEqual((anchor.y + 0.5) * config.pixel_size_y_mm, click[1], delta=config.pixel_size_y_mm * 2)
         self.assertEqual(anchor.base_layer, 0)
 
+    def test_manual_only_routes_just_the_manual_points(self) -> None:
+        config = profile("small-test").with_overrides(layer_height_mm=1.0)
+        prepared = prepare_mesh(cube_mesh(8).transformed((20, 10, 6)), config, preserve_coordinates=True)
+        support = SupportConfig(enabled=True, support_spacing_mm=4.0, min_island_area_mm2=0.01)
+        bounds = prepared.mesh.bounds()
+        click = ((bounds.min_x + bounds.max_x) / 2, (bounds.min_y + bounds.max_y) / 2, bounds.min_z + 0.5)
+
+        # Auto analysis would normally place several anchors; manual_only skips it
+        # and routes only the supplied point.
+        auto = plan_supports(prepared, config, support, prepared.layer_count)
+        self.assertGreater(len(auto.anchors), 1)
+
+        manual_only = plan_supports(
+            prepared, config, support, prepared.layer_count, manual_points=(click,), manual_only=True
+        )
+        self.assertEqual(len(manual_only.anchors), 1)
+        self.assertTrue(all(anchor.role == "manual" for anchor in manual_only.anchors))
+        self.assertEqual(len(manual_only.braces), 0)
+        self.assertEqual(manual_only.anchors[0].base_layer, 0)
+
     def test_higher_overhang_angle_generates_more_supports(self) -> None:
         config = profile("small-test").with_overrides(layer_height_mm=1.0)
         prepared = prepare_mesh(_ledge_mesh(), config, z_offset_mm=4.0)

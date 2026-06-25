@@ -859,6 +859,42 @@ details.group > .preset-row {
   color: #f4f8fc;
 }
 
+.arrange-block {
+  margin-top: 10px;
+}
+
+.arrange-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.arrange-head small {
+  color: #8fa6bb;
+  font-size: 11px;
+}
+
+.arrange-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  max-width: 168px;
+}
+
+.arrange-grid button {
+  padding: 8px 0;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.arrange-grid button.active {
+  border-color: #7ea4ca;
+  background: #2b6cb0;
+  color: #f4f8fc;
+}
+
 .resin-manager {
   margin-top: 10px;
 }
