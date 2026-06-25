@@ -109,6 +109,7 @@ def plan_supports(
     include_raft_mask: bool = True,
     on_anchor: Callable[[SupportAnchor], None] | None = None,
     manual_points: tuple[tuple[float, float, float], ...] = (),
+    manual_only: bool = False,
 ) -> SupportPlan:
     support.validate()
     output_pixel_mm = min(config.pixel_size_x_mm, config.pixel_size_y_mm)
@@ -154,7 +155,15 @@ def plan_supports(
             # Empty layer (e.g. the model-lift gap or an internal void): there is
             # nothing here to support or to collide against, so skip the costly
             # dilation / unsupported-mask / connected-component analysis entirely.
-            history.append(current)
+            if not manual_only:
+                history.append(current)
+            continue
+
+        if manual_only:
+            # Manual-only pass: we still need the per-layer occupied geometry so
+            # user points can route down to the model/bed, but the automatic
+            # overhang detection and candidate placement are skipped entirely.
+            occupied_layers.append(occupied)
             continue
 
         base_layer = history[0] if history else LayerRaster(analysis_config.resolution_x, analysis_config.resolution_y)
@@ -223,7 +232,7 @@ def plan_supports(
             layer_count,
         )
 
-    braces = _plan_braces(anchors, prepared, config, support, layer_count, brace_radius, bed_interface_layers)
+    braces = () if manual_only else _plan_braces(anchors, prepared, config, support, layer_count, brace_radius, bed_interface_layers)
     return SupportPlan(
         tuple(anchors),
         post_radius,

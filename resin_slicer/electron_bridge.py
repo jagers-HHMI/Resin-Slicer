@@ -70,6 +70,7 @@ def _preview(request: dict[str, Any]) -> None:
         xy_offset_mm=(transform.translate_x_mm, transform.translate_y_mm),
         preserve_coordinates=has_model_entries,
     )
+    manual_only = bool(request.get("manualOnly"))
     plan = SupportPlan((), 0, 0, 0, 0.0, 0)
     if support.enabled:
         def _emit_support(anchor: Any) -> None:
@@ -84,8 +85,11 @@ def _preview(request: dict[str, Any]) -> None:
             include_raft_mask=False,
             on_anchor=_emit_support,
             manual_points=_manual_points_from_request(request),
+            manual_only=manual_only,
         )
-        if not _preview_support_has_geometry(plan, support) and model_lift > 0:
+        # In manual-only mode the model is already lifted (auto supports exist),
+        # so never collapse the lift back to zero here.
+        if not manual_only and not _preview_support_has_geometry(plan, support) and model_lift > 0:
             model_lift = 0.0
             prepared = prepare_mesh(
                 mesh,

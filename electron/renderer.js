@@ -206,6 +206,7 @@ const defaultSupportPresets = {
 let supportPresets = cloneSettings(defaultSupportPresets);
 let dragState = null;
 let isGeneratingSupports = false;
+let generatingPlateId = null;
 let isBusy = false;
 let manualSupportMode = false;
 let slicePreviewActive = false;
@@ -253,6 +254,14 @@ async function init() {
   });
   $("selectAllButton").addEventListener("click", selectAllModels);
   $("moveToActivePlateButton").addEventListener("click", moveSelectedModelsToActivePlate);
+  for (const button of document.querySelectorAll("[data-arrange-region]")) {
+    button.addEventListener("click", () => {
+      for (const other of document.querySelectorAll("[data-arrange-region]")) {
+        other.classList.toggle("active", other === button);
+      }
+      autoArrangeActivePlate(button.dataset.arrangeRegion);
+    });
+  }
   $("clipEnabled").addEventListener("change", () => {
     activePlate().clipEnabled = $("clipEnabled").checked;
     snapPlateClipHeightToLayer(activePlate());
@@ -274,6 +283,7 @@ async function init() {
   $("clipLayerDown").addEventListener("click", () => stepActiveClipLayer(-1));
   $("previewButton").addEventListener("click", generatePreview);
   $("addSupportButton").addEventListener("click", toggleManualSupportMode);
+  $("generateManualSupportButton").addEventListener("click", generateManualSupports);
   $("clearManualSupportButton").addEventListener("click", clearManualSupports);
   $("sliceButton").addEventListener("click", slice);
   $("sliceAllButton").addEventListener("click", sliceAll);
@@ -2642,10 +2652,15 @@ function handleModelDrag(drag) {
 function handleModelDragEnd() {
   const selection = selectedModels();
   if (!selection.length) return;
-  snapModelsToDropOffset(selection);
   const state = dragState;
   dragState = null;
+  // In-plane moves and vertical-axis rotations must not change the part's
+  // height (that would break its registration with the supports we keep), so we
+  // only re-seat the part on the bed when the orientation actually changed.
   if (state?.type === "move-xy") {
+    // Moving a part in the build plane keeps its supports: they ride along and
+    // stay valid, so the generated state is preserved (no re-generation needed).
+    const raftedPlates = new Set();
     for (const model of selection) {
       const plate = buildPlates.find((p) => p.id === model.plateId);
       const snap = state.snapshots?.get(model.id);
@@ -2657,8 +2672,10 @@ function handleModelDragEnd() {
       const oldBounds = { minX: cur.minX - dx, maxX: cur.maxX - dx, minY: cur.minY - dy, maxY: cur.maxY - dy, minZ: cur.minZ, maxZ: cur.maxZ };
       plate.supports = plate.supports.map((s) => supportInsidePlateBounds(s, oldBounds) ? translateSupport(s, dx, dy) : s);
       plate.supportBraces = plate.supportBraces.map((b) => braceInsidePlateBounds(b, oldBounds) ? translateBrace(b, dx, dy) : b);
-      plate.layersGenerated = false;
-      plate.supportRaft = null;
+      if (!raftedPlates.has(plate.id)) {
+        plate.supportRaft = translateRaft(plate.supportRaft, dx, dy);
+        raftedPlates.add(plate.id);
+      }
     }
   } else if (state?.type === "rotate-z") {
     const angleRad = (state.totalAngleDeg ?? 0) * Math.PI / 180;
@@ -2681,10 +2698,11 @@ function handleModelDragEnd() {
       model.renderMesh = null;
       plate.supports = plate.supports.map((s) => supportInsidePlateBounds(s, oldBounds) ? rotateSupportAround(s, cx, cy, cos, sin) : s);
       plate.supportBraces = plate.supportBraces.map((b) => braceInsidePlateBounds(b, oldBounds) ? rotateBraceAround(b, cx, cy, cos, sin) : b);
-      plate.layersGenerated = false;
-      plate.supportRaft = null;
     }
   } else {
+    // Raising (Z) or tilting (non-vertical rotation / scale) invalidates the
+    // supports, so re-seat the part on the bed, drop them, and mark stale.
+    snapModelsToDropOffset(selection);
     removeSupportStructureForModels(selection);
     invalidateGeneratedLayersForSelection(selection);
   }
@@ -2813,9 +2831,11 @@ function applyPlacementFieldToSelected(fieldId) {
     }
     maybeMoveModelToPlateByCentroid(model);
   }
-  if (transformsModel) snapModelsToDropOffset(selection);
   const isXYTranslate = key === "translateX" || key === "translateY";
   const isZRotate = key === "rotateZ";
+  // In-plane moves and vertical-axis rotations preserve the part's height, so
+  // skip the bed re-seat for those (it would shift Z and break support contact).
+  if (transformsModel && !isXYTranslate && !isZRotate) snapModelsToDropOffset(selection);
   if (isXYTranslate) {
     for (const model of selection) {
       const plate = buildPlates.find((p) => p.id === model.plateId);
@@ -2828,8 +2848,7 @@ function applyPlacementFieldToSelected(fieldId) {
       const oldBounds = { minX: cur.minX - dx, maxX: cur.maxX - dx, minY: cur.minY - dy, maxY: cur.maxY - dy, minZ: cur.minZ, maxZ: cur.maxZ };
       plate.supports = plate.supports.map((s) => supportInsidePlateBounds(s, oldBounds) ? translateSupport(s, dx, dy) : s);
       plate.supportBraces = plate.supportBraces.map((b) => braceInsidePlateBounds(b, oldBounds) ? translateBrace(b, dx, dy) : b);
-      plate.layersGenerated = false;
-      plate.supportRaft = null;
+      plate.supportRaft = translateRaft(plate.supportRaft, dx, dy);
     }
   } else if (isZRotate) {
     for (const model of selection) {
@@ -2853,8 +2872,6 @@ function applyPlacementFieldToSelected(fieldId) {
       const sin = Math.sin(dAngleDeg * Math.PI / 180);
       plate.supports = plate.supports.map((s) => supportInsidePlateBounds(s, oldBounds) ? rotateSupportAround(s, center[0], center[1], cos, sin) : s);
       plate.supportBraces = plate.supportBraces.map((b) => braceInsidePlateBounds(b, oldBounds) ? rotateBraceAround(b, center[0], center[1], cos, sin) : b);
-      plate.layersGenerated = false;
-      plate.supportRaft = null;
     }
   } else if (transformsModel) {
     for (const model of selection) {
@@ -3021,6 +3038,17 @@ function translateBrace(brace, dx, dy) {
 
 function translateCoord(value, delta) {
   return Number.isFinite(value) ? value + delta : value;
+}
+
+function translateRaft(raft, dx, dy) {
+  if (!raft || (dx === 0 && dy === 0)) return raft;
+  return {
+    ...cloneSettings(raft),
+    x0: translateCoord(raft.x0, dx),
+    y0: translateCoord(raft.y0, dy),
+    x1: translateCoord(raft.x1, dx),
+    y1: translateCoord(raft.y1, dy)
+  };
 }
 
 function rotatePoint2d(x, y, cx, cy, cos, sin) {
@@ -3471,11 +3499,40 @@ async function exportProfile(kind) {
 async function generatePreview() {
   if (!ensureReady(false, true)) return;
   const plate = activePlate();
+  const plateModels = models.filter((model) => model.plateId === plate.id);
+  // Generate only for the selected part(s); fall back to the whole plate when
+  // nothing on it is selected.
+  const selected = selectedModels().filter((model) => model.plateId === plate.id);
+  const targets = selected.length ? selected : plateModels;
+  const partial = targets.length > 0 && targets.length < plateModels.length;
+  const scopeLabel = partial
+    ? `${targets.length} selected part${targets.length === 1 ? "" : "s"} on ${plate.name}`
+    : plate.name;
+
+  // When generating for a subset, keep the supports/braces that belong to the
+  // other parts so they are not wiped out.
+  const targetBounds = targets.map((model) => expandedModelPlateBounds(model, plate, 2.5));
+  const keepSupports = partial
+    ? (plate.supports || []).filter((support) => !targetBounds.some((bounds) => supportInsidePlateBounds(support, bounds)))
+    : [];
+  const keepBraces = partial
+    ? (plate.supportBraces || []).filter((brace) => !targetBounds.some((bounds) => braceInsidePlateBounds(brace, bounds)))
+    : [];
+  const keepRaft = partial ? plate.supportRaft : null;
+
   playSound("click-crisp");
   setBusy(true);
   isGeneratingSupports = true;
-  $("supportStatus").textContent = `Generating supports for ${plate.name}...`;
-  log(`Generating supports for ${plate.name}...`);
+  generatingPlateId = plate.id;
+  $("supportStatus").textContent = `Generating supports for ${scopeLabel}...`;
+  log(`Generating supports for ${scopeLabel}...`);
+
+  // Raise the part first so the supports visibly grow up to the lifted model,
+  // instead of the model jumping up after the supports have already appeared.
+  plate.supports = keepSupports.slice();
+  plate.supportBraces = keepBraces.slice();
+  plate.supportRaft = keepRaft;
+  updateScene();
 
   // Show supports as the Python analysis emits them, throttled so we are not
   // rebuilding the scene geometry on every single anchor.
@@ -3488,8 +3545,8 @@ async function generatePreview() {
     // Suppress any late-firing throttled render once generation has finished
     // (the authoritative result has already been rendered by then).
     if (!isGeneratingSupports || activePlate().id !== plate.id) return;
-    plate.supports = streamed.slice();
-    $("supportStatus").textContent = `Generating supports for ${plate.name}... ${streamed.length.toLocaleString()}`;
+    plate.supports = keepSupports.concat(streamed);
+    $("supportStatus").textContent = `Generating supports for ${scopeLabel}... ${streamed.length.toLocaleString()}`;
     updateScene();
   };
   const scheduleRender = () => {
@@ -3506,22 +3563,19 @@ async function generatePreview() {
       streamed.push(message.support);
       scheduleRender();
     } else if (message.type === "progress" && message.message) {
-      if (!streamed.length) $("supportStatus").textContent = `Generating supports for ${plate.name}...`;
+      if (!streamed.length) $("supportStatus").textContent = `Generating supports for ${scopeLabel}...`;
     }
   });
 
   try {
-    plate.supports = [];
-    plate.supportBraces = [];
-    plate.supportRaft = null;
-    const result = await window.slicer.preview(collectPayloadForPlate(plate));
-    plate.supports = result.supports || [];
-    plate.supportBraces = result.braces || [];
-    plate.supportRaft = result.raft || null;
+    const result = await window.slicer.preview(collectPayloadForPlate(plate, undefined, targets));
+    plate.supports = keepSupports.concat(result.supports || []);
+    plate.supportBraces = keepBraces.concat(result.braces || []);
+    plate.supportRaft = result.raft || keepRaft;
     plate.layersGenerated = true;
     $("supportStatus").textContent = `${plate.supports.length.toLocaleString()} supports generated`;
     updateScene();
-    log(`Generated ${plate.name}: ${result.layers} layers, ${plate.supports.length} supports, ${plate.supportBraces.length} braces`);
+    log(`Generated ${scopeLabel}: ${result.layers} layers, ${(result.supports || []).length} new supports, ${(result.braces || []).length} braces`);
     playSound("success");
   } catch (error) {
     $("supportStatus").textContent = "Support generation failed";
@@ -3530,19 +3584,75 @@ async function generatePreview() {
   } finally {
     stopListening();
     isGeneratingSupports = false;
+    generatingPlateId = null;
     setBusy(false);
   }
 }
 
-function toggleManualSupportMode() {
-  manualSupportMode = !manualSupportMode;
+// Route just the user-placed manual markers and merge them into the existing
+// support preview, so an auto-generated plate can be supplemented with manual
+// supports without re-running (and re-streaming) the whole auto analysis.
+async function generateManualSupports() {
+  if (!ensureReady(false, true)) return;
+  const plate = activePlate();
+  if (!(plate.manualSupports || []).length) {
+    log("No manual supports to generate: turn on Add Supports and click the model first.");
+    return;
+  }
+  if (!plate.settings.support.enabled) {
+    logAndPrompt("Supports Disabled", "Enable supports before generating manual supports.");
+    return;
+  }
+  playSound("click-crisp");
+  setBusy(true);
+  isGeneratingSupports = true;
+  generatingPlateId = plate.id;
+  $("supportStatus").textContent = `Routing manual supports for ${plate.name}...`;
+  // Lift the part first (same as a full generation) so the manual supports grow
+  // up to the model rather than the part jumping afterwards.
+  updateScene();
+  try {
+    const payload = collectPayloadForPlate(plate);
+    payload.manualOnly = true;
+    const result = await window.slicer.preview(payload);
+    const manualAnchors = result.supports || [];
+    // Replace only the manual portion of the preview, leaving any auto supports
+    // (and their braces/raft) untouched.
+    plate.supports = (plate.supports || []).filter((support) => support.role !== "manual").concat(manualAnchors);
+    plate.layersGenerated = true;
+    const count = manualAnchors.length;
+    // Leave add-support mode (this also rebuilds the scene) so the user can move
+    // parts again right away.
+    setManualSupportMode(false);
+    $("supportStatus").textContent = `${plate.supports.length.toLocaleString()} supports (${count.toLocaleString()} manual)`;
+    log(`Routed ${count} manual support${count === 1 ? "" : "s"} on ${plate.name}. Add-support mode off — move parts freely.`);
+    playSound("success");
+  } catch (error) {
+    $("supportStatus").textContent = "Manual support generation failed";
+    log(`Generate manual supports failed: ${error.message}`);
+    showErrorPrompt("Generate Manual Supports Failed", error);
+  } finally {
+    isGeneratingSupports = false;
+    generatingPlateId = null;
+    setBusy(false);
+  }
+}
+
+function setManualSupportMode(on) {
+  manualSupportMode = !!on;
   viewer.setSupportEditMode(manualSupportMode);
   $("addSupportButton").classList.toggle("active", manualSupportMode);
   const hint = $("manualSupportHint");
   if (hint) hint.hidden = !manualSupportMode;
+  // Rebuild the scene so the movement gizmo hides/reappears with the mode.
+  updateScene();
+}
+
+function toggleManualSupportMode() {
+  setManualSupportMode(!manualSupportMode);
   if (manualSupportMode) {
     playSound("toggle-on");
-    log("Add-support mode on: click the model to place supports, click a marker to remove.");
+    log("Add-support mode on: click the model to place supports, click a marker to remove. Click Generate Manual when done.");
   } else {
     playSound("toggle-off");
   }
@@ -3560,33 +3670,74 @@ function clearManualSupports() {
 function afterManualSupportsChanged(plate) {
   const count = (plate.manualSupports || []).length;
   $("supportStatus").textContent = count
-    ? `${count} manual support${count === 1 ? "" : "s"} placed — Generate Supports to route them`
+    ? `${count} manual support${count === 1 ? "" : "s"} placed — Generate Manual to route them`
     : "Supports not generated";
   updateScene();
 }
 
+// The owning model of a manual marker (null for legacy plate-local markers).
+function manualSupportOwnerModel(point, plate) {
+  if (!point || point.modelId == null) return null;
+  return models.find((model) => model.id === point.modelId && model.plateId === plate.id) || null;
+}
+
+// Plate-local (origin-relative, unlifted) position of a manual marker. Markers
+// are stored in the owning model's mesh-local space, so we re-apply that model's
+// current transform here — this keeps the marker glued to the surface as the
+// part is moved, rotated, or scaled.
+function manualSupportPlateLocal(point, plate) {
+  const model = manualSupportOwnerModel(point, plate);
+  if (!model) return [point.x || 0, point.y || 0, point.z || 0];
+  const b = model.mesh.bounds;
+  const center = [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, (b.minZ + b.maxZ) / 2];
+  const t = model.transform;
+  const angles = [deg(t.rotateX), deg(t.rotateY), deg(t.rotateZ)];
+  let p = rotatePoint([
+    (point.lx - center[0]) * t.scale,
+    (point.ly - center[1]) * t.scale,
+    (point.lz - center[2]) * t.scale
+  ], angles);
+  return [p[0] + center[0] + t.translateX, p[1] + center[1] + t.translateY, p[2] + center[2] + t.translateZ];
+}
+
+// World-space position of a manual marker (for picking / rendering).
+function manualSupportWorldPoint(point, plate) {
+  const local = manualSupportPlateLocal(point, plate);
+  return [local[0] + plate.origin.x, local[1] + plate.origin.y, local[2] + modelLiftForPlate(plate)];
+}
+
+// Convert a world-space surface hit into the owning model's mesh-local space so
+// it survives later transforms.
+function manualSupportLocalFromWorld(world, model, plate) {
+  const off = modelWorldOffset(model, plate);
+  const b = model.mesh.bounds;
+  const center = [(b.minX + b.maxX) / 2, (b.minY + b.maxY) / 2, (b.minZ + b.maxZ) / 2];
+  const t = model.transform;
+  const angles = [deg(t.rotateX), deg(t.rotateY), deg(t.rotateZ)];
+  const p = rotatePointInverse([
+    world[0] - off[0] - center[0],
+    world[1] - off[1] - center[1],
+    world[2] - off[2] - center[2]
+  ], angles);
+  const inv = t.scale ? 1 / t.scale : 1;
+  return { modelId: model.id, lx: p[0] * inv + center[0], ly: p[1] * inv + center[1], lz: p[2] * inv + center[2] };
+}
+
 // Place (or remove) a manual support where the user clicked. The contact point
-// is found by ray-casting against the active plate's models; it is stored in
-// plate-local mm (matching plate.supports and the backend mesh coordinates) and
-// routed to a real anchor by the Python backend at preview/slice time.
+// is found by ray-casting against the active plate's models; it is stored in the
+// owning model's mesh-local mm and routed to a real anchor by the Python backend
+// at preview/slice time.
 function handleManualSupportClick(clientX, clientY) {
   const plate = activePlate();
   if (!plate) return;
   const ray = viewer.screenRay(clientX, clientY);
   if (!ray) return;
   plate.manualSupports = plate.manualSupports || [];
-  // Manual points are stored in unlifted, plate-local mm. The UI raises the
-  // model by modelLift only once supports exist, while the backend always
-  // raises it during slicing; storing without the lift keeps the point glued to
-  // the model surface regardless of which lift is currently applied.
-  const uiLift = modelLiftForPlate(plate);
 
   let removeIndex = -1;
   let removeDist = 1.2;
   for (let i = 0; i < plate.manualSupports.length; i++) {
-    const point = plate.manualSupports[i];
-    const world = [point.x + plate.origin.x, point.y + plate.origin.y, point.z + uiLift];
-    const dist = pointToRayDistance(world, ray);
+    const dist = pointToRayDistance(manualSupportWorldPoint(plate.manualSupports[i], plate), ray);
     if (dist < removeDist) {
       removeDist = dist;
       removeIndex = i;
@@ -3600,15 +3751,11 @@ function handleManualSupportClick(clientX, clientY) {
   }
 
   const hit = raycastActivePlateModels(ray);
-  if (!hit) {
+  if (!hit || !hit.model) {
     log("Manual support: click directly on the model surface.");
     return;
   }
-  plate.manualSupports.push({
-    x: hit.point[0] - plate.origin.x,
-    y: hit.point[1] - plate.origin.y,
-    z: hit.point[2] - uiLift
-  });
+  plate.manualSupports.push(manualSupportLocalFromWorld(hit.point, hit.model, plate));
   playSound("click-soft");
   afterManualSupportsChanged(plate);
 }
@@ -3632,6 +3779,7 @@ function raycastActivePlateModels(ray) {
       if (t !== null && (!best || t < best.t)) {
         best = {
           t,
+          model,
           point: [
             ray.origin[0] + ray.direction[0] * t,
             ray.origin[1] + ray.direction[1] * t,
@@ -3771,9 +3919,9 @@ function collectPayload() {
   return collectPayloadForPlate(activePlate());
 }
 
-function collectPayloadForPlate(plate, outputPath = $("outputPath").value.trim()) {
-  const payload = basePayload(plate, outputPath);
-  const plateModels = models.filter((model) => model.plateId === plate.id);
+function collectPayloadForPlate(plate, outputPath = $("outputPath").value.trim(), subsetModels = null) {
+  const plateModels = (subsetModels || models.filter((model) => model.plateId === plate.id));
+  const payload = basePayload(plate, outputPath, plateModels);
   payload.inputPath = plateModels[0]?.path || "";
   payload.models = plateModels.map((model) => ({
     inputPath: model.path,
@@ -3783,7 +3931,7 @@ function collectPayloadForPlate(plate, outputPath = $("outputPath").value.trim()
   return payload;
 }
 
-function basePayload(plate = activePlate(), outputPath = $("outputPath").value.trim()) {
+function basePayload(plate = activePlate(), outputPath = $("outputPath").value.trim(), targetModels = null) {
   const settings = plate.settings;
   return {
     outputPath,
@@ -3802,20 +3950,23 @@ function basePayload(plate = activePlate(), outputPath = $("outputPath").value.t
       scale: 1
     },
     support: cloneSettings(settings.support),
-    manualSupports: manualSupportsForBackend(plate)
+    manualSupports: manualSupportsForBackend(plate, targetModels)
   };
 }
 
-// Convert stored (unlifted) manual points into the backend's mesh space, which
-// always raises the model by model_lift when supports are enabled.
-function manualSupportsForBackend(plate) {
+// Convert stored manual points into the backend's mesh space (plate-local, with
+// the model raised by model_lift when supports are enabled). When targetModels
+// is given, only markers owned by those models are routed.
+function manualSupportsForBackend(plate, targetModels = null) {
   const support = plate.settings.support;
   const backendLift = support?.enabled ? Math.max(0, Number(support.modelLift) || 0) : 0;
-  return (plate.manualSupports || []).map((point) => ({
-    x: point.x,
-    y: point.y,
-    z: point.z + backendLift
-  }));
+  const allowedIds = targetModels ? new Set(targetModels.map((model) => model.id)) : null;
+  return (plate.manualSupports || [])
+    .filter((point) => !allowedIds || point.modelId == null || allowedIds.has(point.modelId))
+    .map((point) => {
+      const local = manualSupportPlateLocal(point, plate);
+      return { x: local[0], y: local[1], z: local[2] + backendLift };
+    });
 }
 
 function outputPathForPlate(plate, { forceSuffix = false } = {}) {
@@ -4569,7 +4720,7 @@ function buildScene({ skipDerivedGeometry = false } = {}) {
     if (selected) selectionBoxes.push(bounds);
   }
 
-  if (gizmoModel && selectedModelIds.size) {
+  if (gizmoModel && selectedModelIds.size && !manualSupportMode) {
     const gizmoPlate = buildPlates.find((item) => item.id === gizmoModel.plateId);
     const bounds = offsetBounds(modelDisplayLocalBounds(gizmoModel), modelWorldOffset(gizmoModel, gizmoPlate));
     const center = boundsCenter(bounds);
@@ -4603,7 +4754,7 @@ function buildScene({ skipDerivedGeometry = false } = {}) {
     models: modelItems,
     selectionBoxes,
     supports: skipDerivedGeometry ? null : offsetSupports(active.supports, active.origin),
-    manualSupports: skipDerivedGeometry ? null : offsetManualSupports(active.manualSupports, active.origin, modelLiftForPlate(active)),
+    manualSupports: skipDerivedGeometry ? null : offsetManualSupports(active.manualSupports, active, modelLiftForPlate(active)),
     supportBraces: skipDerivedGeometry ? null : offsetBraces(active.supportBraces, active.origin),
     supportRaft: skipDerivedGeometry ? null : offsetSupportRaft(active.supportRaft, active.origin),
     transformGizmo,
@@ -4786,15 +4937,15 @@ function candidateOverlapsModels(candidate, width, depth, existingBounds) {
   ));
 }
 
-function arrangeModelsOnPlate(plateId) {
-  const plate = buildPlates.find((item) => item.id === plateId);
-  if (!plate) return;
-  const plateModels = models.filter((model) => model.plateId === plateId);
+// Shelf-pack a plate's models into a compact grid, returning each model's
+// position relative to the group origin plus the overall group dimensions.
+function packPlateModels(plateModels, bedX) {
   const gap = plateModels.length > 1 ? 4 : 0;
-  const bedX = plate.settings.printer.sizeX || 120;
+  const packed = [];
   let cursorX = 0;
   let cursorY = 0;
   let rowDepth = 0;
+  let groupWidth = 0;
   for (const model of plateModels) {
     const oriented = modelRenderMesh(model);
     const width = oriented.bounds.maxX - oriented.bounds.minX;
@@ -4804,12 +4955,103 @@ function arrangeModelsOnPlate(plateId) {
       cursorY += rowDepth + gap;
       rowDepth = 0;
     }
-    model.transform.translateX = cursorX - oriented.bounds.minX;
-    model.transform.translateY = cursorY - oriented.bounds.minY;
-    model.transform.translateZ = -oriented.bounds.minZ;
+    packed.push({ model, bounds: oriented.bounds, x: cursorX, y: cursorY, width, depth });
     cursorX += width + gap;
+    groupWidth = Math.max(groupWidth, cursorX - gap);
     rowDepth = Math.max(rowDepth, depth);
   }
+  const groupDepth = packed.reduce((max, item) => Math.max(max, item.y + item.depth), 0);
+  return { packed, groupWidth, groupDepth };
+}
+
+const arrangeRegions = {
+  "center": { h: "center", v: "middle" },
+  "front": { h: "center", v: "front" },
+  "back": { h: "center", v: "back" },
+  "left": { h: "left", v: "middle" },
+  "right": { h: "right", v: "middle" },
+  "front-left": { h: "left", v: "front" },
+  "front-right": { h: "right", v: "front" },
+  "back-left": { h: "left", v: "back" },
+  "back-right": { h: "right", v: "back" }
+};
+
+// Auto-arrange the active plate's models into a compact group, anchored to the
+// requested region of the build plate. This is a pure in-plane repack: each
+// part's supports (and manual markers) ride along with it, and heights are
+// preserved, so generated supports are kept rather than discarded.
+function autoArrangeActivePlate(region = "center") {
+  const plate = activePlate();
+  if (!plate) return;
+  const plateModels = models.filter((model) => model.plateId === plate.id);
+  if (!plateModels.length) {
+    log("Auto arrange: no objects on the active plate.");
+    return;
+  }
+  const bedX = plate.settings.printer.sizeX || 120;
+  const bedY = plate.settings.printer.sizeY || 67.5;
+  const margin = 2;
+  const place = arrangeRegions[region] || arrangeRegions.center;
+  const { packed, groupWidth, groupDepth } = packPlateModels(plateModels, bedX);
+
+  const startX = place.h === "left"
+    ? margin
+    : place.h === "right"
+      ? bedX - groupWidth - margin
+      : (bedX - groupWidth) / 2;
+  const startY = place.v === "front"
+    ? margin
+    : place.v === "back"
+      ? bedY - groupDepth - margin
+      : (bedY - groupDepth) / 2;
+  const clampedX = clamp(startX, 0, Math.max(0, bedX - groupWidth));
+  const clampedY = clamp(startY, 0, Math.max(0, bedY - groupDepth));
+
+  const hasSupports = !!(plate.supports?.length || plate.supportBraces?.length);
+  // Capture each part's pre-move footprint and delta *before* moving anything,
+  // so supports match against the original (disjoint) footprints rather than a
+  // half-rearranged layout.
+  const moves = packed.map((item) => ({
+    model: item.model,
+    oldBounds: expandedModelPlateBounds(item.model, plate, 2.5),
+    newX: clampedX + item.x - item.bounds.minX,
+    newY: clampedY + item.y - item.bounds.minY,
+    newZ: -item.bounds.minZ,
+    dx: (clampedX + item.x - item.bounds.minX) - item.model.transform.translateX,
+    dy: (clampedY + item.y - item.bounds.minY) - item.model.transform.translateY
+  }));
+  for (const move of moves) {
+    move.model.transform.translateX = move.newX;
+    move.model.transform.translateY = move.newY;
+    // Without supports there is nothing to keep registered, so seat the part on
+    // the bed; with supports, preserve the height (supports follow below).
+    if (!hasSupports) move.model.transform.translateZ = move.newZ;
+  }
+  if (hasSupports) {
+    const ownerDelta = (px, py) => {
+      const owner = moves.find((move) => pointInsideBounds2d(px, py, move.oldBounds) && (move.dx !== 0 || move.dy !== 0));
+      return owner || null;
+    };
+    plate.supports = (plate.supports || []).map((s) => {
+      const owner = ownerDelta(s.x, s.y);
+      return owner ? translateSupport(s, owner.dx, owner.dy) : s;
+    });
+    plate.supportBraces = (plate.supportBraces || []).map((b) => {
+      const owner = ownerDelta(b.x0, b.y0);
+      return owner ? translateBrace(b, owner.dx, owner.dy) : b;
+    });
+    // The raft is a single plate-wide projection; follow the first moved part
+    // (exact for a single-part plate, approximate otherwise — it regenerates on
+    // slice anyway).
+    const primary = moves.find((move) => move.dx !== 0 || move.dy !== 0);
+    if (primary) plate.supportRaft = translateRaft(plate.supportRaft, primary.dx, primary.dy);
+  }
+
+  updatePlacementFieldsFromSelection();
+  renderWorkspaceLists();
+  updateScene();
+  playSound("drop");
+  log(`Auto arranged ${plateModels.length} object${plateModels.length === 1 ? "" : "s"} on ${plate.name} (${region}).`);
 }
 
 function modelWorldMesh(model) {
@@ -4898,7 +5140,11 @@ function modelPlacementOffset(model, plate = buildPlates.find((item) => item.id 
 function modelLiftForPlate(plate) {
   const support = plate?.settings?.support;
   if (!support?.enabled) return 0;
-  if (!plateHasGeneratedSupportStructure(plate)) return 0;
+  // Raise the part as soon as generation begins (not just once supports exist)
+  // so the model rises first and the supports then stream in onto the lifted
+  // model, rather than the part jumping up after the supports appear.
+  const generatingThisPlate = isGeneratingSupports && plate?.id === generatingPlateId;
+  if (!plateHasGeneratedSupportStructure(plate) && !generatingThisPlate) return 0;
   const lift = Number(support.modelLift);
   return Math.max(0, Number.isFinite(lift) ? lift : 0);
 }
@@ -5071,12 +5317,11 @@ function offsetSupports(items, origin) {
   }));
 }
 
-function offsetManualSupports(points, origin, lift = 0) {
-  return (points || []).map((point) => ({
-    x: point.x + origin.x,
-    y: point.y + origin.y,
-    z: point.z + lift
-  }));
+function offsetManualSupports(points, plate, lift = 0) {
+  return (points || []).map((point) => {
+    const local = manualSupportPlateLocal(point, plate);
+    return { x: local[0] + plate.origin.x, y: local[1] + plate.origin.y, z: local[2] + lift };
+  });
 }
 
 function offsetBraces(items, origin) {
@@ -5517,6 +5762,19 @@ function rotatePoint(point, angles) {
   return [x, y, z];
 }
 
+// Inverse of rotatePoint: undoes the rx->ry->rz rotation sequence.
+function rotatePointInverse(point, angles) {
+  let [x, y, z] = point;
+  const [rx, ry, rz] = angles;
+  let c = Math.cos(rz), s = Math.sin(rz);
+  [x, y] = [x * c + y * s, -x * s + y * c];
+  c = Math.cos(ry); s = Math.sin(ry);
+  [x, z] = [x * c - z * s, x * s + z * c];
+  c = Math.cos(rx); s = Math.sin(rx);
+  [y, z] = [y * c + z * s, -y * s + z * c];
+  return [x, y, z];
+}
+
 function applyGlobalRotationToTransform(transform, axis, deltaDegrees) {
   if (!Number.isFinite(deltaDegrees) || Math.abs(deltaDegrees) < 0.000001) return;
   const current = rotationMatrixFromEuler(
@@ -5689,7 +5947,8 @@ class Viewer {
         mode = "model";
       }
       // In support-edit mode a left click places/removes a manual support
-      // instead of selecting or dragging a model.
+      // instead of selecting or dragging a model. The user leaves this mode
+      // (via Generate Manual or toggling it off) to move parts again.
       const placeSupport = isLeft && this.supportEditMode;
       if (placeSupport) mode = "press";
       this.pressedHit = !placeSupport && isLeft && hit && (hit.type === "plate" || hit.type === "add-plate" || hit.type === "plate-action") ? hit : null;
