@@ -15,7 +15,7 @@ const fields = [
   "tipLength", "footDiameter",
   "bedInterface", "raftOffset", "raftChamferWidth", "raftChamferAngle", "bedInterfaceThickness", "collisionClearance", "maxBaseReach",
   "maxSupportAngle", "enforcerReach", "enforcerMinDrop", "cadSlicingMode",
-  "braceDiameter", "braceHeight", "braceDistance"
+  "braceDiameter", "braceHeight", "braceDistance", "braceInterval"
 ];
 
 const placementFields = new Set(["rotateX", "rotateY", "rotateZ", "translateX", "translateY", "translateZ", "scale"]);
@@ -134,7 +134,8 @@ const defaultSupportPresets = {
     braceEnabled: false,
     braceDiameter: 0.26,
     braceHeight: 2.5,
-    braceDistance: 7
+    braceDistance: 7,
+    braceInterval: 0
   },
   normal: {
     supportsEnabled: true,
@@ -167,7 +168,8 @@ const defaultSupportPresets = {
     braceEnabled: true,
     braceDiameter: 0.36,
     braceHeight: 3,
-    braceDistance: 8
+    braceDistance: 8,
+    braceInterval: 10
   },
   heavy: {
     supportsEnabled: true,
@@ -200,7 +202,8 @@ const defaultSupportPresets = {
     braceEnabled: true,
     braceDiameter: 0.5,
     braceHeight: 3.5,
-    braceDistance: 10
+    braceDistance: 10,
+    braceInterval: 8
   }
 };
 let supportPresets = cloneSettings(defaultSupportPresets);
@@ -209,6 +212,8 @@ let isGeneratingSupports = false;
 let generatingPlateId = null;
 let isBusy = false;
 let manualSupportMode = false;
+let paintMode = null; // null | "exclude" | "require"
+let lastPaintScreen = null;
 let slicePreviewActive = false;
 let slicePreviewPlateId = null;
 let slicePreviewSession = 0;
@@ -246,6 +251,7 @@ async function init() {
     button.addEventListener("click", () => applySupportPreset(button.dataset.supportPreset));
   }
   $("saveSupportPresetButton").addEventListener("click", saveActiveSupportPreset);
+  $("openProjectButton").addEventListener("click", openProject);
   $("saveProjectButton").addEventListener("click", saveProject);
   $("addBuildPlateButton").addEventListener("click", addBuildPlate);
   $("fitViewButton").addEventListener("click", () => {
@@ -285,6 +291,10 @@ async function init() {
   $("addSupportButton").addEventListener("click", toggleManualSupportMode);
   $("generateManualSupportButton").addEventListener("click", generateManualSupports);
   $("clearManualSupportButton").addEventListener("click", clearManualSupports);
+  $("paintRequireButton").addEventListener("click", () => togglePaintMode("require"));
+  $("paintExcludeButton").addEventListener("click", () => togglePaintMode("exclude"));
+  $("paintEraseButton").addEventListener("click", () => togglePaintMode("erase"));
+  $("clearPaintButton").addEventListener("click", clearSupportPaint);
   $("sliceButton").addEventListener("click", slice);
   $("sliceAllButton").addEventListener("click", sliceAll);
   $("viewSliceButton").addEventListener("click", toggleSlicePreview);
@@ -365,6 +375,7 @@ async function init() {
   viewer.onScenePick = handleScenePick;
   viewer.onSceneDoubleClick = handleSceneDoubleClick;
   viewer.onPlaceSupport = handleManualSupportClick;
+  viewer.onPaintStroke = handlePaintStroke;
   viewer.onModelDrag = handleModelDrag;
   viewer.onModelDragEnd = handleModelDragEnd;
   viewer.onGizmoDrag = handleGizmoDrag;
@@ -1504,6 +1515,7 @@ function createBuildPlate(name, settings) {
     supportBraces: [],
     supportRaft: null,
     manualSupports: [],
+    supportPaint: [],
     dropAnimation: null
   };
 }
@@ -1581,7 +1593,8 @@ function buildPlateSettingsFromForm() {
       braceEnabled: $("braceEnabled").checked,
       braceDiameter: number("braceDiameter"),
       braceHeight: number("braceHeight"),
-      braceDistance: number("braceDistance")
+      braceDistance: number("braceDistance"),
+      braceInterval: number("braceInterval")
     }
   };
 }
@@ -1691,6 +1704,7 @@ function applyBuildPlateSettingsToForm(plate) {
   $("braceDiameter").value = diameterSetting(support, "braceDiameter", "braceRadius", 0.36);
   $("braceHeight").value = support.braceHeight;
   $("braceDistance").value = support.braceDistance;
+  $("braceInterval").value = settingsValue(support, "braceInterval", 0);
   syncSphericalContactFields();
   syncPrimarySupportFields();
   updatePlacementFieldsFromSelection();
@@ -1748,7 +1762,8 @@ function supportPresetFromForm() {
     braceEnabled: $("braceEnabled").checked,
     braceDiameter: number("braceDiameter"),
     braceHeight: number("braceHeight"),
-    braceDistance: number("braceDistance")
+    braceDistance: number("braceDistance"),
+    braceInterval: number("braceInterval")
   };
 }
 
@@ -2152,6 +2167,15 @@ function renderLeftTree() {
           centerViewOnModel(model.id);
         });
         part.addEventListener("dragstart", (event) => startPartListDrag(event, model.id));
+        const duplicateButton = document.createElement("button");
+        duplicateButton.type = "button";
+        duplicateButton.className = "part-delete part-duplicate";
+        duplicateButton.title = `Duplicate ${model.name} (Ctrl+D duplicates the selection)`;
+        duplicateButton.innerHTML = "&#x2750;";
+        duplicateButton.addEventListener("click", (event) => {
+          event.stopPropagation();
+          duplicateModels([model]);
+        });
         const deleteButton = document.createElement("button");
         deleteButton.type = "button";
         deleteButton.className = "part-delete";
@@ -2161,7 +2185,7 @@ function renderLeftTree() {
           event.stopPropagation();
           deleteModelsById([model.id]);
         });
-        row.append(part, deleteButton);
+        row.append(part, duplicateButton, deleteButton);
         list.appendChild(row);
       });
       node.appendChild(list);
@@ -2215,6 +2239,17 @@ function deleteModelsById(ids) {
   const deleting = models.filter((model) => idSet.has(model.id));
   if (!deleting.length) return;
   removeSupportStructureForModels(deleting);
+  // Drop the deleted parts' manual markers and paint samples too, so they do
+  // not linger as orphans (their mesh-local coordinates die with the model).
+  for (const plate of buildPlates) {
+    if (plate.manualSupports?.length) {
+      plate.manualSupports = plate.manualSupports.filter((point) => point.modelId == null || !idSet.has(point.modelId));
+    }
+    if (plate.supportPaint?.length) {
+      plate.supportPaint = plate.supportPaint.filter((sample) => sample.modelId == null || !idSet.has(sample.modelId));
+      bumpPaintStamp();
+    }
+  }
   models = models.filter((model) => !idSet.has(model.id));
   selectedModelIds = new Set([...selectedModelIds].filter((id) => !idSet.has(id)));
   if (idSet.has(lastSelectedModelId)) lastSelectedModelId = null;
@@ -2445,6 +2480,12 @@ function initGlobalShortcuts() {
       pasteCopiedParts();
       return;
     }
+    if (!isEditableTarget(event.target) && (event.ctrlKey || event.metaKey) && key === "d") {
+      event.preventDefault();
+      event.stopPropagation();
+      duplicateSelectedParts();
+      return;
+    }
     if (!isEditableTarget(event.target) && event.key === "Delete") {
       event.preventDefault();
       event.stopPropagation();
@@ -2472,38 +2513,106 @@ function selectAllModels() {
   }
 }
 
-function copySelectedParts() {
-  const selection = selectedModels();
-  if (!selection.length) return;
+function snapshotPartsForClipboard(selection) {
   const centers = selection.map((model) => boundsCenter(modelWorldBounds(model)));
   const groupCenter = centers.reduce((sum, center) => add(sum, center), [0, 0, 0]).map((value) => value / centers.length);
-  partClipboard = selection.map((model, index) => {
+  return selection.map((model, index) => {
     const plate = buildPlates.find((item) => item.id === model.plateId);
     const center = centers[index];
+    const bounds = modelWorldBounds(model);
     return {
       path: model.path,
       name: model.name,
       mesh: model.mesh,
       transform: cloneSettings(model.transform),
       relativeCenter: sub(center, groupCenter),
+      size: [bounds.maxX - bounds.minX, bounds.maxY - bounds.minY],
       sourceCenterLocal: plate ? [center[0] - plate.origin.x, center[1] - plate.origin.y, center[2]] : center,
-      supports: collectSupportStructureForModel(model)
+      supports: collectSupportStructureForModel(model),
+      raft: collectRaftPadForModel(model, plate),
+      // Manual markers and paint are stored in mesh-local space, so clones
+      // re-attach to the copy by just swapping in the new model id.
+      manualSupports: (plate?.manualSupports || []).filter((point) => point.modelId === model.id).map(cloneSettings),
+      supportPaint: (plate?.supportPaint || []).filter((sample) => sample.modelId === model.id).map(cloneSettings)
     };
   });
+}
+
+// The slice of the plate raft that sits under one part: its span rectangles
+// clipped to the part's footprint plus the raft margin.
+function collectRaftPadForModel(model, plate) {
+  const raft = plate?.supportRaft;
+  if (!raft || !Array.isArray(raft.rects) || !raft.rects.length) return null;
+  const reach = Math.max(0, Number(raft.offset) || 0) + 2.5;
+  const bounds = expandedModelPlateBounds(model, plate, reach);
+  const rects = [];
+  for (const [x0, y0, x1, y1] of raft.rects) {
+    const cx0 = Math.max(x0, bounds.minX);
+    const cx1 = Math.min(x1, bounds.maxX);
+    const cy0 = Math.max(y0, bounds.minY);
+    const cy1 = Math.min(y1, bounds.maxY);
+    if (cx1 - cx0 > 0.01 && cy1 - cy0 > 0.01) rects.push([cx0, cy0, cx1, cy1]);
+  }
+  if (!rects.length) return null;
+  return { type: raft.type, thickness: raft.thickness, offset: raft.offset, rects };
+}
+
+function copySelectedParts() {
+  const selection = selectedModels();
+  if (!selection.length) return;
+  partClipboard = snapshotPartsForClipboard(selection);
   log(`Copied ${partClipboard.length.toLocaleString()} part${partClipboard.length === 1 ? "" : "s"}.`);
   playSound("focus-ring");
 }
 
-function pasteCopiedParts() {
-  if (!partClipboard.length) return;
-  ensureInitialBuildPlate();
-  const targetPlate = highlightedBuildPlate() || activePlate();
-  const targetCenter = [
-    targetPlate.origin.x + (targetPlate.settings.printer.sizeX || 120) / 2,
-    targetPlate.origin.y + (targetPlate.settings.printer.sizeY || 67.5) / 2,
-    0
-  ];
-  const pastedModels = partClipboard.map((item) => ({
+// Half extents of a snapshot group's combined XY footprint around its centre.
+function snapshotGroupHalfExtents(snapshots) {
+  let halfW = 1;
+  let halfH = 1;
+  for (const item of snapshots) {
+    const rel = item.relativeCenter || [0, 0, 0];
+    const size = item.size || [1, 1];
+    halfW = Math.max(halfW, Math.abs(rel[0]) + size[0] / 2);
+    halfH = Math.max(halfH, Math.abs(rel[1]) + size[1] / 2);
+  }
+  return [halfW, halfH];
+}
+
+// Find a spot on the plate where the group fits without overlapping existing
+// parts: try the preferred centre first, then ring-search outward from it.
+function findFreeGroupCenter(targetPlate, halfW, halfH, preferred) {
+  const bedW = targetPlate.settings.printer.sizeX || 120;
+  const bedH = targetPlate.settings.printer.sizeY || 67.5;
+  const margin = 2;
+  const others = models
+    .filter((model) => model.plateId === targetPlate.id)
+    .map((model) => modelWorldBounds(model));
+  const fits = (cx, cy) => {
+    if (cx - halfW < targetPlate.origin.x || cx + halfW > targetPlate.origin.x + bedW) return false;
+    if (cy - halfH < targetPlate.origin.y || cy + halfH > targetPlate.origin.y + bedH) return false;
+    return !others.some((b) => cx - halfW - margin < b.maxX && cx + halfW + margin > b.minX
+      && cy - halfH - margin < b.maxY && cy + halfH + margin > b.minY);
+  };
+  if (fits(preferred[0], preferred[1])) return preferred;
+  const step = Math.max(4, Math.min(halfW, halfH));
+  const maxRing = Math.ceil(Math.max(bedW, bedH) / step) + 1;
+  for (let ring = 1; ring <= maxRing; ring++) {
+    for (let ix = -ring; ix <= ring; ix++) {
+      for (let iy = -ring; iy <= ring; iy++) {
+        if (Math.max(Math.abs(ix), Math.abs(iy)) !== ring) continue;
+        const cx = preferred[0] + ix * step;
+        const cy = preferred[1] + iy * step;
+        if (fits(cx, cy)) return [cx, cy];
+      }
+    }
+  }
+  return preferred;
+}
+
+// Create real parts from clipboard-style snapshots, placed with the group's
+// centre at groupCenter, bringing each part's own supports/braces along.
+function materializePartSnapshots(snapshots, targetPlate, groupCenter, actionLabel) {
+  const pastedModels = snapshots.map((item) => ({
     id: nextModelId++,
     path: item.path,
     name: item.name,
@@ -2515,13 +2624,22 @@ function pasteCopiedParts() {
   let copiedSupportStructure = false;
   for (let index = 0; index < pastedModels.length; index++) {
     const model = pastedModels[index];
-    const desiredCenter = add(targetCenter, partClipboard[index].relativeCenter || [0, 0, 0]);
+    const desiredCenter = add([groupCenter[0], groupCenter[1], 0], snapshots[index].relativeCenter || [0, 0, 0]);
     const local = modelLocalCentroid(model);
     model.transform.translateX = desiredCenter[0] - targetPlate.origin.x - local[0];
     model.transform.translateY = desiredCenter[1] - targetPlate.origin.y - local[1];
-    copiedSupportStructure = copySupportStructureToPlate(partClipboard[index], model, targetPlate) || copiedSupportStructure;
+    copiedSupportStructure = copySupportStructureToPlate(snapshots[index], model, targetPlate) || copiedSupportStructure;
+    if (snapshots[index].manualSupports?.length) {
+      targetPlate.manualSupports = (targetPlate.manualSupports || [])
+        .concat(snapshots[index].manualSupports.map((point) => ({ ...cloneSettings(point), modelId: model.id })));
+    }
+    if (snapshots[index].supportPaint?.length) {
+      targetPlate.supportPaint = (targetPlate.supportPaint || [])
+        .concat(snapshots[index].supportPaint.map((sample) => ({ ...cloneSettings(sample), modelId: model.id })));
+      bumpPaintStamp();
+    }
   }
-  targetPlate.layersGenerated = copiedSupportStructure;
+  if (copiedSupportStructure) targetPlate.layersGenerated = true;
   models.push(...pastedModels);
   activePlateId = targetPlate.id;
   expandedPlateId = targetPlate.id;
@@ -2532,8 +2650,42 @@ function pasteCopiedParts() {
   renderWorkspaceLists();
   updatePlacementFieldsFromSelection();
   updateScene();
-  log(`Pasted ${pastedModels.length.toLocaleString()} part${pastedModels.length === 1 ? "" : "s"} onto ${targetPlate.name}.`);
+  const supportNote = copiedSupportStructure ? " (supports came along)" : "";
+  log(`${actionLabel} ${pastedModels.length.toLocaleString()} part${pastedModels.length === 1 ? "" : "s"} onto ${targetPlate.name}${supportNote}.`);
   playSound("drop");
+  return pastedModels;
+}
+
+function pasteCopiedParts() {
+  if (!partClipboard.length) return;
+  ensureInitialBuildPlate();
+  const targetPlate = highlightedBuildPlate() || activePlate();
+  const [halfW, halfH] = snapshotGroupHalfExtents(partClipboard);
+  const plateCenter = [
+    targetPlate.origin.x + (targetPlate.settings.printer.sizeX || 120) / 2,
+    targetPlate.origin.y + (targetPlate.settings.printer.sizeY || 67.5) / 2
+  ];
+  const groupCenter = findFreeGroupCenter(targetPlate, halfW, halfH, plateCenter);
+  materializePartSnapshots(partClipboard, targetPlate, groupCenter, "Pasted");
+}
+
+function duplicateModels(selection) {
+  const targets = (selection || []).filter(Boolean);
+  if (!targets.length) return;
+  const targetPlate = buildPlates.find((plate) => plate.id === targets[0].plateId) || activePlate();
+  const samePlate = targets.filter((model) => model.plateId === targetPlate.id);
+  const snapshots = snapshotPartsForClipboard(samePlate);
+  const [halfW, halfH] = snapshotGroupHalfExtents(snapshots);
+  const centers = samePlate.map((model) => boundsCenter(modelWorldBounds(model)));
+  const groupCenter = centers.reduce((sum, center) => add(sum, center), [0, 0, 0]).map((value) => value / centers.length);
+  // Prefer dropping the duplicate right beside the original.
+  const preferred = [groupCenter[0] + halfW * 2 + 4, groupCenter[1]];
+  const placed = findFreeGroupCenter(targetPlate, halfW, halfH, preferred);
+  materializePartSnapshots(snapshots, targetPlate, placed, "Duplicated");
+}
+
+function duplicateSelectedParts() {
+  duplicateModels(selectedModels());
 }
 
 function highlightedBuildPlate() {
@@ -2660,7 +2812,7 @@ function handleModelDragEnd() {
   if (state?.type === "move-xy") {
     // Moving a part in the build plane keeps its supports: they ride along and
     // stay valid, so the generated state is preserved (no re-generation needed).
-    const raftedPlates = new Set();
+    const raftMovesByPlate = new Map();
     for (const model of selection) {
       const plate = buildPlates.find((p) => p.id === model.plateId);
       const snap = state.snapshots?.get(model.id);
@@ -2670,11 +2822,16 @@ function handleModelDragEnd() {
       if (dx === 0 && dy === 0) continue;
       const cur = expandedModelPlateBounds(model, plate, 2.5);
       const oldBounds = { minX: cur.minX - dx, maxX: cur.maxX - dx, minY: cur.minY - dy, maxY: cur.maxY - dy, minZ: cur.minZ, maxZ: cur.maxZ };
-      plate.supports = plate.supports.map((s) => supportInsidePlateBounds(s, oldBounds) ? translateSupport(s, dx, dy) : s);
-      plate.supportBraces = plate.supportBraces.map((b) => braceInsidePlateBounds(b, oldBounds) ? translateBrace(b, dx, dy) : b);
-      if (!raftedPlates.has(plate.id)) {
-        plate.supportRaft = translateRaft(plate.supportRaft, dx, dy);
-        raftedPlates.add(plate.id);
+      plate.supports = plate.supports.map((s) => supportBelongsToModel(s, model.id, oldBounds) ? translateSupport(s, dx, dy) : s);
+      plate.supportBraces = plate.supportBraces.map((b) => braceBelongsToModel(b, model.id, oldBounds) ? translateBrace(b, dx, dy) : b);
+      if (!raftMovesByPlate.has(plate.id)) raftMovesByPlate.set(plate.id, { plate, moves: [] });
+      raftMovesByPlate.get(plate.id).moves.push({ oldBounds, dx, dy });
+    }
+    for (const { plate, moves } of raftMovesByPlate.values()) {
+      if (Array.isArray(plate.supportRaft?.rects) && plate.supportRaft.rects.length) {
+        plate.supportRaft = translateRaftRectsByMoves(plate.supportRaft, moves);
+      } else {
+        plate.supportRaft = translateRaft(plate.supportRaft, moves[0].dx, moves[0].dy);
       }
     }
   } else if (state?.type === "rotate-z") {
@@ -2696,8 +2853,8 @@ function handleModelDragEnd() {
       model.transform.rotateY = savedRY;
       model.transform.rotateZ = savedRZ;
       model.renderMesh = null;
-      plate.supports = plate.supports.map((s) => supportInsidePlateBounds(s, oldBounds) ? rotateSupportAround(s, cx, cy, cos, sin) : s);
-      plate.supportBraces = plate.supportBraces.map((b) => braceInsidePlateBounds(b, oldBounds) ? rotateBraceAround(b, cx, cy, cos, sin) : b);
+      plate.supports = plate.supports.map((s) => supportBelongsToModel(s, model.id, oldBounds) ? rotateSupportAround(s, cx, cy, cos, sin) : s);
+      plate.supportBraces = plate.supportBraces.map((b) => braceBelongsToModel(b, model.id, oldBounds) ? rotateBraceAround(b, cx, cy, cos, sin) : b);
     }
   } else {
     // Raising (Z) or tilting (non-vertical rotation / scale) invalidates the
@@ -2846,9 +3003,11 @@ function applyPlacementFieldToSelected(fieldId) {
       if (dx === 0 && dy === 0) continue;
       const cur = expandedModelPlateBounds(model, plate, 2.5);
       const oldBounds = { minX: cur.minX - dx, maxX: cur.maxX - dx, minY: cur.minY - dy, maxY: cur.maxY - dy, minZ: cur.minZ, maxZ: cur.maxZ };
-      plate.supports = plate.supports.map((s) => supportInsidePlateBounds(s, oldBounds) ? translateSupport(s, dx, dy) : s);
-      plate.supportBraces = plate.supportBraces.map((b) => braceInsidePlateBounds(b, oldBounds) ? translateBrace(b, dx, dy) : b);
-      plate.supportRaft = translateRaft(plate.supportRaft, dx, dy);
+      plate.supports = plate.supports.map((s) => supportBelongsToModel(s, model.id, oldBounds) ? translateSupport(s, dx, dy) : s);
+      plate.supportBraces = plate.supportBraces.map((b) => braceBelongsToModel(b, model.id, oldBounds) ? translateBrace(b, dx, dy) : b);
+      plate.supportRaft = Array.isArray(plate.supportRaft?.rects) && plate.supportRaft.rects.length
+        ? translateRaftRectsByMoves(plate.supportRaft, [{ oldBounds, dx, dy }])
+        : translateRaft(plate.supportRaft, dx, dy);
     }
   } else if (isZRotate) {
     for (const model of selection) {
@@ -2870,8 +3029,8 @@ function applyPlacementFieldToSelected(fieldId) {
       model.renderMesh = null;
       const cos = Math.cos(dAngleDeg * Math.PI / 180);
       const sin = Math.sin(dAngleDeg * Math.PI / 180);
-      plate.supports = plate.supports.map((s) => supportInsidePlateBounds(s, oldBounds) ? rotateSupportAround(s, center[0], center[1], cos, sin) : s);
-      plate.supportBraces = plate.supportBraces.map((b) => braceInsidePlateBounds(b, oldBounds) ? rotateBraceAround(b, center[0], center[1], cos, sin) : b);
+      plate.supports = plate.supports.map((s) => supportBelongsToModel(s, model.id, oldBounds) ? rotateSupportAround(s, center[0], center[1], cos, sin) : s);
+      plate.supportBraces = plate.supportBraces.map((b) => braceBelongsToModel(b, model.id, oldBounds) ? rotateBraceAround(b, center[0], center[1], cos, sin) : b);
     }
   } else if (transformsModel) {
     for (const model of selection) {
@@ -2942,23 +3101,60 @@ function collectSupportStructureForModel(model) {
   if (!plate) return { supports: [], braces: [] };
   const bounds = expandedModelPlateBounds(model, plate, 2.5);
   return {
-    supports: (plate.supports || []).filter((support) => supportInsidePlateBounds(support, bounds)).map(cloneSettings),
-    braces: (plate.supportBraces || []).filter((brace) => braceInsidePlateBounds(brace, bounds)).map(cloneSettings)
+    supports: (plate.supports || []).filter((support) => supportBelongsToModel(support, model.id, bounds)).map(cloneSettings),
+    braces: (plate.supportBraces || []).filter((brace) => braceBelongsToModel(brace, model.id, bounds)).map(cloneSettings)
   };
 }
 
 function copySupportStructureToPlate(snapshot, model, targetPlate) {
   const structure = snapshot?.supports;
-  if (!structure || (!structure.supports?.length && !structure.braces?.length)) return false;
+  const raftPad = snapshot?.raft;
+  if ((!structure || (!structure.supports?.length && !structure.braces?.length)) && !raftPad?.rects?.length) return false;
   const newCenter = modelPlateCenter(model, targetPlate);
   const oldCenter = snapshot.sourceCenterLocal || [newCenter[0], newCenter[1], newCenter[2]];
   const dx = newCenter[0] - oldCenter[0];
   const dy = newCenter[1] - oldCenter[1];
-  const copiedSupports = (structure.supports || []).map((support) => translateSupport(support, dx, dy));
-  const copiedBraces = (structure.braces || []).map((brace) => translateBrace(brace, dx, dy));
+  // The copies belong to the pasted part, not the part they were copied from.
+  const copiedSupports = (structure?.supports || []).map((support) => ({ ...translateSupport(support, dx, dy), ownerId: model.id }));
+  const copiedBraces = (structure?.braces || []).map((brace) => ({ ...translateBrace(brace, dx, dy), ownerId: model.id }));
   targetPlate.supports = [...(targetPlate.supports || []), ...copiedSupports];
   targetPlate.supportBraces = [...(targetPlate.supportBraces || []), ...copiedBraces];
-  return !!(copiedSupports.length || copiedBraces.length);
+  if (raftPad?.rects?.length) {
+    mergeRaftPadIntoPlate(targetPlate, raftPad, dx, dy);
+  }
+  return !!(copiedSupports.length || copiedBraces.length || raftPad?.rects?.length);
+}
+
+// Add a copied part's raft pad to the target plate's raft preview, extending
+// (or creating) the plate raft so the duplicate sits on a base like the
+// original. Slicing recomputes the real raft from the full plate shadow.
+function mergeRaftPadIntoPlate(targetPlate, raftPad, dx, dy) {
+  const moved = raftPad.rects.map(([x0, y0, x1, y1]) => [x0 + dx, y0 + dy, x1 + dx, y1 + dy]);
+  const minX = Math.min(...moved.map((rect) => rect[0]));
+  const minY = Math.min(...moved.map((rect) => rect[1]));
+  const maxX = Math.max(...moved.map((rect) => rect[2]));
+  const maxY = Math.max(...moved.map((rect) => rect[3]));
+  const existing = targetPlate.supportRaft;
+  if (existing) {
+    existing.x0 = Math.min(existing.x0, minX);
+    existing.y0 = Math.min(existing.y0, minY);
+    existing.x1 = Math.max(existing.x1, maxX);
+    existing.y1 = Math.max(existing.y1, maxY);
+    if (Array.isArray(existing.rects) && existing.rects.length) {
+      existing.rects = existing.rects.concat(moved);
+    }
+    return;
+  }
+  targetPlate.supportRaft = {
+    type: raftPad.type || "raft",
+    thickness: raftPad.thickness,
+    offset: raftPad.offset,
+    x0: minX,
+    y0: minY,
+    x1: maxX,
+    y1: maxY,
+    rects: moved
+  };
 }
 
 function removeSupportStructureForModels(selection) {
@@ -2966,14 +3162,20 @@ function removeSupportStructureForModels(selection) {
   for (const model of selection) {
     const plate = buildPlates.find((item) => item.id === model.plateId);
     if (!plate) continue;
-    if (!byPlate.has(plate.id)) byPlate.set(plate.id, { plate, bounds: [] });
-    byPlate.get(plate.id).bounds.push(expandedModelPlateBounds(model, plate, 2.5));
+    if (!byPlate.has(plate.id)) byPlate.set(plate.id, { plate, bounds: [], ids: new Set() });
+    const entry = byPlate.get(plate.id);
+    entry.bounds.push(expandedModelPlateBounds(model, plate, 2.5));
+    entry.ids.add(model.id);
   }
-  for (const { plate, bounds } of byPlate.values()) {
+  for (const { plate, bounds, ids } of byPlate.values()) {
     const beforeSupports = plate.supports?.length || 0;
     const beforeBraces = plate.supportBraces?.length || 0;
-    plate.supports = (plate.supports || []).filter((support) => !bounds.some((box) => supportInsidePlateBounds(support, box)));
-    plate.supportBraces = (plate.supportBraces || []).filter((brace) => !bounds.some((box) => braceInsidePlateBounds(brace, box)));
+    plate.supports = (plate.supports || []).filter((support) => !(support.ownerId != null
+      ? ids.has(support.ownerId)
+      : bounds.some((box) => supportInsidePlateBounds(support, box))));
+    plate.supportBraces = (plate.supportBraces || []).filter((brace) => !(brace.ownerId != null
+      ? ids.has(brace.ownerId)
+      : bounds.some((box) => braceInsidePlateBounds(brace, box))));
     if (beforeSupports !== plate.supports.length || beforeBraces !== plate.supportBraces.length) {
       plate.layersGenerated = false;
       plate.supportRaft = null;
@@ -3014,6 +3216,50 @@ function pointInsideBounds2d(x, y, bounds) {
     && y >= bounds.minY && y <= bounds.maxY;
 }
 
+// Support/brace ownership. Freshly generated structures carry the id of the
+// part they were generated for, which stays correct even when part footprints
+// overlap; structures from older sessions (no ownerId) fall back to the 2D
+// footprint test.
+function supportBelongsToModel(support, modelId, bounds) {
+  if (support.ownerId != null) return support.ownerId === modelId;
+  return supportInsidePlateBounds(support, bounds);
+}
+
+function braceBelongsToModel(brace, modelId, bounds) {
+  if (brace.ownerId != null) return brace.ownerId === modelId;
+  return braceInsidePlateBounds(brace, bounds);
+}
+
+// Assign each generated support/brace to the candidate part whose footprint
+// contains it (nearest part centre wins when footprints overlap). Braces keep
+// an owner only when both ends land on the same part.
+function stampSupportOwners(supports, braces, candidates, plate) {
+  const entries = candidates.map((model) => ({
+    id: model.id,
+    bounds: expandedModelPlateBounds(model, plate, 2.5),
+    center: modelPlateCenter(model, plate)
+  }));
+  const ownerAt = (x, y) => {
+    let best = null;
+    for (const entry of entries) {
+      if (!pointInsideBounds2d(x, y, entry.bounds)) continue;
+      const dx = x - entry.center[0];
+      const dy = y - entry.center[1];
+      const d2 = dx * dx + dy * dy;
+      if (!best || d2 < best.d2) best = { id: entry.id, d2 };
+    }
+    return best ? best.id : null;
+  };
+  for (const support of supports || []) {
+    support.ownerId = ownerAt(support.x, support.y);
+  }
+  for (const brace of braces || []) {
+    const first = ownerAt(brace.x0, brace.y0);
+    const second = ownerAt(brace.x1, brace.y1);
+    brace.ownerId = first === second ? first : null;
+  }
+}
+
 function translateSupport(support, dx, dy) {
   return {
     ...cloneSettings(support),
@@ -3040,6 +3286,34 @@ function translateCoord(value, delta) {
   return Number.isFinite(value) ? value + delta : value;
 }
 
+function raftRectsBBox(rects) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const rect of rects) {
+    x0 = Math.min(x0, rect[0]);
+    y0 = Math.min(y0, rect[1]);
+    x1 = Math.max(x1, rect[2]);
+    y1 = Math.max(y1, rect[3]);
+  }
+  return Number.isFinite(x0) ? { x0, y0, x1, y1 } : {};
+}
+
+// Move raft pads with the parts they sit under: each rect follows the move
+// whose pre-move footprint contains its centre; pads under unmoved parts stay.
+// Applied in a single pass over the original layout so a pad can never pick up
+// two deltas. `moves` entries carry { oldBounds, dx, dy }.
+function translateRaftRectsByMoves(raft, moves) {
+  if (!raft || !Array.isArray(raft.rects) || !raft.rects.length) return raft;
+  const active = (moves || []).filter((move) => move.dx !== 0 || move.dy !== 0);
+  if (!active.length) return raft;
+  const rects = raft.rects.map(([x0, y0, x1, y1]) => {
+    const cx = (x0 + x1) / 2;
+    const cy = (y0 + y1) / 2;
+    const owner = active.find((move) => pointInsideBounds2d(cx, cy, move.oldBounds));
+    return owner ? [x0 + owner.dx, y0 + owner.dy, x1 + owner.dx, y1 + owner.dy] : [x0, y0, x1, y1];
+  });
+  return { ...raft, ...raftRectsBBox(rects), rects };
+}
+
 function translateRaft(raft, dx, dy) {
   if (!raft || (dx === 0 && dy === 0)) return raft;
   return {
@@ -3047,7 +3321,10 @@ function translateRaft(raft, dx, dy) {
     x0: translateCoord(raft.x0, dx),
     y0: translateCoord(raft.y0, dy),
     x1: translateCoord(raft.x1, dx),
-    y1: translateCoord(raft.y1, dy)
+    y1: translateCoord(raft.y1, dy),
+    ...(Array.isArray(raft.rects)
+      ? { rects: raft.rects.map(([x0, y0, x1, y1]) => [x0 + dx, y0 + dy, x1 + dx, y1 + dy]) }
+      : {})
   };
 }
 
@@ -3147,6 +3424,7 @@ async function loadStlPaths(paths, { append = false, sound = append ? "drop" : "
       plate.supportBraces = [];
       plate.supportRaft = null;
       plate.manualSupports = [];
+      plate.supportPaint = [];
       plate.layersGenerated = false;
     }
     $("outputPath").value = "";
@@ -3319,7 +3597,8 @@ function buildProjectSnapshot() {
       supports: cloneSettings(plate.supports || []),
       supportBraces: cloneSettings(plate.supportBraces || []),
       supportRaft: cloneSettings(plate.supportRaft || null),
-      manualSupports: cloneSettings(plate.manualSupports || [])
+      manualSupports: cloneSettings(plate.manualSupports || []),
+      supportPaint: cloneSettings(plate.supportPaint || [])
     })),
     models: models.map((model) => ({
       id: model.id,
@@ -3329,6 +3608,168 @@ function buildProjectSnapshot() {
       transform: cloneSettings(model.transform)
     }))
   };
+}
+
+async function openProject() {
+  try {
+    playSound("click-soft");
+    const result = await window.slicer.openProject();
+    if (!result) {
+      log("Open project canceled.");
+      return;
+    }
+    let snapshot;
+    try {
+      snapshot = JSON.parse(result.text);
+    } catch (error) {
+      throw new Error(`Project file is not valid JSON (${error.message})`);
+    }
+    if (!snapshot || snapshot.schema !== "resin-slicer-project") {
+      throw new Error("File is not a Resin Slicer project.");
+    }
+    await loadProjectSnapshot(snapshot);
+  } catch (error) {
+    log(`Open project failed: ${error.message}`);
+    showErrorPrompt("Open Project Failed", error);
+  }
+}
+
+async function loadProjectSnapshot(snapshot) {
+  models = [];
+  selectedModelIds = new Set();
+  lastSelectedModelId = null;
+  buildPlates = [];
+
+  const savedPlates = Array.isArray(snapshot.buildPlates) ? snapshot.buildPlates : [];
+  for (const saved of savedPlates) {
+    buildPlates.push(restoreBuildPlateFromSnapshot(saved));
+  }
+  if (!buildPlates.length) ensureInitialBuildPlate();
+
+  const maxPlateId = buildPlates.reduce((max, plate) => Math.max(max, plate.id), 0);
+  nextBuildPlateId = Math.max(
+    Number.isFinite(snapshot.nextBuildPlateId) ? snapshot.nextBuildPlateId : 0,
+    maxPlateId + 1
+  );
+  updateBuildPlateLayout({ force: false });
+
+  const validPlateIds = new Set(buildPlates.map((plate) => plate.id));
+  const fallbackPlateId = buildPlates[0].id;
+
+  const savedModels = Array.isArray(snapshot.models) ? snapshot.models : [];
+  const failedPaths = [];
+  for (const saved of savedModels) {
+    if (!saved || !saved.path) continue;
+    const targetPlateId = validPlateIds.has(saved.plateId) ? saved.plateId : fallbackPlateId;
+    const progress = createLoadProgressItem(saved.path);
+    const model = await loadProjectModel(saved, targetPlateId, progress);
+    if (!model) failedPaths.push(saved.path);
+  }
+
+  const maxModelId = models.reduce((max, model) => Math.max(max, model.id), 0);
+  nextModelId = Math.max(Number.isFinite(snapshot.nextModelId) ? snapshot.nextModelId : 0, maxModelId + 1);
+
+  const modelIds = new Set(models.map((model) => model.id));
+  selectedModelIds = new Set((snapshot.selectedModelIds || []).filter((id) => modelIds.has(id)));
+  lastSelectedModelId = modelIds.has(snapshot.lastSelectedModelId) ? snapshot.lastSelectedModelId : null;
+  normalizeLastSelectedModel();
+
+  activePlateId = validPlateIds.has(snapshot.activePlateId) ? snapshot.activePlateId : buildPlates[0].id;
+  expandedPlateId = validPlateIds.has(snapshot.expandedPlateId) ? snapshot.expandedPlateId : activePlateId;
+
+  if (snapshot.format === "goo" || snapshot.format === "ctb") $("format").value = snapshot.format;
+  $("outputPath").value = typeof snapshot.outputPath === "string" ? snapshot.outputPath : "";
+
+  applyBuildPlateSettingsToForm(activePlate());
+  updateMeshStatusFromModels();
+  $("supportStatus").textContent = "Supports not generated";
+  setDefaultOutput();
+  renderWorkspaceLists();
+  updatePlacementFieldsFromSelection();
+  updateScene();
+
+  if (failedPaths.length) {
+    logAndPrompt(
+      "Project Loaded With Missing Files",
+      `${failedPaths.length} model file${failedPaths.length === 1 ? "" : "s"} could not be found and were skipped:\n${failedPaths.join("\n")}`,
+      "warning"
+    );
+  } else {
+    log(`Opened project (${models.length.toLocaleString()} model${models.length === 1 ? "" : "s"}).`);
+    playSound("confirm");
+  }
+}
+
+function restoreBuildPlateFromSnapshot(saved) {
+  const settings = cloneSettings(saved?.settings || buildPlateSettingsFromForm());
+  return {
+    id: Number.isFinite(saved?.id) ? saved.id : nextBuildPlateId++,
+    name: saved?.name || "Plate",
+    settings,
+    origin: isFiniteOrigin(saved?.origin) ? cloneSettings(saved.origin) : { x: 0, y: 0 },
+    layoutSlot: Number.isFinite(saved?.layoutSlot) ? saved.layoutSlot : null,
+    clipHeight: Number.isFinite(saved?.clipHeight) ? saved.clipHeight : Number(settings.printer?.sizeZ) || 160,
+    clipEnabled: !!saved?.clipEnabled,
+    layersGenerated: false,
+    sliced: false,
+    sliceLayerCount: 0,
+    previewDir: null,
+    supports: cloneSettings(saved?.supports || []),
+    supportBraces: cloneSettings(saved?.supportBraces || []),
+    supportRaft: cloneSettings(saved?.supportRaft || null),
+    manualSupports: cloneSettings(saved?.manualSupports || []),
+    supportPaint: cloneSettings(saved?.supportPaint || []),
+    dropAnimation: null
+  };
+}
+
+async function loadProjectModel(saved, targetPlateId, progress) {
+  const path = saved.path;
+  const readJobId = `project-mesh-read-${progress.id}`;
+  try {
+    updateLoadProgressItem(progress.id, 0.02, "Queued");
+    log(`Loading ${path}`);
+    fileReadProgressHandlers.set(readJobId, (message) => {
+      const percent = Math.round((message.progress || 0) * 100);
+      updateLoadProgressItem(progress.id, 0.04 + (message.progress || 0) * 0.68, `Reading ${percent}%`);
+    });
+    let raw;
+    if (isStepMeshPath(path)) {
+      updateLoadProgressItem(progress.id, 0.08, "Tessellating STEP");
+      raw = await window.slicer.readStepMesh(path);
+    } else {
+      raw = window.slicer.readFileProgress
+        ? await window.slicer.readFileProgress(path, readJobId)
+        : await window.slicer.readFile(path);
+    }
+    fileReadProgressHandlers.delete(readJobId);
+
+    updateLoadProgressItem(progress.id, 0.78, "Parsing");
+    await nextFrame();
+    const bytes = new Uint8Array(raw);
+    const mesh = parseMesh(path, bytes);
+    updateLoadProgressItem(progress.id, 0.92, "Adding");
+
+    const model = {
+      id: Number.isFinite(saved.id) ? saved.id : nextModelId++,
+      path,
+      name: saved.name || fileName(path),
+      mesh,
+      plateId: targetPlateId,
+      transform: cloneSettings(saved.transform || defaultModelTransform())
+    };
+    models.push(model);
+    updateLoadProgressItem(progress.id, 1, "Loaded");
+    scheduleLoadProgressRemoval(progress.id);
+    log(`Loaded ${fileName(path)} (${mesh.triangleCount.toLocaleString()} triangles)`);
+    return model;
+  } catch (error) {
+    fileReadProgressHandlers.delete(readJobId);
+    updateLoadProgressItem(progress.id, 1, "Failed");
+    log(`Load failed for ${fileName(path)}: ${error.message}`);
+    scheduleLoadProgressRemoval(progress.id, 4200);
+    return null;
+  }
 }
 
 function projectFileName() {
@@ -3511,12 +3952,17 @@ async function generatePreview() {
 
   // When generating for a subset, keep the supports/braces that belong to the
   // other parts so they are not wiped out.
+  const targetIds = new Set(targets.map((model) => model.id));
   const targetBounds = targets.map((model) => expandedModelPlateBounds(model, plate, 2.5));
   const keepSupports = partial
-    ? (plate.supports || []).filter((support) => !targetBounds.some((bounds) => supportInsidePlateBounds(support, bounds)))
+    ? (plate.supports || []).filter((support) => support.ownerId != null
+      ? !targetIds.has(support.ownerId)
+      : !targetBounds.some((bounds) => supportInsidePlateBounds(support, bounds)))
     : [];
   const keepBraces = partial
-    ? (plate.supportBraces || []).filter((brace) => !targetBounds.some((bounds) => braceInsidePlateBounds(brace, bounds)))
+    ? (plate.supportBraces || []).filter((brace) => brace.ownerId != null
+      ? !targetIds.has(brace.ownerId)
+      : !targetBounds.some((bounds) => braceInsidePlateBounds(brace, bounds)))
     : [];
   const keepRaft = partial ? plate.supportRaft : null;
 
@@ -3552,7 +3998,11 @@ async function generatePreview() {
   const scheduleRender = () => {
     if (pendingRender) return;
     pendingRender = true;
-    const wait = Math.max(0, 120 - (performance.now() - lastRenderAt));
+    // Rebuilding the support preview geometry gets more expensive as anchors
+    // stream in, so slow the refresh cadence with the count instead of
+    // re-tessellating thousands of supports every 120ms.
+    const interval = Math.min(1500, 120 + streamed.length * 0.25);
+    const wait = Math.max(0, interval - (performance.now() - lastRenderAt));
     setTimeout(() => {
       if (pendingRender) flushStreamed();
     }, wait);
@@ -3569,6 +4019,9 @@ async function generatePreview() {
 
   try {
     const result = await window.slicer.preview(collectPayloadForPlate(plate, undefined, targets));
+    // Tag the fresh structures with the part they were generated for, so
+    // copy/move/delete can follow ownership instead of guessing by footprint.
+    stampSupportOwners(result.supports || [], result.braces || [], targets, plate);
     plate.supports = keepSupports.concat(result.supports || []);
     plate.supportBraces = keepBraces.concat(result.braces || []);
     plate.supportRaft = result.raft || keepRaft;
@@ -3595,8 +4048,9 @@ async function generatePreview() {
 async function generateManualSupports() {
   if (!ensureReady(false, true)) return;
   const plate = activePlate();
-  if (!(plate.manualSupports || []).length) {
-    log("No manual supports to generate: turn on Add Supports and click the model first.");
+  const hasPaintedRequire = (plate.supportPaint || []).some((sample) => sample.mode === "require");
+  if (!(plate.manualSupports || []).length && !hasPaintedRequire) {
+    log("No manual supports to generate: turn on Add Supports and click the model, or paint support areas first.");
     return;
   }
   if (!plate.settings.support.enabled) {
@@ -3616,9 +4070,19 @@ async function generateManualSupports() {
     payload.manualOnly = true;
     const result = await window.slicer.preview(payload);
     const manualAnchors = result.supports || [];
-    // Replace only the manual portion of the preview, leaving any auto supports
-    // (and their braces/raft) untouched.
-    plate.supports = (plate.supports || []).filter((support) => support.role !== "manual").concat(manualAnchors);
+    const manualBraces = (result.braces || []).map((brace) => ({ ...brace, fromManualRun: true }));
+    stampSupportOwners(manualAnchors, manualBraces, models.filter((model) => model.plateId === plate.id), plate);
+    // Replace only the manual/painted portion of the preview (and the braces a
+    // previous manual run added), leaving the auto supports untouched.
+    plate.supports = (plate.supports || [])
+      .filter((support) => support.role !== "manual" && support.role !== "painted")
+      .concat(manualAnchors);
+    plate.supportBraces = (plate.supportBraces || [])
+      .filter((brace) => !brace.fromManualRun)
+      .concat(manualBraces);
+    // The raft preview covers the whole plate's shadow (same as slicing), so a
+    // manual-only run can supply it too when none exists yet.
+    plate.supportRaft = result.raft || plate.supportRaft;
     plate.layersGenerated = true;
     const count = manualAnchors.length;
     // Leave add-support mode (this also rebuilds the scene) so the user can move
@@ -3640,6 +4104,7 @@ async function generateManualSupports() {
 
 function setManualSupportMode(on) {
   manualSupportMode = !!on;
+  if (manualSupportMode && paintMode) setPaintMode(null);
   viewer.setSupportEditMode(manualSupportMode);
   $("addSupportButton").classList.toggle("active", manualSupportMode);
   const hint = $("manualSupportHint");
@@ -3665,6 +4130,177 @@ function clearManualSupports() {
   playSound("delete");
   afterManualSupportsChanged(plate);
   log("Cleared manual supports.");
+}
+
+// Paint mode: the user drags a brush over the model surface to mark areas.
+// "require" areas grow supports (routed like manual points, thinned to the
+// support spacing); "exclude" areas block automatic support placement.
+function setPaintMode(mode) {
+  paintMode = mode === "exclude" || mode === "require" || mode === "erase" ? mode : null;
+  if (paintMode && manualSupportMode) setManualSupportMode(false);
+  viewer.setPaintMode(!!paintMode);
+  $("paintRequireButton").classList.toggle("active", paintMode === "require");
+  $("paintExcludeButton").classList.toggle("active", paintMode === "exclude");
+  $("paintEraseButton").classList.toggle("active", paintMode === "erase");
+  const hint = $("paintHint");
+  if (hint) hint.hidden = !paintMode;
+  // Rebuild the scene so the movement gizmo hides/reappears with the mode.
+  updateScene();
+}
+
+function togglePaintMode(mode) {
+  const next = paintMode === mode ? null : mode;
+  setPaintMode(next);
+  if (next === "require") {
+    playSound("toggle-on");
+    log("Paint-supports mode on: drag on the model to mark areas that should grow supports.");
+  } else if (next === "exclude") {
+    playSound("toggle-on");
+    log("Paint-blockers mode on: drag on the model to mark areas where automatic supports are blocked.");
+  } else if (next === "erase") {
+    playSound("toggle-on");
+    log("Erase-paint mode on: drag over painted areas to remove them.");
+  } else {
+    playSound("toggle-off");
+  }
+}
+
+function clearSupportPaint() {
+  const plate = activePlate();
+  if (!plate || !(plate.supportPaint || []).length) return;
+  plate.supportPaint = [];
+  playSound("delete");
+  afterSupportPaintChanged(plate);
+  log("Cleared painted support areas.");
+}
+
+function afterSupportPaintChanged(plate) {
+  bumpPaintStamp();
+  const samples = plate.supportPaint || [];
+  const requireCount = samples.filter((sample) => sample.mode === "require").length;
+  const excludeCount = samples.length - requireCount;
+  if (samples.length && !plate.layersGenerated) {
+    const parts = [];
+    if (requireCount) parts.push(`${requireCount} support`);
+    if (excludeCount) parts.push(`${excludeCount} blocker`);
+    $("supportStatus").textContent = `Painted ${parts.join(", ")} sample${samples.length === 1 ? "" : "s"}`;
+  }
+  updateScene();
+}
+
+function paintBrushRadiusMm() {
+  const diameter = number("paintBrushDiameter");
+  return clamp(Number.isFinite(diameter) && diameter > 0 ? diameter / 2 : 2, 0.25, 25);
+}
+
+// Add (or Alt-erase) paint samples along a brush drag. Samples are stored in
+// the owning model's mesh-local space (like manual supports) so they stay
+// glued to the surface as the part is moved, rotated, or scaled. Each sample
+// also records the local surface normal so the paint renders as a tint lying
+// on the surface.
+let lastPaintWorld = null;
+
+function handlePaintStroke(clientX, clientY, { erase = false, start = false } = {}) {
+  if (!paintMode) return;
+  const plate = activePlate();
+  if (!plate) return;
+  if (start) {
+    lastPaintScreen = null;
+    lastPaintWorld = null;
+  }
+  if (lastPaintScreen && Math.hypot(clientX - lastPaintScreen.x, clientY - lastPaintScreen.y) < 4) return;
+  let ray = viewer.screenRay(clientX, clientY);
+  if (!ray) return;
+  let hit = raycastActivePlateModels(ray, { preferDownward: true });
+  if (!hit) {
+    // Grazing a tooth gap or an edge: retry in a small screen-space ring so
+    // the brush stays engaged along part outlines.
+    for (const [jx, jy] of [[5, 0], [-5, 0], [0, 5], [0, -5], [4, 4], [-4, -4]]) {
+      const retryRay = viewer.screenRay(clientX + jx, clientY + jy);
+      const retryHit = retryRay && raycastActivePlateModels(retryRay, { preferDownward: true });
+      if (retryHit) {
+        ray = retryRay;
+        hit = retryHit;
+        break;
+      }
+    }
+  }
+  if (!hit || !hit.model) {
+    if (start) log("Paint brush missed the surface. Aim at a part on the active build plate (zooming in helps on fine details).");
+    lastPaintWorld = null;
+    return;
+  }
+  lastPaintScreen = { x: clientX, y: clientY };
+  plate.supportPaint = plate.supportPaint || [];
+  const radius = paintBrushRadiusMm();
+  // Downward hits keep their outward (down-facing) normal; fallback hits use
+  // the face the user can actually see.
+  let normal = hit.normal || [0, 0, -1];
+  if (!hit.downward && (normal[0] * ray.direction[0] + normal[1] * ray.direction[1] + normal[2] * ray.direction[2]) > 0) {
+    normal = [-normal[0], -normal[1], -normal[2]];
+  }
+
+  if (erase || paintMode === "erase") {
+    const before = plate.supportPaint.length;
+    plate.supportPaint = plate.supportPaint.filter((sample) => {
+      const world = manualSupportWorldPoint(sample, plate);
+      const reach = Math.max(radius, sample.radius || 0);
+      return Math.hypot(world[0] - hit.point[0], world[1] - hit.point[1], world[2] - hit.point[2]) > reach;
+    });
+    lastPaintWorld = null;
+    if (plate.supportPaint.length !== before) afterSupportPaintChanged(plate);
+    return;
+  }
+
+  let changed = addPaintSample(plate, hit.model, hit.point, normal, radius);
+  // Fill the gap along fast strokes so the painted band stays continuous
+  // instead of leaving dotted patches.
+  if (lastPaintWorld && lastPaintWorld.modelId === hit.model.id) {
+    const gap = Math.hypot(
+      hit.point[0] - lastPaintWorld.p[0],
+      hit.point[1] - lastPaintWorld.p[1],
+      hit.point[2] - lastPaintWorld.p[2]
+    );
+    if (gap > radius * 0.6 && gap <= radius * 8) {
+      const steps = Math.min(24, Math.floor(gap / (radius * 0.5)));
+      for (let k = 1; k < steps; k++) {
+        const t = k / steps;
+        const point = [
+          lastPaintWorld.p[0] + (hit.point[0] - lastPaintWorld.p[0]) * t,
+          lastPaintWorld.p[1] + (hit.point[1] - lastPaintWorld.p[1]) * t,
+          lastPaintWorld.p[2] + (hit.point[2] - lastPaintWorld.p[2]) * t
+        ];
+        changed = addPaintSample(plate, hit.model, point, normal, radius) || changed;
+      }
+    }
+  }
+  lastPaintWorld = { p: hit.point, modelId: hit.model.id };
+  if (changed) afterSupportPaintChanged(plate);
+}
+
+function addPaintSample(plate, model, worldPoint, worldNormal, radius) {
+  if (paintMode !== "exclude" && paintMode !== "require") return false;
+  // Skip samples that land nearly on top of an existing one of the same mode
+  // so a slow drag does not pile up thousands of overlapping samples.
+  for (const sample of plate.supportPaint) {
+    if (sample.mode !== paintMode) continue;
+    const world = manualSupportWorldPoint(sample, plate);
+    const dist = Math.hypot(world[0] - worldPoint[0], world[1] - worldPoint[1], world[2] - worldPoint[2]);
+    if (dist < Math.min(radius, sample.radius || radius) * 0.5) return false;
+  }
+  const local = manualSupportLocalFromWorld(worldPoint, model, plate);
+  const t = model.transform;
+  const angles = [deg(t.rotateX), deg(t.rotateY), deg(t.rotateZ)];
+  const localNormal = rotatePointInverse(worldNormal, angles);
+  plate.supportPaint.push({
+    ...local,
+    nx: localNormal[0],
+    ny: localNormal[1],
+    nz: localNormal[2],
+    radius,
+    mode: paintMode
+  });
+  return true;
 }
 
 function afterManualSupportsChanged(plate) {
@@ -3760,36 +4396,54 @@ function handleManualSupportClick(clientX, clientY) {
   afterManualSupportsChanged(plate);
 }
 
-function raycastActivePlateModels(ray) {
+// Raycast the active plate's models. With preferDownward, the nearest hit on a
+// downward-facing triangle wins (falling back to the overall nearest hit):
+// supports only ever attach to under-surfaces, so support painting projects
+// through the part onto its underside no matter which side the camera is on.
+function raycastActivePlateModels(ray, { preferDownward = false } = {}) {
   const plate = activePlate();
   if (!plate) return null;
   let best = null;
+  let bestDownward = null;
   for (const model of models) {
     if (model.plateId !== plate.id) continue;
     const world = modelWorldMesh(model);
     const v = world.vertices;
     for (let i = 0; i + 8 < v.length; i += 9) {
-      const t = rayTriangleIntersect(
-        ray.origin,
-        ray.direction,
-        [v[i], v[i + 1], v[i + 2]],
-        [v[i + 3], v[i + 4], v[i + 5]],
-        [v[i + 6], v[i + 7], v[i + 8]]
-      );
-      if (t !== null && (!best || t < best.t)) {
-        best = {
-          t,
-          model,
-          point: [
-            ray.origin[0] + ray.direction[0] * t,
-            ray.origin[1] + ray.direction[1] * t,
-            ray.origin[2] + ray.direction[2] * t
-          ]
-        };
+      const a = [v[i], v[i + 1], v[i + 2]];
+      const b = [v[i + 3], v[i + 4], v[i + 5]];
+      const c = [v[i + 6], v[i + 7], v[i + 8]];
+      const t = rayTriangleIntersect(ray.origin, ray.direction, a, b, c);
+      if (t === null) continue;
+      const normal = triangleUnitNormal(a, b, c);
+      const hit = {
+        t,
+        model,
+        normal,
+        downward: normal[2] < -0.05,
+        point: [
+          ray.origin[0] + ray.direction[0] * t,
+          ray.origin[1] + ray.direction[1] * t,
+          ray.origin[2] + ray.direction[2] * t
+        ]
+      };
+      if (!best || t < best.t) best = hit;
+      if (preferDownward && hit.downward && (!bestDownward || t < bestDownward.t)) {
+        bestDownward = hit;
       }
     }
   }
-  return best;
+  return preferDownward ? (bestDownward || best) : best;
+}
+
+function triangleUnitNormal(a, b, c) {
+  const e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+  const e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+  const nx = e1[1] * e2[2] - e1[2] * e2[1];
+  const ny = e1[2] * e2[0] - e1[0] * e2[2];
+  const nz = e1[0] * e2[1] - e1[1] * e2[0];
+  const len = Math.hypot(nx, ny, nz) || 1;
+  return [nx / len, ny / len, nz / len];
 }
 
 // Moeller-Trumbore ray/triangle intersection. Returns the ray parameter t (>0)
@@ -3869,16 +4523,23 @@ async function slicePlates(platesToSlice, { forceSuffix = false, label = "Slicin
   try {
     for (const plate of occupied) {
       const payload = collectPayloadForPlate(plate, outputPathForPlate(plate, { forceSuffix }));
-      // If the user never generated supports (and placed none manually), slice
-      // the part flat on the build plate: no auto supports, no model lift.
-      const hasSupportIntent = plate.layersGenerated || (plate.manualSupports?.length || 0) > 0;
-      if (!hasSupportIntent) {
+      // What you see is what you slice: ship the exact previewed supports,
+      // braces, and raft to the slicer. If the viewport shows no generated
+      // structure, slice flat on the plate — never invent supports.
+      const generated = plate.layersGenerated
+        && ((plate.supports?.length || 0) > 0 || (plate.supportBraces?.length || 0) > 0 || plate.supportRaft);
+      if (generated) {
+        payload.previewPlan = {
+          supports: cloneSettings(plate.supports || []),
+          braces: cloneSettings(plate.supportBraces || [])
+        };
+      } else {
         payload.support = { ...payload.support, enabled: false };
         payload.manualSupports = [];
+        payload.supportPaint = [];
       }
       log(`Slicing ${plate.name}...`);
       const result = await window.slicer.slice(payload);
-      plate.layersGenerated = true;
       plate.sliced = true;
       plate.sliceLayerCount = result.layers || 0;
       plate.previewDir = result.previewDir || null;
@@ -3950,7 +4611,8 @@ function basePayload(plate = activePlate(), outputPath = $("outputPath").value.t
       scale: 1
     },
     support: cloneSettings(settings.support),
-    manualSupports: manualSupportsForBackend(plate, targetModels)
+    manualSupports: manualSupportsForBackend(plate, targetModels),
+    supportPaint: supportPaintForBackend(plate, targetModels)
   };
 }
 
@@ -3966,6 +4628,26 @@ function manualSupportsForBackend(plate, targetModels = null) {
     .map((point) => {
       const local = manualSupportPlateLocal(point, plate);
       return { x: local[0], y: local[1], z: local[2] + backendLift };
+    });
+}
+
+// Painted brush samples in backend mesh space (same convention as manual
+// support points), carrying the brush radius and paint mode.
+function supportPaintForBackend(plate, targetModels = null) {
+  const support = plate.settings.support;
+  const backendLift = support?.enabled ? Math.max(0, Number(support.modelLift) || 0) : 0;
+  const allowedIds = targetModels ? new Set(targetModels.map((model) => model.id)) : null;
+  return (plate.supportPaint || [])
+    .filter((sample) => !allowedIds || sample.modelId == null || allowedIds.has(sample.modelId))
+    .map((sample) => {
+      const local = manualSupportPlateLocal(sample, plate);
+      return {
+        x: local[0],
+        y: local[1],
+        z: local[2] + backendLift,
+        radius: sample.radius || 2,
+        mode: sample.mode === "require" ? "require" : "exclude"
+      };
     });
 }
 
@@ -4317,6 +4999,7 @@ function applySupportProfile(flat) {
   changed += applyDiameterValue("braceDiameter", flat, ["braceDiameter", "brace_diameter_mm"], ["braceRadius", "brace_radius_mm"]);
   changed += applyNumberValue("braceHeight", flat, ["braceHeight", "brace_height_mm"]);
   changed += applyNumberValue("braceDistance", flat, ["braceDistance", "brace_max_distance_mm"]);
+  changed += applyNumberValue("braceInterval", flat, ["braceInterval", "brace_interval_mm"]);
   syncSphericalContactFields();
   syncPrimarySupportFields();
   return changed;
@@ -4720,7 +5403,7 @@ function buildScene({ skipDerivedGeometry = false } = {}) {
     if (selected) selectionBoxes.push(bounds);
   }
 
-  if (gizmoModel && selectedModelIds.size && !manualSupportMode) {
+  if (gizmoModel && selectedModelIds.size && !manualSupportMode && !paintMode) {
     const gizmoPlate = buildPlates.find((item) => item.id === gizmoModel.plateId);
     const bounds = offsetBounds(modelDisplayLocalBounds(gizmoModel), modelWorldOffset(gizmoModel, gizmoPlate));
     const center = boundsCenter(bounds);
@@ -4755,6 +5438,7 @@ function buildScene({ skipDerivedGeometry = false } = {}) {
     selectionBoxes,
     supports: skipDerivedGeometry ? null : offsetSupports(active.supports, active.origin),
     manualSupports: skipDerivedGeometry ? null : offsetManualSupports(active.manualSupports, active, modelLiftForPlate(active)),
+    supportPaint: skipDerivedGeometry ? null : paintTintForPlate(active),
     supportBraces: skipDerivedGeometry ? null : offsetBraces(active.supportBraces, active.origin),
     supportRaft: skipDerivedGeometry ? null : offsetSupportRaft(active.supportRaft, active.origin),
     transformGizmo,
@@ -5028,23 +5712,29 @@ function autoArrangeActivePlate(region = "center") {
     if (!hasSupports) move.model.transform.translateZ = move.newZ;
   }
   if (hasSupports) {
-    const ownerDelta = (px, py) => {
-      const owner = moves.find((move) => pointInsideBounds2d(px, py, move.oldBounds) && (move.dx !== 0 || move.dy !== 0));
+    const ownerDelta = (px, py, ownerId) => {
+      const owner = moves.find((move) => (ownerId != null
+        ? move.model.id === ownerId
+        : pointInsideBounds2d(px, py, move.oldBounds)) && (move.dx !== 0 || move.dy !== 0));
       return owner || null;
     };
     plate.supports = (plate.supports || []).map((s) => {
-      const owner = ownerDelta(s.x, s.y);
+      const owner = ownerDelta(s.x, s.y, s.ownerId);
       return owner ? translateSupport(s, owner.dx, owner.dy) : s;
     });
     plate.supportBraces = (plate.supportBraces || []).map((b) => {
-      const owner = ownerDelta(b.x0, b.y0);
+      const owner = ownerDelta(b.x0, b.y0, b.ownerId);
       return owner ? translateBrace(b, owner.dx, owner.dy) : b;
     });
-    // The raft is a single plate-wide projection; follow the first moved part
-    // (exact for a single-part plate, approximate otherwise — it regenerates on
-    // slice anyway).
-    const primary = moves.find((move) => move.dx !== 0 || move.dy !== 0);
-    if (primary) plate.supportRaft = translateRaft(plate.supportRaft, primary.dx, primary.dy);
+    if (Array.isArray(plate.supportRaft?.rects) && plate.supportRaft.rects.length) {
+      // Per-part raft pads follow the part they sit under.
+      plate.supportRaft = translateRaftRectsByMoves(plate.supportRaft, moves);
+    } else {
+      // Legacy single-box raft: follow the first moved part (exact for a
+      // single-part plate, approximate otherwise — it regenerates on slice).
+      const primary = moves.find((move) => move.dx !== 0 || move.dy !== 0);
+      if (primary) plate.supportRaft = translateRaft(plate.supportRaft, primary.dx, primary.dy);
+    }
   }
 
   updatePlacementFieldsFromSelection();
@@ -5248,7 +5938,41 @@ function makeWorldRectGeometry(x0, y0, x1, y1, z) {
   };
 }
 
+function makeRaftSpanGeometry(raft) {
+  const topZ = Math.max(0.4, Number(raft.thickness) || 0.35);
+  const vertices = [];
+  const normals = [];
+  const up = [0, 0, 1];
+  const down = [0, 0, -1];
+  for (const rect of raft.rects) {
+    const x0 = Number(rect[0]);
+    const y0 = Number(rect[1]);
+    const x1 = Number(rect[2]);
+    const y1 = Number(rect[3]);
+    if (![x0, y0, x1, y1].every(Number.isFinite) || x1 <= x0 || y1 <= y0) continue;
+    pushTri(vertices, normals, [x0, y0, topZ], [x1, y0, topZ], [x1, y1, topZ], up, up, up);
+    pushTri(vertices, normals, [x0, y0, topZ], [x1, y1, topZ], [x0, y1, topZ], up, up, up);
+    pushTri(vertices, normals, [x0, y0, 0], [x1, y1, 0], [x1, y0, 0], down, down, down);
+    pushTri(vertices, normals, [x0, y0, 0], [x0, y1, 0], [x1, y1, 0], down, down, down);
+    pushRaftWall(vertices, normals, x0, y0, x1, y0, topZ, [0, -1, 0]);
+    pushRaftWall(vertices, normals, x1, y0, x1, y1, topZ, [1, 0, 0]);
+    pushRaftWall(vertices, normals, x1, y1, x0, y1, topZ, [0, 1, 0]);
+    pushRaftWall(vertices, normals, x0, y1, x0, y0, topZ, [-1, 0, 0]);
+  }
+  return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
+}
+
+function pushRaftWall(vertices, normals, ax, ay, bx, by, topZ, n) {
+  pushTri(vertices, normals, [ax, ay, 0], [bx, by, 0], [bx, by, topZ], n, n, n);
+  pushTri(vertices, normals, [ax, ay, 0], [bx, by, topZ], [ax, ay, topZ], n, n, n);
+}
+
 function makeSupportRaftGeometry(raft) {
+  // Preferred path: the backend sends the actual raft footprint (the model's
+  // dilated shadow, exactly what slicing produces) as row-span rectangles.
+  if (Array.isArray(raft?.rects) && raft.rects.length) {
+    return makeRaftSpanGeometry(raft);
+  }
   const x0 = Number(raft?.x0);
   const y0 = Number(raft?.y0);
   const x1 = Number(raft?.x1);
@@ -5324,6 +6048,187 @@ function offsetManualSupports(points, plate, lift = 0) {
   });
 }
 
+// Painted-surface tint: the model's own triangles inside the brush spheres,
+// subdivided so the tint hugs the brush shape and never extends past the mesh,
+// offset a hair along the surface normal to sit on top of the part. Built in
+// world space; cached per model until the paint, transform, or lift changes.
+let paintStamp = 0;
+const paintTintCache = new Map();
+
+function bumpPaintStamp() {
+  paintStamp++;
+}
+
+function paintTintForPlate(plate) {
+  const samples = plate.supportPaint || [];
+  if (!samples.length) return { exclude: null, require: null };
+  const lift = modelLiftForPlate(plate);
+  const byModel = new Map();
+  for (const sample of samples) {
+    const model = manualSupportOwnerModel(sample, plate);
+    if (!model) continue;
+    if (!byModel.has(model.id)) byModel.set(model.id, { model, samples: [] });
+    byModel.get(model.id).samples.push(sample);
+  }
+  const merged = { exclude: { vertices: [], normals: [] }, require: { vertices: [], normals: [] } };
+  for (const { model, samples: modelSamples } of byModel.values()) {
+    const key = [
+      model.id,
+      transformGeometryKey(model.transform),
+      model.transform.translateX,
+      model.transform.translateY,
+      model.transform.translateZ,
+      plate.origin.x,
+      plate.origin.y,
+      lift,
+      paintStamp
+    ].join("|");
+    let tint = paintTintCache.get(key);
+    if (!tint) {
+      tint = buildModelPaintTint(model, plate, modelSamples);
+      paintTintCache.set(key, tint);
+      while (paintTintCache.size > 16) paintTintCache.delete(paintTintCache.keys().next().value);
+    }
+    for (const mode of ["exclude", "require"]) {
+      const src = tint[mode];
+      for (let i = 0; i < src.vertices.length; i++) merged[mode].vertices.push(src.vertices[i]);
+      for (let i = 0; i < src.normals.length; i++) merged[mode].normals.push(src.normals[i]);
+    }
+  }
+  const toGeometry = (geom) => geom.vertices.length
+    ? { vertices: new Float32Array(geom.vertices), normals: new Float32Array(geom.normals) }
+    : null;
+  return { exclude: toGeometry(merged.exclude), require: toGeometry(merged.require) };
+}
+
+function buildModelPaintTint(model, plate, samples) {
+  const out = { exclude: { vertices: [], normals: [] }, require: { vertices: [], normals: [] } };
+  const spheres = [];
+  let maxRadius = 0;
+  for (const sample of samples) {
+    if (sample.mode !== "exclude" && sample.mode !== "require") continue;
+    const p = manualSupportWorldPoint(sample, plate);
+    const r = Math.max(0.3, sample.radius || 2);
+    maxRadius = Math.max(maxRadius, r);
+    spheres.push({ x: p[0], y: p[1], z: p[2], r, r2: r * r, mode: sample.mode });
+  }
+  if (!spheres.length) return out;
+
+  // Bucket the brush spheres so each triangle only tests nearby ones.
+  const cell = Math.max(2, maxRadius);
+  const grid = new Map();
+  for (let index = 0; index < spheres.length; index++) {
+    const s = spheres[index];
+    for (let ix = Math.floor((s.x - s.r) / cell); ix <= Math.floor((s.x + s.r) / cell); ix++) {
+      for (let iy = Math.floor((s.y - s.r) / cell); iy <= Math.floor((s.y + s.r) / cell); iy++) {
+        for (let iz = Math.floor((s.z - s.r) / cell); iz <= Math.floor((s.z + s.r) / cell); iz++) {
+          const key = `${ix},${iy},${iz}`;
+          if (!grid.has(key)) grid.set(key, []);
+          grid.get(key).push(index);
+        }
+      }
+    }
+  }
+
+  const v = modelWorldMesh(model).vertices;
+  const candidates = [];
+  const seen = new Set();
+  for (let i = 0; i + 8 < v.length; i += 9) {
+    const a = [v[i], v[i + 1], v[i + 2]];
+    const b = [v[i + 3], v[i + 4], v[i + 5]];
+    const c = [v[i + 6], v[i + 7], v[i + 8]];
+    const minX = Math.min(a[0], b[0], c[0]);
+    const minY = Math.min(a[1], b[1], c[1]);
+    const minZ = Math.min(a[2], b[2], c[2]);
+    const maxX = Math.max(a[0], b[0], c[0]);
+    const maxY = Math.max(a[1], b[1], c[1]);
+    const maxZ = Math.max(a[2], b[2], c[2]);
+    candidates.length = 0;
+    seen.clear();
+    for (let ix = Math.floor(minX / cell); ix <= Math.floor(maxX / cell); ix++) {
+      for (let iy = Math.floor(minY / cell); iy <= Math.floor(maxY / cell); iy++) {
+        for (let iz = Math.floor(minZ / cell); iz <= Math.floor(maxZ / cell); iz++) {
+          for (const index of grid.get(`${ix},${iy},${iz}`) || []) {
+            if (seen.has(index)) continue;
+            seen.add(index);
+            const s = spheres[index];
+            if (
+              s.x + s.r >= minX && s.x - s.r <= maxX
+              && s.y + s.r >= minY && s.y - s.r <= maxY
+              && s.z + s.r >= minZ && s.z - s.r <= maxZ
+            ) candidates.push(s);
+          }
+        }
+      }
+    }
+    if (!candidates.length) continue;
+    const exclude = candidates.filter((s) => s.mode === "exclude");
+    const include = candidates.filter((s) => s.mode === "require");
+    if (exclude.length) emitPaintTri(out.exclude, a, b, c, exclude, 0);
+    if (include.length) emitPaintTri(out.require, a, b, c, include, 0);
+  }
+  return out;
+}
+
+function emitPaintTri(geom, a, b, c, spheres, depth) {
+  // Whole triangle inside one brush sphere: emit as-is.
+  for (const s of spheres) {
+    if (paintDist2(s, a) <= s.r2 && paintDist2(s, b) <= s.r2 && paintDist2(s, c) <= s.r2) {
+      pushTintTri(geom, a, b, c);
+      return;
+    }
+  }
+  const maxEdge2 = Math.max(paintSeg2(a, b), paintSeg2(b, c), paintSeg2(c, a));
+  let minR = Infinity;
+  for (const s of spheres) minR = Math.min(minR, s.r);
+  const target = minR * 0.6;
+  if (depth >= 5 || maxEdge2 <= target * target) {
+    const centroid = [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3];
+    if (spheres.some((s) => paintDist2(s, centroid) <= s.r2)) pushTintTri(geom, a, b, c);
+    return;
+  }
+  const ab = paintMid(a, b);
+  const bc = paintMid(b, c);
+  const ca = paintMid(c, a);
+  emitPaintTri(geom, a, ab, ca, spheres, depth + 1);
+  emitPaintTri(geom, ab, b, bc, spheres, depth + 1);
+  emitPaintTri(geom, ca, bc, c, spheres, depth + 1);
+  emitPaintTri(geom, ab, bc, ca, spheres, depth + 1);
+}
+
+function pushTintTri(geom, a, b, c) {
+  const n = triangleUnitNormal(a, b, c);
+  const lift = 0.05;
+  pushTri(
+    geom.vertices,
+    geom.normals,
+    [a[0] + n[0] * lift, a[1] + n[1] * lift, a[2] + n[2] * lift],
+    [b[0] + n[0] * lift, b[1] + n[1] * lift, b[2] + n[2] * lift],
+    [c[0] + n[0] * lift, c[1] + n[1] * lift, c[2] + n[2] * lift],
+    n,
+    n,
+    n
+  );
+}
+
+function paintDist2(s, p) {
+  const dx = p[0] - s.x;
+  const dy = p[1] - s.y;
+  const dz = p[2] - s.z;
+  return dx * dx + dy * dy + dz * dz;
+}
+
+function paintSeg2(a, b) {
+  const dx = a[0] - b[0];
+  const dy = a[1] - b[1];
+  const dz = a[2] - b[2];
+  return dx * dx + dy * dy + dz * dz;
+}
+
+function paintMid(a, b) {
+  return [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
+}
+
 function offsetBraces(items, origin) {
   return (items || []).map((item) => ({
     ...item,
@@ -5341,7 +6246,10 @@ function offsetSupportRaft(raft, origin) {
     x0: raft.x0 + origin.x,
     y0: raft.y0 + origin.y,
     x1: raft.x1 + origin.x,
-    y1: raft.y1 + origin.y
+    y1: raft.y1 + origin.y,
+    ...(Array.isArray(raft.rects)
+      ? { rects: raft.rects.map(([x0, y0, x1, y1]) => [x0 + origin.x, y0 + origin.y, x1 + origin.x, y1 + origin.y]) }
+      : {})
   };
 }
 
@@ -5577,6 +6485,7 @@ function toggleSlicePreview(event) {
 function setBusy(busy) {
   isBusy = busy;
   $("previewButton").disabled = busy;
+  $("openProjectButton").disabled = busy;
   $("saveProjectButton").disabled = busy;
   $("sliceButton").disabled = busy;
   $("sliceAllButton").disabled = busy;
@@ -5875,6 +6784,18 @@ class Viewer {
     this.gl = canvas.getContext("webgl", { antialias: true });
     this.program = createProgram(this.gl);
     this.textureProgram = createTextureProgram(this.gl);
+    // If the GPU drops the context under memory pressure, keep it restorable
+    // and rebuild the programs/geometry instead of leaving the viewport black.
+    this.canvas.addEventListener("webglcontextlost", (event) => event.preventDefault());
+    this.canvas.addEventListener("webglcontextrestored", () => {
+      this.program = createProgram(this.gl);
+      this.textureProgram = createTextureProgram(this.gl);
+      this.modelMeshCache.clear();
+      this.sliceTextureCache.clear();
+      this.meshes = {};
+      if (this.scene) this.setScene(this.scene);
+      this.renderFrame();
+    });
     this.meshes = {};
     this.modelMeshCache = new Map();
     this.sliceTextureCache = new Map();
@@ -5894,6 +6815,8 @@ class Viewer {
     this.onSceneDoubleClick = null;
     this.onPlaceSupport = null;
     this.supportEditMode = false;
+    this.onPaintStroke = null;
+    this.paintMode = false;
     this.onModelDrag = null;
     this.onModelDragEnd = null;
     this.onGizmoDrag = null;
@@ -5951,12 +6874,19 @@ class Viewer {
       // (via Generate Manual or toggling it off) to move parts again.
       const placeSupport = isLeft && this.supportEditMode;
       if (placeSupport) mode = "press";
-      this.pressedHit = !placeSupport && isLeft && hit && (hit.type === "plate" || hit.type === "add-plate" || hit.type === "plate-action") ? hit : null;
+      // In paint mode a left drag brushes support paint over the model surface
+      // instead of orbiting or moving parts.
+      const paintStroke = isLeft && !placeSupport && this.paintMode;
+      if (paintStroke) mode = "paint";
+      this.pressedHit = !placeSupport && !paintStroke && isLeft && hit && (hit.type === "plate" || hit.type === "add-plate" || hit.type === "plate-action") ? hit : null;
       const dragPlaneZ = mode === "model"
         ? (hit?.bounds ? boundsCenter(hit.bounds)[2] : (this.activePartFocus?.[2] || 0))
         : 0;
       this.drag = { x: event.clientX, y: event.clientY, mode, moved: false, action: mode === "gizmo" ? this.activeGizmoAction : null, planeZ: dragPlaneZ };
-      this.pointerStart = { x: event.clientX, y: event.clientY, additive, hit, clickable: isLeft && mode !== "gizmo", placeSupport };
+      this.pointerStart = { x: event.clientX, y: event.clientY, additive, hit, clickable: isLeft && mode !== "gizmo" && mode !== "paint", placeSupport, paint: paintStroke };
+      if (paintStroke && this.onPaintStroke) {
+        this.onPaintStroke(event.clientX, event.clientY, { erase: event.altKey, start: true });
+      }
       if (mode === "model" && this.onScenePick) {
         this.onScenePick({ type: "model", id: hit.id, plateId: hit.plateId, additive, dragStart: true });
       }
@@ -5995,6 +6925,8 @@ class Viewer {
             toY: event.clientY
           });
         }
+      } else if (mode === "paint") {
+        if (this.onPaintStroke) this.onPaintStroke(event.clientX, event.clientY, { erase: event.altKey, start: false });
       } else if (mode === "pan") {
         this.pan(dx, dy);
       } else if (mode === "orbit") {
@@ -6119,11 +7051,14 @@ class Viewer {
     const tanHalfFov = Math.tan(this.fov / 2);
     const halfHeight = Math.max(1, this.distance * tanHalfFov);
     if (this.projectionMode === "orthographic") {
+      // Start the ray well behind the scene, not at the orbit target —
+      // otherwise surfaces between the camera and the target can never be hit.
+      const onTargetPlane = add(
+        this.target,
+        add(scaleVec(right, ndcX * halfHeight * aspect), scaleVec(up, ndcY * halfHeight))
+      );
       return {
-        origin: add(
-          this.target,
-          add(scaleVec(right, ndcX * halfHeight * aspect), scaleVec(up, ndcY * halfHeight))
-        ),
+        origin: add(onTargetPlane, scaleVec(forward, -1500)),
         direction: forward
       };
     }
@@ -6462,6 +7397,7 @@ class Viewer {
       : null;
     this.meshes.supports = makeMesh(this.gl, makeSupportGeometry(scene.supports, scene.supportBraces), [1.0, 0.63, 0.18, 1], this.gl.TRIANGLES);
     this.setManualSupportMarkers(scene.manualSupports);
+    this.setSupportPaintMarkers(scene.supportPaint);
     this.meshes.supportRaft = scene.supportRaft
       ? makeMesh(this.gl, makeSupportRaftGeometry(scene.supportRaft), scene.supportRaft.type === "skate" ? [0.95, 0.7, 0.2, 1] : [1.0, 0.62, 0.16, 1], this.gl.TRIANGLES)
       : null;
@@ -6597,12 +7533,26 @@ class Viewer {
 
   setSupportEditMode(on) {
     this.supportEditMode = !!on;
-    this.canvas.style.cursor = this.supportEditMode ? "crosshair" : "";
+    this.canvas.style.cursor = this.supportEditMode ? "crosshair" : (this.paintMode ? "cell" : "");
+  }
+
+  setPaintMode(on) {
+    this.paintMode = !!on;
+    this.canvas.style.cursor = this.paintMode ? "cell" : (this.supportEditMode ? "crosshair" : "");
   }
 
   setManualSupportMarkers(points) {
     this.meshes.manualMarkers = points && points.length
       ? makeMesh(this.gl, makeManualMarkerGeometry(points), [0.95, 0.3, 0.85, 1], this.gl.TRIANGLES)
+      : null;
+  }
+
+  setSupportPaintMarkers(tint) {
+    this.meshes.paintExclude = tint?.exclude
+      ? makeMesh(this.gl, tint.exclude, [0.93, 0.3, 0.24, 0.92], this.gl.TRIANGLES)
+      : null;
+    this.meshes.paintRequire = tint?.require
+      ? makeMesh(this.gl, tint.require, [0.3, 0.85, 0.42, 0.92], this.gl.TRIANGLES)
       : null;
   }
 
@@ -6646,11 +7596,25 @@ class Viewer {
         drawMesh(gl, this.program, action.icon, mvp, this.clipZ);
       }
     }
-    if (this.meshes.supportRaft) drawMesh(gl, this.program, this.meshes.supportRaft, mvp, this.clipZ);
+    if (this.meshes.supportRaft) {
+      // Raft span geometry is emitted without guaranteed winding; draw both
+      // faces so no side of the slab disappears.
+      gl.disable(gl.CULL_FACE);
+      drawMesh(gl, this.program, this.meshes.supportRaft, mvp, this.clipZ);
+      gl.enable(gl.CULL_FACE);
+    }
     if (this.meshes.supports) drawMesh(gl, this.program, this.meshes.supports, mvp, this.clipZ);
     if (this.meshes.manualMarkers) drawMesh(gl, this.program, this.meshes.manualMarkers, mvp, this.clipZ);
     for (const item of this.meshes.models || []) {
       this.drawModelItem(item, mvp);
+    }
+    // Painted areas are drawn after the models as surface-hugging discs;
+    // disable culling so the tint reads from either side of the surface.
+    if (this.meshes.paintExclude || this.meshes.paintRequire) {
+      gl.disable(gl.CULL_FACE);
+      if (this.meshes.paintExclude) drawMesh(gl, this.program, this.meshes.paintExclude, mvp, this.clipZ);
+      if (this.meshes.paintRequire) drawMesh(gl, this.program, this.meshes.paintRequire, mvp, this.clipZ);
+      gl.enable(gl.CULL_FACE);
     }
     if (this.meshes.clipPlane) this.drawClipPlane(mvp);
     if (this.meshes.sliceLayer) this.drawSliceLayer(mvp);
@@ -7419,6 +8383,7 @@ function makeSelectionBoxGeometry(boxes) {
   return { vertices, normals };
 }
 
+
 function makeManualMarkerGeometry(points) {
   const vertices = [];
   const normals = [];
@@ -7429,9 +8394,22 @@ function makeManualMarkerGeometry(points) {
   return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
 }
 
+// Tessellation detail for the support preview. Full detail on a few hundred
+// supports is fine, but thousands of high-poly joint spheres allocate hundreds
+// of megabytes per rebuild and can kill the WebGL context, so coarsen the
+// geometry as the count grows.
+function supportGeometryDetail(count) {
+  if (count > 2500) return 0.25;
+  if (count > 800) return 0.5;
+  return 1;
+}
+
 function makeSupportGeometry(items, braces) {
   const vertices = [];
   const normals = [];
+  const detail = supportGeometryDetail((items || []).length);
+  const seg = (segments) => Math.max(8, Math.round(segments * detail));
+  const rings = (count) => Math.max(4, Math.round(count * detail));
   for (const support of items || []) {
     const baseX = Number.isFinite(support.baseX) ? support.baseX : support.x;
     const baseY = Number.isFinite(support.baseY) ? support.baseY : support.y;
@@ -7445,14 +8423,14 @@ function makeSupportGeometry(items, braces) {
     const top = [support.x, support.y, z];
     const postRadius = support.postRadius || 0.28;
     const tipRadius = support.tipRadius || 0.18;
-    addSegmentCylinder(vertices, normals, base, joint, postRadius, 30);
-    addSphere(vertices, normals, joint, Math.max(postRadius, tipRadius), 42, 21);
+    addSegmentCylinder(vertices, normals, base, joint, postRadius, seg(30));
+    addSphere(vertices, normals, joint, Math.max(postRadius, tipRadius), seg(42), rings(21));
     if ((support.kind || "bed") === "bed") {
-      addCylinder(vertices, normals, baseX, baseY, 0, support.bedInterfaceThickness || 0.35, support.footRadius || 0.8, 16);
+      addCylinder(vertices, normals, baseX, baseY, 0, support.bedInterfaceThickness || 0.35, support.footRadius || 0.8, seg(16));
     } else {
-      addSegmentCylinder(vertices, normals, base, pointBetween(base, joint, 0.2), tipRadius, 30);
+      addSegmentCylinder(vertices, normals, base, pointBetween(base, joint, 0.2), tipRadius, seg(30));
     }
-    addTipGeometry(vertices, normals, joint, top, support);
+    addTipGeometry(vertices, normals, joint, top, support, detail);
   }
   for (const brace of braces || []) {
     const z0 = Number.isFinite(brace.z0) ? brace.z0 : brace.z;
@@ -7463,33 +8441,35 @@ function makeSupportGeometry(items, braces) {
       [brace.x0, brace.y0, z0],
       [brace.x1, brace.y1, z1],
       brace.radius || 0.18,
-      18
+      seg(18)
     );
   }
   return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
 }
 
-function addTipGeometry(vertices, normals, start, top, support) {
+function addTipGeometry(vertices, normals, start, top, support, detail = 1) {
+  const seg = (segments) => Math.max(8, Math.round(segments * detail));
+  const rings = (count) => Math.max(4, Math.round(count * detail));
   const postRadius = support.postRadius || 0.28;
   const tipRadius = support.tipRadius || 0.18;
   const type = support.tipType || "cone";
   if (support.sphericalContactEnabled) {
     const radius = Math.max(0.01, (support.sphericalContactDiameter || 0.6) / 2);
-    addSphere(vertices, normals, sphericalContactCenter(top, support, radius), radius, 18, 9);
+    addSphere(vertices, normals, sphericalContactCenter(top, support, radius), radius, seg(18), rings(9));
   }
   if (type === "cylinder") {
-    addSegmentCylinder(vertices, normals, start, top, tipRadius, 30);
+    addSegmentCylinder(vertices, normals, start, top, tipRadius, seg(30));
     return;
   }
   if (type === "sphere") {
     const bulbRadius = Math.max(postRadius * 1.45, tipRadius * 2.2);
     const middle = pointBetween(start, top, 0.58);
-    addTaperedSegment(vertices, normals, start, middle, postRadius, bulbRadius, 36);
-    addSphere(vertices, normals, middle, bulbRadius, 36, 18);
-    addTaperedSegment(vertices, normals, middle, top, bulbRadius, tipRadius, 36);
+    addTaperedSegment(vertices, normals, start, middle, postRadius, bulbRadius, seg(36));
+    addSphere(vertices, normals, middle, bulbRadius, seg(36), rings(18));
+    addTaperedSegment(vertices, normals, middle, top, bulbRadius, tipRadius, seg(36));
     return;
   }
-  addTaperedSegment(vertices, normals, start, top, postRadius, tipRadius, 30);
+  addTaperedSegment(vertices, normals, start, top, postRadius, tipRadius, seg(30));
 }
 
 function sphericalContactCenter(contactPoint, support, radius) {

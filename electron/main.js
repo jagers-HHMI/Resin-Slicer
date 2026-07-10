@@ -29,7 +29,8 @@ function createWindow() {
   });
 
   win.once("ready-to-show", () => {
-    win.showInactive();
+    win.show();
+    win.focus();
   });
 
   if (isDev) {
@@ -111,6 +112,23 @@ ipcMain.handle("dialog:save-project", async (_event, defaultName, content) => {
   if (result.canceled || !result.filePath) return null;
   await fs.writeFile(result.filePath, String(content || ""), "utf8");
   return result.filePath;
+});
+
+ipcMain.handle("dialog:open-project", async () => {
+  const result = await dialog.showOpenDialog({
+    title: "Open project",
+    properties: ["openFile"],
+    filters: [
+      { name: "Resin Slicer Project", extensions: ["json"] },
+      { name: "All Files", extensions: ["*"] }
+    ]
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  const filePath = result.filePaths[0];
+  return {
+    path: filePath,
+    text: await fs.readFile(filePath, "utf8")
+  };
 });
 
 ipcMain.handle("dialog:open-profile", async (_event, kind) => {

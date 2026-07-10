@@ -5,7 +5,7 @@ from resin_slicer.electron_bridge import _support_from_request
 from resin_slicer.mesh import Mesh, cube_mesh
 from resin_slicer.raster import LayerRaster
 from resin_slicer.slicing import prepare_mesh, render_model_layer
-from resin_slicer.supports import _SurfaceNormalSampler, _support_angle_deg, _support_radius_at_layer, apply_supports, plan_supports
+from resin_slicer.supports import PaintZone, _SurfaceNormalSampler, _support_angle_deg, _support_radius_at_layer, apply_supports, attach_raft_masks, plan_supports
 
 
 class SliceSupportTests(unittest.TestCase):
@@ -15,6 +15,24 @@ class SliceSupportTests(unittest.TestCase):
         counts = [render_model_layer(prepared.mesh, config, i).count_on() for i in range(prepared.layer_count)]
         self.assertEqual(prepared.layer_count, 8)
         self.assertTrue(all(count > 0 for count in counts))
+
+    def test_overlapping_bodies_fill_their_union_not_even_odd(self) -> None:
+        # Two overlapping, non-boolean-unioned solids (e.g. a multi-body CAD
+        # export flattened to one STL) must fill the union of both bodies.
+        # An even-odd fill rule would cancel the overlap and leave it hollow.
+        config = profile("small-test").with_overrides(layer_height_mm=1.0)
+        cube_a = cube_mesh(10)
+        cube_b = cube_mesh(10).transformed((6, 0, 0))
+        combined = Mesh(cube_a.triangles + cube_b.triangles)
+        prepared = prepare_mesh(combined, config)
+        mid_layer = prepared.layer_count // 2
+        raster = render_model_layer(prepared.mesh, config, mid_layer)
+
+        y_mid = config.resolution_y // 2
+        row = raster.pixels[y_mid * raster.width : (y_mid + 1) * raster.width]
+        on_xs = [x for x, value in enumerate(row) if value]
+        gaps = [b - a for a, b in zip(on_xs, on_xs[1:]) if b - a > 1]
+        self.assertEqual(gaps, [], "overlap region between the two bodies must stay filled")
 
     def test_preserve_coordinates_keeps_plate_position(self) -> None:
         config = profile("small-test").with_overrides(layer_height_mm=1.0, center_model=False)
@@ -49,6 +67,18 @@ class SliceSupportTests(unittest.TestCase):
         plan = plan_supports(prepared, config, support, prepared.layer_count)
         self.assertGreater(len(plan.anchors), 0)
         self.assertGreater(prepared.layer_count, 8)
+
+    def test_attach_raft_masks_matches_full_plan(self) -> None:
+        config = profile("small-test").with_overrides(layer_height_mm=1.0)
+        support = SupportConfig(enabled=True, model_lift_mm=4.0, support_spacing_mm=4.0, bed_interface="raft")
+        prepared = prepare_mesh(cube_mesh(8), config, z_offset_mm=support.model_lift_mm)
+
+        full = plan_supports(prepared, config, support, prepared.layer_count)
+        bare = plan_supports(prepared, config, support, prepared.layer_count, include_raft_mask=False)
+        self.assertIsNone(bare.raft_mask)
+
+        attached = attach_raft_masks(bare, prepared, config, support)
+        self.assertEqual(attached, full)
 
     def test_manual_point_adds_routed_anchor(self) -> None:
         config = profile("small-test").with_overrides(layer_height_mm=1.0)
@@ -89,6 +119,177 @@ class SliceSupportTests(unittest.TestCase):
         self.assertTrue(all(anchor.role == "manual" for anchor in manual_only.anchors))
         self.assertEqual(len(manual_only.braces), 0)
         self.assertEqual(manual_only.anchors[0].base_layer, 0)
+
+    def test_manual_only_slice_plans_only_manual_supports(self) -> None:
+        import tempfile
+        from pathlib import Path
+
+        from resin_slicer.pipeline import SliceJob, slice_to_file
+
+        config = profile("small-test").with_overrides(layer_height_mm=1.0)
+        support = SupportConfig(enabled=True, support_spacing_mm=4.0, min_island_area_mm2=0.01)
+        mesh = cube_mesh(8).transformed((20, 10, 0))
+        click = (24.0, 14.0, support.model_lift_mm + 0.5)
+        with tempfile.TemporaryDirectory() as tmp:
+            manual_only = slice_to_file(
+                SliceJob(
+                    mesh=mesh,
+                    print_config=config,
+                    support_config=support,
+                    preserve_coordinates=True,
+                    manual_support_points=(click,),
+                    manual_support_only=True,
+                ),
+                Path(tmp) / "manual.goo",
+                "goo",
+            )
+            full = slice_to_file(
+                SliceJob(
+                    mesh=mesh,
+                    print_config=config,
+                    support_config=support,
+                    preserve_coordinates=True,
+                    manual_support_points=(click,),
+                ),
+                Path(tmp) / "full.goo",
+                "goo",
+            )
+        # Manual-only slicing must not invent automatic supports.
+        self.assertEqual(manual_only.support_count, 1)
+        self.assertGreater(full.support_count, 1)
+
+    def test_manual_only_braces_between_manual_points(self) -> None:
+        config = profile("small-test").with_overrides(layer_height_mm=1.0)
+        prepared = prepare_mesh(cube_mesh(8).transformed((20, 10, 6)), config, preserve_coordinates=True)
+        support = SupportConfig(
+            enabled=True,
+            support_spacing_mm=4.0,
+            min_island_area_mm2=0.01,
+            brace_enabled=True,
+            brace_max_distance_mm=8.0,
+        )
+        bounds = prepared.mesh.bounds()
+        z = bounds.min_z + 0.5
+        clicks = ((22.0, 14.0, z), (26.0, 14.0, z))
+        plan = plan_supports(
+            prepared, config, support, prepared.layer_count, manual_points=clicks, manual_only=True
+        )
+        self.assertEqual(len(plan.anchors), 2)
+        self.assertGreater(len(plan.braces), 0)
+
+    def test_paint_exclude_zone_blocks_auto_supports(self) -> None:
+        config = profile("small-test").with_overrides(layer_height_mm=1.0)
+        prepared = prepare_mesh(cube_mesh(8).transformed((20, 10, 6)), config, preserve_coordinates=True)
+        support = SupportConfig(enabled=True, support_spacing_mm=4.0, min_island_area_mm2=0.01)
+
+        base = plan_supports(prepared, config, support, prepared.layer_count)
+        self.assertGreater(len(base.anchors), 0)
+
+        # A brush sphere big enough to cover the whole part removes every
+        # automatic anchor.
+        everything = (PaintZone(24.0, 14.0, 6.0, 50.0, "exclude"),)
+        blocked = plan_supports(prepared, config, support, prepared.layer_count, paint_zones=everything)
+        self.assertEqual(len(blocked.anchors), 0)
+
+        # A zone far away from the model changes nothing.
+        far_away = (PaintZone(70.0, 40.0, 30.0, 3.0, "exclude"),)
+        unaffected = plan_supports(prepared, config, support, prepared.layer_count, paint_zones=far_away)
+        self.assertEqual(len(unaffected.anchors), len(base.anchors))
+
+    def test_paint_exclude_zone_does_not_block_manual_points(self) -> None:
+        config = profile("small-test").with_overrides(layer_height_mm=1.0)
+        prepared = prepare_mesh(cube_mesh(8).transformed((20, 10, 6)), config, preserve_coordinates=True)
+        support = SupportConfig(enabled=True, support_spacing_mm=4.0, min_island_area_mm2=0.01)
+        bounds = prepared.mesh.bounds()
+        click = ((bounds.min_x + bounds.max_x) / 2, (bounds.min_y + bounds.max_y) / 2, bounds.min_z + 0.5)
+        everything = (PaintZone(24.0, 14.0, 6.0, 50.0, "exclude"),)
+
+        plan = plan_supports(
+            prepared, config, support, prepared.layer_count, manual_points=(click,), paint_zones=everything
+        )
+        self.assertEqual(len(plan.anchors), 1)
+        self.assertEqual(plan.anchors[0].role, "manual")
+
+    def test_paint_require_zones_route_spaced_anchors(self) -> None:
+        config = profile("small-test").with_overrides(layer_height_mm=1.0)
+        prepared = prepare_mesh(cube_mesh(8).transformed((20, 10, 6)), config, preserve_coordinates=True)
+        support = SupportConfig(enabled=True, support_spacing_mm=4.0, min_island_area_mm2=0.01)
+        # A dense stroke of brush samples along the bottom face.
+        stroke = tuple(PaintZone(20.5 + i * 0.5, 14.0, 6.2, 2.0, "require") for i in range(16))
+
+        plan = plan_supports(
+            prepared, config, support, prepared.layer_count, manual_only=True, paint_zones=stroke
+        )
+        painted = [anchor for anchor in plan.anchors if anchor.role == "painted"]
+        self.assertGreater(len(painted), 0)
+        # The stroke is thinned to the configured support spacing, so far fewer
+        # anchors than brush samples are placed.
+        self.assertLess(len(painted), len(stroke))
+        for i, first in enumerate(painted):
+            for second in painted[i + 1 :]:
+                dx_mm = (first.x - second.x) * config.pixel_size_x_mm
+                dy_mm = (first.y - second.y) * config.pixel_size_y_mm
+                distance = (dx_mm * dx_mm + dy_mm * dy_mm) ** 0.5
+                self.assertGreaterEqual(distance, support.support_spacing_mm - config.pixel_size_x_mm)
+
+    def test_brace_interval_repeats_braces_up_tall_supports(self) -> None:
+        config = profile("small-test").with_overrides(layer_height_mm=1.0)
+        prepared = prepare_mesh(cube_mesh(8), config, z_offset_mm=20.0)
+        common = dict(
+            enabled=True,
+            model_lift_mm=20.0,
+            support_spacing_mm=2.0,
+            min_island_area_mm2=0.01,
+            overhang_angle_deg=70,
+            brace_enabled=True,
+            brace_max_distance_mm=12.0,
+        )
+        single = plan_supports(prepared, config, SupportConfig(**common), prepared.layer_count)
+        repeated = plan_supports(
+            prepared, config, SupportConfig(brace_interval_mm=4.0, **common), prepared.layer_count
+        )
+
+        self.assertGreater(len(single.braces), 0)
+        self.assertEqual(len({brace.start_layer for brace in single.braces}), 1)
+        levels = sorted({brace.start_layer for brace in repeated.braces})
+        self.assertGreater(len(levels), 1)
+        for earlier, later in zip(levels, levels[1:]):
+            self.assertEqual(later - earlier, 4)
+        self.assertGreater(len(repeated.braces), len(single.braces))
+        # Every rung still stays below the joint of the supports it ties into.
+        max_joint = max(
+            anchor.joint_layer if anchor.joint_layer is not None else anchor.top_layer - 1
+            for anchor in repeated.anchors
+        )
+        for brace in repeated.braces:
+            self.assertLessEqual(brace.end_layer, max_joint)
+
+    def test_braces_flatten_to_fit_short_supports(self) -> None:
+        # At fine layer heights a full 45-degree diagonal cannot fit below the
+        # joints of lift-height supports; the rung should slide down to the bed
+        # interface and flatten instead of disappearing.
+        config = profile("small-test").with_overrides(layer_height_mm=0.1)
+        prepared = prepare_mesh(cube_mesh(10), config, z_offset_mm=4.0)
+        support = SupportConfig(
+            enabled=True,
+            model_lift_mm=4.0,
+            support_spacing_mm=4.0,
+            min_island_area_mm2=0.01,
+            overhang_angle_deg=70,
+            brace_enabled=True,
+            brace_height_mm=3.0,
+            brace_max_distance_mm=8.0,
+        )
+        plan = plan_supports(prepared, config, support, prepared.layer_count)
+        self.assertGreater(len(plan.anchors), 1)
+        self.assertGreater(len(plan.braces), 0)
+        max_joint = max(
+            anchor.joint_layer if anchor.joint_layer is not None else anchor.top_layer - 1
+            for anchor in plan.anchors
+        )
+        for brace in plan.braces:
+            self.assertGreater(brace.end_layer, brace.start_layer)
+            self.assertLessEqual(brace.end_layer, max_joint)
 
     def test_higher_overhang_angle_generates_more_supports(self) -> None:
         config = profile("small-test").with_overrides(layer_height_mm=1.0)
@@ -192,7 +393,10 @@ class SliceSupportTests(unittest.TestCase):
             ) ** 0.5
             vertical_mm = (brace.end_layer - brace.start_layer) * config.layer_height_mm
             self.assertGreater(brace.end_layer, brace.start_layer)
-            self.assertAlmostEqual(vertical_mm, horizontal_mm, delta=config.layer_height_mm)
+            # Braces are 45-degree diagonals, flattened (down to a third of the
+            # rise) only when short supports cannot fit the full diagonal.
+            self.assertLessEqual(vertical_mm, horizontal_mm + config.layer_height_mm)
+            self.assertGreaterEqual(vertical_mm, horizontal_mm / 3 - config.layer_height_mm)
             for layer_index in range(brace.start_layer, brace.end_layer + 1):
                 layer = render_model_layer(prepared.mesh, config, layer_index)
                 x, y = _brace_center_for_test(brace, layer_index)

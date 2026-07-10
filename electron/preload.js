@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld("slicer", {
   openStl: () => ipcRenderer.invoke("dialog:open-stl"),
   saveOutput: (format) => ipcRenderer.invoke("dialog:save-output", format),
   saveProject: (defaultName, content) => ipcRenderer.invoke("dialog:save-project", defaultName, content),
+  openProject: () => ipcRenderer.invoke("dialog:open-project"),
   openProfile: (kind) => ipcRenderer.invoke("dialog:open-profile", kind),
   saveProfile: (kind, defaultName, content) => ipcRenderer.invoke("dialog:save-profile", kind, defaultName, content),
   pathForFile: (file) => webUtils.getPathForFile(file),

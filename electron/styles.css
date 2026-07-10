@@ -1182,7 +1182,7 @@ details.group > .preset-row {
 
 .part-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 30px;
+  grid-template-columns: minmax(0, 1fr) 30px 30px;
   gap: 6px;
   align-items: stretch;
 }
@@ -1225,6 +1225,17 @@ details.group > .preset-row {
 .part-delete:hover {
   background: #30191d;
   border-color: #a75c5c;
+}
+
+.part-duplicate {
+  border-color: #3d5a72;
+  background: #101820;
+  color: #9fd0f5;
+}
+
+.part-duplicate:hover {
+  background: #16242f;
+  border-color: #5d84a3;
 }
 
 .part-item small {

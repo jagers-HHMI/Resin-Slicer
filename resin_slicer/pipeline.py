@@ -13,7 +13,7 @@ from .formats.goo import write_goo
 from .mesh import Mesh
 from .raster import LayerRaster
 from .slicing import PreparedMesh, prepare_mesh, render_prepared_layer
-from .supports import SupportPlan, apply_supports, plan_supports
+from .supports import PaintZone, SupportPlan, apply_supports, attach_raft_masks, plan_supports
 from .transform import MeshTransform, apply_transform
 
 try:
@@ -37,6 +37,10 @@ class SliceJob:
     cad_models: tuple[CadSliceModel, ...] = ()
     cad_slice_mode: str = "tessellated"
     manual_support_points: tuple[tuple[float, float, float], ...] = ()
+    support_paint: tuple[PaintZone, ...] = ()
+    # Plan only the manual/painted supports (the user never ran the automatic
+    # generator, so slicing must not invent supports they did not ask for).
+    manual_support_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,7 @@ def slice_to_file(
     layer_workers: int | None = None,
     preview_dir: str | None = None,
     preview_scale: int = 1,
+    precomputed_support_plan: SupportPlan | None = None,
 ) -> SliceResult:
     config = job.print_config
     support_config = job.support_config
@@ -81,18 +86,27 @@ def slice_to_file(
     support_plan = SupportPlan((), 0, 0, 0, 0.0, 0)
     supports_enabled = support_config.enabled
     if support_config.enabled:
-        if progress:
-            progress("planning supports")
-        support_plan = plan_supports(
-            prepared,
-            config,
-            support_config,
-            prepared.layer_count,
-            progress=progress,
-            manual_points=job.manual_support_points,
-        )
-        if progress:
-            progress(f"planned {len(support_plan.anchors)} supports")
+        if precomputed_support_plan is not None:
+            # A plan from an earlier support-generation pass; only the raft masks
+            # (skipped during previews) still need to be computed.
+            support_plan = attach_raft_masks(precomputed_support_plan, prepared, config, support_config)
+            if progress:
+                progress(f"reusing {len(support_plan.anchors)} previously generated supports")
+        else:
+            if progress:
+                progress("planning supports")
+            support_plan = plan_supports(
+                prepared,
+                config,
+                support_config,
+                prepared.layer_count,
+                progress=progress,
+                manual_points=job.manual_support_points,
+                paint_zones=job.support_paint,
+                manual_only=job.manual_support_only,
+            )
+            if progress:
+                progress(f"planned {len(support_plan.anchors)} supports")
         supports_enabled = _support_plan_has_geometry(support_plan)
         if not supports_enabled and model_lift > 0:
             if progress:

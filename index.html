@@ -200,6 +200,7 @@
         </section>
 
         <section class="actions right-menu-section active-menu-section" data-right-menu-section="job">
+          <button id="openProjectButton" type="button">Open Project</button>
           <button id="saveProjectButton" type="button">Save Project</button>
           <button id="sliceButton" class="primary" type="button">Slice</button>
           <button id="sliceAllButton" type="button">Slice All</button>
@@ -256,6 +257,16 @@
               <button id="clearManualSupportButton" type="button">Clear Manual</button>
             </div>
             <small id="manualSupportHint" class="manual-support-hint" hidden>Click the model to add a support; click a marker to remove it. Use Generate Manual to route them onto the model.</small>
+            <div class="preset-row">
+              <button id="paintRequireButton" type="button" title="Drag on the model to paint areas that should grow supports">Paint Supports</button>
+              <button id="paintExcludeButton" type="button" title="Drag on the model to paint areas where automatic supports are blocked">Paint Blockers</button>
+            </div>
+            <div class="preset-row">
+              <button id="paintEraseButton" type="button" title="Drag over painted areas to remove them (Alt-drag also erases while painting)">Erase Paint</button>
+              <button id="clearPaintButton" type="button">Clear Paint</button>
+            </div>
+            <label>Paint brush diameter <input id="paintBrushDiameter" type="number" min="0.5" step="0.5" value="4"></label>
+            <small id="paintHint" class="manual-support-hint" hidden>Drag on the model to paint; the surface tints where the brush lands. The brush targets the down-facing surface under the cursor (where supports attach), so painting from above tints the underside — orbit below to see it. Green grows supports; red blocks automatic supports. Use Erase Paint (or Alt-drag) to remove paint.</small>
             <label class="check"><input id="supportsEnabled" type="checkbox" checked> Enable supports</label>
             <div class="preset-row">
               <button type="button" data-support-preset="light">Light</button>
@@ -349,6 +360,7 @@
               <label>Brace diameter <input id="braceDiameter" type="number" step="0.01" value="0.36"></label>
               <label>Brace start height <input id="braceHeight" type="number" step="0.1" value="3"></label>
               <label>Brace distance <input id="braceDistance" type="number" step="0.5" value="8"></label>
+              <label title="Repeat brace rungs every this many mm up tall supports; 0 keeps a single brace level">Brace interval <input id="braceInterval" type="number" min="0" step="0.5" value="10"></label>
             </div>
           </details>
         </div>

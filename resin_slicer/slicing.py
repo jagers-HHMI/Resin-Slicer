@@ -111,15 +111,30 @@ def _slice_segments(mesh: Mesh, z: float) -> list[Segment]:
 
 
 def _slice_segments_from_triangles(triangles: tuple[Triangle, ...], z: float) -> list[Segment]:
+    # Each segment is oriented consistently with the triangle's winding (outward
+    # normal), so that overlapping/unioned solids accumulate a nonzero winding
+    # number in _rasterize_segments instead of cancelling out under even-odd fill.
     segments: list[Segment] = []
     for tri in triangles:
-        points: list[tuple[float, float]] = []
-        for a, b in ((tri[0], tri[1]), (tri[1], tri[2]), (tri[2], tri[0])):
-            point = _edge_intersection(a, b, z)
-            if point is not None:
-                points.append(point)
-        if len(points) == 2 and _distance2(points[0], points[1]) > 1e-16:
-            segments.append((points[0], points[1]))
+        below = [tri[0][2] <= z, tri[1][2] <= z, tri[2][2] <= z]
+        below_count = sum(below)
+        if below_count == 0 or below_count == 3:
+            continue
+        if below_count == 1:
+            lone = below.index(True)
+            lone_is_below = True
+        else:
+            lone = below.index(False)
+            lone_is_below = False
+        pred = (lone - 1) % 3
+        succ = (lone + 1) % 3
+        point_pred = _edge_intersection(tri[lone], tri[pred], z)
+        point_succ = _edge_intersection(tri[lone], tri[succ], z)
+        if point_pred is None or point_succ is None:
+            continue
+        segment = (point_pred, point_succ) if lone_is_below else (point_succ, point_pred)
+        if _distance2(segment[0], segment[1]) > 1e-16:
+            segments.append(segment)
     return segments
 
 
@@ -161,7 +176,9 @@ def _rasterize_segments(segments: list[Segment], config: PrintConfig) -> LayerRa
         if not row_segments:
             continue
         y_mm = (y + 0.5) * pixel_y
-        xs: list[float] = []
+        # Crossings carry a winding sign so overlapping/unioned solids fill their
+        # union (nonzero winding number) rather than cancelling under even-odd pairing.
+        crossings: list[tuple[float, int]] = []
         for (x1, y1), (x2, y2) in row_segments:
             if y1 == y2:
                 continue
@@ -170,22 +187,27 @@ def _rasterize_segments(segments: list[Segment], config: PrintConfig) -> LayerRa
             if not (ymin <= y_mm < ymax):
                 continue
             t = (y_mm - y1) / (y2 - y1)
-            xs.append(x1 + t * (x2 - x1))
+            x = x1 + t * (x2 - x1)
+            crossings.append((x, 1 if y2 > y1 else -1))
 
-        xs.sort()
-        deduped: list[float] = []
-        for x in xs:
-            if not deduped or abs(x - deduped[-1]) > 1e-7:
-                deduped.append(x)
+        crossings.sort(key=lambda c: c[0])
 
-        for i in range(0, len(deduped) - 1, 2):
-            left = max(0.0, deduped[i])
-            right = min(config.size_x_mm, deduped[i + 1])
-            if right <= left:
-                continue
-            x0 = int(ceil(left / pixel_x - 0.5))
-            x1 = int(floor(right / pixel_x - 0.5))
-            raster.set_span(y, x0, x1, 255)
+        winding = 0
+        span_start: float | None = None
+        for x, sign in crossings:
+            was_outside = winding == 0
+            winding += sign
+            if was_outside and winding != 0:
+                span_start = x
+            elif not was_outside and winding == 0 and span_start is not None:
+                left = max(0.0, span_start)
+                right = min(config.size_x_mm, x)
+                span_start = None
+                if right <= left:
+                    continue
+                x0 = int(ceil(left / pixel_x - 0.5))
+                x1 = int(floor(right / pixel_x - 0.5))
+                raster.set_span(y, x0, x1, 255)
     return raster
 
 

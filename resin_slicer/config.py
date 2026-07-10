@@ -184,6 +184,9 @@ class SupportConfig:
     brace_radius_mm: float = 0.18
     brace_height_mm: float = 3.0
     brace_max_distance_mm: float = 8.0
+    # Vertical distance between repeated brace levels on tall supports.
+    # 0 keeps the single brace level at brace_height_mm.
+    brace_interval_mm: float = 0.0
     collision_clearance_mm: float = 0.08
     max_base_reach_mm: float = 45.0
     max_support_angle_deg: float = 35.0
@@ -233,6 +236,8 @@ class SupportConfig:
         ):
             if getattr(self, name) <= 0:
                 raise ConfigError(f"{name} must be positive")
+        if self.brace_interval_mm < 0:
+            raise ConfigError("brace_interval_mm cannot be negative")
         if self.raft_margin_mm < 0:
             raise ConfigError("raft_margin_mm cannot be negative")
         if self.raft_chamfer_width_mm < 0:

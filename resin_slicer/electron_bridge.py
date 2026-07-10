@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
+import pickle
 import sys
 import tempfile
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -13,8 +17,18 @@ from .config import PROFILES, PrintConfig, SupportConfig, profile
 from .errors import ConfigError, SlicerError
 from .mesh import Mesh, load_mesh
 from .pipeline import SliceJob, slice_to_file
+from .raster import LayerRaster, dilate_mask, mm_to_px
 from .slicing import prepare_mesh
-from .supports import SupportPlan, plan_supports
+from .supports import (
+    PaintZone,
+    SupportAnchor,
+    SupportBrace,
+    SupportPlan,
+    _add_projected_triangle,
+    _analysis_config,
+    build_support_plan,
+    plan_supports,
+)
 from .transform import MeshTransform, apply_transform
 
 
@@ -86,6 +100,7 @@ def _preview(request: dict[str, Any]) -> None:
             on_anchor=_emit_support,
             manual_points=_manual_points_from_request(request),
             manual_only=manual_only,
+            paint_zones=_paint_zones_from_request(request),
         )
         # In manual-only mode the model is already lifted (auto supports exist),
         # so never collapse the lift back to zero here.
@@ -99,6 +114,11 @@ def _preview(request: dict[str, Any]) -> None:
                 preserve_coordinates=has_model_entries,
             )
             plan = SupportPlan((), 0, 0, 0, 0.0, 0)
+        # Remember this plan so slicing the same setup does not have to re-run
+        # the support analysis in the slice process. Manual-only plans cache
+        # under a manual-only key, so a manual-only slice reuses exactly the
+        # routed manual/painted supports the user previewed.
+        _store_support_plan(_support_plan_cache_key(request), plan)
 
     bounds = prepared.mesh.bounds()
     _write_json(
@@ -116,7 +136,7 @@ def _preview(request: dict[str, Any]) -> None:
             "layers": prepared.layer_count,
             "supports": [_support_to_json(anchor, plan, config, support) for anchor in plan.anchors],
             "braces": [_brace_to_json(brace, config) for brace in plan.braces],
-            "raft": _raft_preview_to_json(prepared, support) if support.enabled else None,
+            "raft": _raft_preview_to_json(prepared, config, support) if support.enabled else None,
             "supportCount": len(plan.anchors),
             "materialLiftMm": model_lift,
         }
@@ -137,19 +157,26 @@ def _slice(request: dict[str, Any]) -> None:
             translate_z_mm=transform.translate_z_mm,
         )
     config = _config_from_request(request)
+    support_config = _support_from_request(request)
     preview_scale = 1
     preview_dir = tempfile.mkdtemp(prefix="rspreview_")
+    # A plan shipped from the viewport slices verbatim (what you see is what
+    # you print); without one, fall back to the cached previewed plan or a
+    # fresh analysis.
+    preview_plan = _plan_from_preview_request(request, config, support_config)
     result = slice_to_file(
         SliceJob(
             mesh=mesh,
             print_config=config,
-            support_config=_support_from_request(request),
+            support_config=support_config,
             transform=transform,
             preserve_coordinates=has_model_entries,
             raster_mesh=raster_mesh,
             cad_models=cad_models,
             cad_slice_mode=cad_slice_mode,
             manual_support_points=_manual_points_from_request(request),
+            support_paint=_paint_zones_from_request(request),
+            manual_support_only=bool(request.get("manualOnly")),
         ),
         request["outputPath"],
         request.get("format", "goo"),
@@ -157,6 +184,7 @@ def _slice(request: dict[str, Any]) -> None:
         layer_workers=_layer_workers_from_request(request),
         preview_dir=preview_dir,
         preview_scale=preview_scale,
+        precomputed_support_plan=preview_plan if preview_plan is not None else _load_support_plan(_support_plan_cache_key(request)),
     )
     _write_json(
         {
@@ -198,6 +226,94 @@ def _preview_support_has_geometry(plan: SupportPlan, support: SupportConfig) -> 
     return bool(plan.anchors or plan.braces or support.bed_interface in {"raft", "skate"})
 
 
+# Support-plan cache: the preview and slice commands run in separate Python
+# processes, so the plan generated for the viewport is written to a temp file,
+# keyed by everything that can change the plan. Slicing reuses it only on an
+# exact key match; any settings/model change falls back to a fresh analysis.
+_PLAN_CACHE_VERSION = 1
+_PLAN_CACHE_MAX_AGE_S = 24 * 60 * 60
+
+
+def _plan_cache_dir() -> Path:
+    return Path(tempfile.gettempdir()) / "resin-slicer-support-plans"
+
+
+def _model_fingerprint(path: str) -> list[Any]:
+    try:
+        stat = Path(path).stat()
+        return [str(path), stat.st_size, stat.st_mtime_ns]
+    except OSError:
+        return [str(path), None, None]
+
+
+def _support_plan_cache_key(request: dict[str, Any]) -> str | None:
+    try:
+        models = request.get("models") or []
+        material = {
+            "version": _PLAN_CACHE_VERSION,
+            "profile": request.get("profile"),
+            "printer": request.get("printer", {}),
+            "support": request.get("support", {}),
+            "transform": request.get("transform", {}),
+            "centerModel": bool(request.get("centerModel", False)),
+            "cadSlicingMode": _cad_slice_mode_from_request(request),
+            "manualOnly": bool(request.get("manualOnly")),
+            "manualPoints": list(_manual_points_from_request(request)),
+            "supportPaint": [asdict(zone) for zone in _paint_zones_from_request(request)],
+            "models": [
+                {
+                    "file": _model_fingerprint(model.get("inputPath") or model.get("path") or ""),
+                    "transform": model.get("transform", {}),
+                }
+                for model in models
+            ],
+            "inputPath": None if models else _model_fingerprint(request.get("inputPath", "")),
+        }
+        blob = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    except Exception:
+        return None
+
+
+def _store_support_plan(key: str | None, plan: SupportPlan) -> None:
+    if not key:
+        return
+    try:
+        cache_dir = _plan_cache_dir()
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache_dir / f"{key}.{os.getpid()}.tmp"
+        with open(tmp_path, "wb") as fh:
+            pickle.dump({"version": _PLAN_CACHE_VERSION, "plan": plan}, fh)
+        os.replace(tmp_path, cache_dir / f"{key}.pkl")
+        _prune_support_plans(cache_dir)
+    except Exception:
+        pass
+
+
+def _load_support_plan(key: str | None) -> SupportPlan | None:
+    if not key:
+        return None
+    try:
+        with open(_plan_cache_dir() / f"{key}.pkl", "rb") as fh:
+            payload = pickle.load(fh)
+        if payload.get("version") != _PLAN_CACHE_VERSION:
+            return None
+        plan = payload.get("plan")
+        return plan if isinstance(plan, SupportPlan) else None
+    except Exception:
+        return None
+
+
+def _prune_support_plans(cache_dir: Path) -> None:
+    cutoff = time.time() - _PLAN_CACHE_MAX_AGE_S
+    for entry in cache_dir.glob("*.pkl"):
+        try:
+            if entry.stat().st_mtime < cutoff:
+                entry.unlink()
+        except OSError:
+            continue
+
+
 def _cad_slice_mode_from_request(request: dict[str, Any]) -> str:
     mode = str(request.get("cadSlicingMode", request.get("cad_slice_mode", "tessellated"))).lower()
     return "brep" if mode in {"brep", "b-rep", "cad", "cad-brep"} else "tessellated"
@@ -232,6 +348,116 @@ def _manual_points_from_request(request: dict[str, Any]) -> tuple[tuple[float, f
             continue
         points.append(point)
     return tuple(points)
+
+
+def _plan_from_preview_request(request: dict[str, Any], config: PrintConfig, support: SupportConfig) -> SupportPlan | None:
+    """Rebuild the exact previewed support plan from the anchors/braces the
+    viewport displays (the inverse of _support_to_json/_brace_to_json), so
+    slicing produces precisely the supports the user saw."""
+    payload = request.get("previewPlan")
+    if not isinstance(payload, dict):
+        return None
+    supports_json = payload.get("supports") or []
+    braces_json = payload.get("braces") or []
+
+    def px_x(mm: float) -> int:
+        return min(max(0, int(round(mm / config.pixel_size_x_mm - 0.5))), config.resolution_x - 1)
+
+    def px_y(mm: float) -> int:
+        return min(max(0, int(round(mm / config.pixel_size_y_mm - 0.5))), config.resolution_y - 1)
+
+    anchors: list[SupportAnchor] = []
+    for entry in supports_json:
+        try:
+            x_mm = float(entry["x"])
+            y_mm = float(entry["y"])
+            top_layer = int(entry["topLayer"])
+            normal = entry.get("normal") or {}
+            anchors.append(
+                SupportAnchor(
+                    x=px_x(x_mm),
+                    y=px_y(y_mm),
+                    top_layer=top_layer,
+                    base_x=px_x(float(entry.get("baseX", x_mm))),
+                    base_y=px_y(float(entry.get("baseY", y_mm))),
+                    base_layer=int(entry.get("baseLayer", 0)),
+                    joint_x=px_x(float(entry.get("jointX", x_mm))),
+                    joint_y=px_y(float(entry.get("jointY", y_mm))),
+                    joint_layer=int(entry.get("jointLayer", max(0, top_layer - 1))),
+                    tip_type=str(entry.get("tipType", support.tip_type)),
+                    kind=str(entry.get("kind", "bed")),
+                    role=str(entry.get("role", "secondary")),
+                    normal_x=float(normal.get("x", 0.0)),
+                    normal_y=float(normal.get("y", 0.0)),
+                    normal_z=float(normal.get("z", -1.0)),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    output_pixel_mm = min(config.pixel_size_x_mm, config.pixel_size_y_mm)
+    braces: list[SupportBrace] = []
+    for entry in braces_json:
+        try:
+            braces.append(
+                SupportBrace(
+                    x0=px_x(float(entry["x0"])),
+                    y0=px_y(float(entry["y0"])),
+                    x1=px_x(float(entry["x1"])),
+                    y1=px_y(float(entry["y1"])),
+                    start_layer=int(entry["startLayer"]),
+                    end_layer=int(entry["endLayer"]),
+                    radius_px=mm_to_px(float(entry.get("radius", support.brace_radius_mm)), output_pixel_mm),
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    if not anchors and not braces and support.bed_interface not in {"raft", "skate"}:
+        return None
+
+    # Slice with the radii the anchors were generated with, in case the
+    # settings changed after generation (the preview still shows the old size).
+    first = supports_json[0] if supports_json else {}
+    return build_support_plan(
+        tuple(anchors),
+        tuple(braces),
+        config,
+        support,
+        post_radius_mm=_optional_float(first.get("postRadius")),
+        tip_radius_mm=_optional_float(first.get("tipRadius")),
+        foot_radius_mm=_optional_float(first.get("footRadius")),
+    )
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result
+
+
+def _paint_zones_from_request(request: dict[str, Any]) -> tuple[PaintZone, ...]:
+    raw = request.get("supportPaint") or ()
+    zones: list[PaintZone] = []
+    for entry in raw:
+        try:
+            mode = str(entry.get("mode", "exclude")).lower()
+            if mode not in {"exclude", "require"}:
+                continue
+            zones.append(
+                PaintZone(
+                    x=float(entry["x"]),
+                    y=float(entry["y"]),
+                    z=float(entry["z"]),
+                    radius=max(0.05, float(entry.get("radius", 2.0))),
+                    mode=mode,
+                )
+            )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            continue
+    return tuple(zones)
 
 
 def _layer_workers_from_request(request: dict[str, Any]) -> int | None:
@@ -329,6 +555,7 @@ def _support_from_request(request: dict[str, Any]) -> SupportConfig:
         brace_radius_mm=_support_radius(support, "braceDiameter", "braceRadius", 0.18),
         brace_height_mm=float(support.get("braceHeight", 3.0)),
         brace_max_distance_mm=float(support.get("braceDistance", 8.0)),
+        brace_interval_mm=float(support.get("braceInterval", 0.0)),
         collision_clearance_mm=float(support.get("collisionClearance", 0.08)),
         max_base_reach_mm=float(support.get("maxBaseReach", 45.0)),
         max_support_angle_deg=float(support.get("maxSupportAngle", 35.0)),
@@ -425,12 +652,12 @@ def _brace_to_json(brace: Any, config: PrintConfig) -> dict[str, float | int]:
     }
 
 
-def _raft_preview_to_json(prepared: Any, support: SupportConfig) -> dict[str, float | str] | None:
+def _raft_preview_to_json(prepared: Any, config: PrintConfig, support: SupportConfig) -> dict[str, Any] | None:
     if support.bed_interface not in {"raft", "skate"}:
         return None
     bounds = prepared.mesh.bounds()
     margin = max(0.0, support.raft_margin_mm)
-    return {
+    payload: dict[str, Any] = {
         "type": support.bed_interface,
         "x0": bounds.min_x - margin,
         "y0": bounds.min_y - margin,
@@ -439,6 +666,52 @@ def _raft_preview_to_json(prepared: Any, support: SupportConfig) -> dict[str, fl
         "offset": margin,
         "thickness": support.bed_interface_thickness_mm,
     }
+    rects = _raft_preview_rects(prepared, config, support)
+    if rects:
+        payload["rects"] = rects
+    return payload
+
+
+def _raft_preview_rects(prepared: Any, config: PrintConfig, support: SupportConfig) -> list[list[float]] | None:
+    """The actual raft footprint (the model's projected shadow dilated by the
+    raft margin, exactly like slicing computes it) as row-span rectangles in mm,
+    rasterised at the coarse analysis resolution to keep the preview cheap."""
+    try:
+        analysis = _analysis_config(config, support)
+        shadow = LayerRaster(analysis.resolution_x, analysis.resolution_y)
+        for triangle in prepared.mesh.triangles:
+            _add_projected_triangle(shadow, triangle, analysis)
+        if shadow.count_on() == 0:
+            return None
+        offset_px = 0
+        if support.raft_margin_mm > 0:
+            offset_px = mm_to_px(support.raft_margin_mm, min(analysis.pixel_size_x_mm, analysis.pixel_size_y_mm))
+        # dilate_mask returns 0/1 bytes; expand to the 0/255 convention that
+        # nonzero_spans scans for.
+        binary_to_raster = bytes(255 if value else 0 for value in range(256))
+        mask = LayerRaster(
+            analysis.resolution_x,
+            analysis.resolution_y,
+            bytearray(dilate_mask(shadow, offset_px).translate(binary_to_raster)),
+        )
+        pixel_x = analysis.pixel_size_x_mm
+        pixel_y = analysis.pixel_size_y_mm
+        rects: list[list[float]] = []
+        for start, end in mask.nonzero_spans():
+            y = start // mask.width
+            x0 = start % mask.width
+            x1 = x0 + (end - start)
+            rects.append(
+                [
+                    round(x0 * pixel_x, 3),
+                    round(y * pixel_y, 3),
+                    round(x1 * pixel_x, 3),
+                    round((y + 1) * pixel_y, 3),
+                ]
+            )
+        return rects
+    except Exception:
+        return None
 
 
 if __name__ == "__main__":

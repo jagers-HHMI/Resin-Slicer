@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from math import atan, ceil, cos, floor, pi, radians, sin, sqrt, tan
 from typing import Callable
 
@@ -42,6 +42,20 @@ class SupportAnchor:
     normal_x: float = 0.0
     normal_y: float = 0.0
     normal_z: float = -1.0
+
+
+@dataclass(frozen=True)
+class PaintZone:
+    """A painted brush sample on the model surface, in the same mm space as
+    manual support points. ``exclude`` zones block automatic anchors whose
+    contact point falls inside the brush sphere; ``require`` zones ask the
+    planner to grow supports on the painted surface."""
+
+    x: float
+    y: float
+    z: float
+    radius: float
+    mode: str = "exclude"  # "exclude" or "require"
 
 
 @dataclass(frozen=True)
@@ -110,17 +124,13 @@ def plan_supports(
     on_anchor: Callable[[SupportAnchor], None] | None = None,
     manual_points: tuple[tuple[float, float, float], ...] = (),
     manual_only: bool = False,
+    paint_zones: tuple[PaintZone, ...] = (),
 ) -> SupportPlan:
     support.validate()
+    exclude_zones = tuple(zone for zone in paint_zones if zone.mode == "exclude")
+    require_zones = tuple(zone for zone in paint_zones if zone.mode == "require")
     output_pixel_mm = min(config.pixel_size_x_mm, config.pixel_size_y_mm)
-    post_radius = mm_to_px(support.post_radius_mm, output_pixel_mm)
-    tip_radius = mm_to_px(support.tip_radius_mm, output_pixel_mm)
-    foot_radius = mm_to_px(support.foot_radius_mm, output_pixel_mm)
-    raft_radius = mm_to_px(support.foot_radius_mm + support.raft_margin_mm, output_pixel_mm)
     brace_radius = mm_to_px(support.brace_radius_mm, output_pixel_mm)
-    brace_layer_radius = max(0, int(ceil(support.brace_radius_mm / config.layer_height_mm)))
-    joint_sphere_radius_mm = max(support.post_radius_mm, support.tip_radius_mm)
-    contact_sphere_radius_mm = max(0.0, support.spherical_contact_diameter_mm * 0.5)
     bed_interface_layers = 0 if support.bed_interface == "none" else max(
         1,
         int(ceil(support.bed_interface_thickness_mm / config.layer_height_mm)),
@@ -183,12 +193,14 @@ def plan_supports(
                 out_x, out_y = _scale_point_to_output(x, y, analysis_config, config)
                 if placed_points.too_close(out_x, out_y, candidate.spacing_mm):
                     continue
-                fallback_normal = _estimate_surface_normal(current, base_layer, analysis_config, x, y)
                 contact_point = (
                     (x + 0.5) * analysis_config.pixel_size_x_mm,
                     (y + 0.5) * analysis_config.pixel_size_y_mm,
                     (layer_index + 0.5) * analysis_config.layer_height_mm,
                 )
+                if exclude_zones and _in_paint_zones(contact_point, exclude_zones):
+                    continue
+                fallback_normal = _estimate_surface_normal(current, base_layer, analysis_config, x, y)
                 normal = surface_normals.normal_at_contact(contact_point, fallback_normal)
 
                 route = _find_support_route(
@@ -216,8 +228,10 @@ def plan_supports(
         occupied_layers.append(occupied)
 
     if manual_points:
-        _append_manual_anchors(
+        _append_point_anchors(
             manual_points,
+            "manual",
+            None,
             prepared,
             anchors,
             occupied_layers,
@@ -232,20 +246,81 @@ def plan_supports(
             layer_count,
         )
 
-    braces = () if manual_only else _plan_braces(anchors, prepared, config, support, layer_count, brace_radius, bed_interface_layers)
-    return SupportPlan(
+    if require_zones:
+        # Painted "grow supports here" areas: each brush sample becomes a
+        # candidate contact, thinned to the normal support spacing so a dense
+        # stroke produces a sanely spaced cluster of supports.
+        _append_point_anchors(
+            tuple((zone.x, zone.y, zone.z) for zone in require_zones),
+            "painted",
+            support.support_spacing_mm,
+            prepared,
+            anchors,
+            occupied_layers,
+            analysis_config,
+            config,
+            support,
+            surface_normals,
+            body_collision_radius,
+            collision_radius,
+            placed_points,
+            on_anchor,
+            layer_count,
+        )
+
+    # Manual-only passes brace among the freshly routed manual/painted anchors
+    # (the existing auto supports are not visible to this pass; slicing replans
+    # everything together, so cross braces to them still appear in the print).
+    braces = _plan_braces(
+        anchors, occupied_layers, analysis_config, config, support, layer_count, brace_radius, bed_interface_layers
+    )
+    return build_support_plan(
         tuple(anchors),
-        post_radius,
-        tip_radius,
-        foot_radius,
-        joint_sphere_radius_mm,
+        braces,
+        config,
+        support,
+        raft_mask=raft_mask,
+        raft_shadow_mask=raft_shadow_mask,
+        raft_offset_px=raft_offset_px,
+    )
+
+
+def build_support_plan(
+    anchors: tuple[SupportAnchor, ...],
+    braces: tuple[SupportBrace, ...],
+    config: PrintConfig,
+    support: SupportConfig,
+    raft_mask: bytes | None = None,
+    raft_shadow_mask: bytes | None = None,
+    raft_offset_px: int = 0,
+    post_radius_mm: float | None = None,
+    tip_radius_mm: float | None = None,
+    foot_radius_mm: float | None = None,
+) -> SupportPlan:
+    """Assemble a SupportPlan around externally supplied anchors/braces using
+    the same derived scalars plan_supports computes. Used both as plan_supports'
+    final step and to rebuild a previously previewed plan for verbatim slicing."""
+    output_pixel_mm = min(config.pixel_size_x_mm, config.pixel_size_y_mm)
+    post_mm = support.post_radius_mm if post_radius_mm is None else max(0.01, post_radius_mm)
+    tip_mm = support.tip_radius_mm if tip_radius_mm is None else max(0.01, tip_radius_mm)
+    foot_mm = support.foot_radius_mm if foot_radius_mm is None else max(0.01, foot_radius_mm)
+    bed_interface_layers = 0 if support.bed_interface == "none" else max(
+        1,
+        int(ceil(support.bed_interface_thickness_mm / config.layer_height_mm)),
+    )
+    return SupportPlan(
+        anchors,
+        mm_to_px(post_mm, output_pixel_mm),
+        mm_to_px(tip_mm, output_pixel_mm),
+        mm_to_px(foot_mm, output_pixel_mm),
+        max(post_mm, tip_mm),
         bed_interface_layers,
         braces=braces,
         bed_interface=support.bed_interface,
-        raft_radius_px=raft_radius,
-        brace_layer_radius=brace_layer_radius,
+        raft_radius_px=mm_to_px(foot_mm + support.raft_margin_mm, output_pixel_mm),
+        brace_layer_radius=max(0, int(ceil(support.brace_radius_mm / config.layer_height_mm))),
         spherical_contact_enabled=support.spherical_contact_enabled,
-        contact_sphere_radius_mm=contact_sphere_radius_mm,
+        contact_sphere_radius_mm=max(0.0, support.spherical_contact_diameter_mm * 0.5),
         contact_sphere_inset_mm=support.spherical_contact_inset_mm,
         pixel_size_x_mm=config.pixel_size_x_mm,
         pixel_size_y_mm=config.pixel_size_y_mm,
@@ -258,8 +333,10 @@ def plan_supports(
     )
 
 
-def _append_manual_anchors(
-    manual_points: tuple[tuple[float, float, float], ...],
+def _append_point_anchors(
+    points: tuple[tuple[float, float, float], ...],
+    role: str,
+    spacing_mm: float | None,
     prepared: PreparedMesh,
     anchors: list[SupportAnchor],
     occupied_layers: list[_OccupiedLayer],
@@ -273,28 +350,40 @@ def _append_manual_anchors(
     on_anchor: Callable[[SupportAnchor], None] | None,
     layer_count: int,
 ) -> None:
-    """Route user-placed support points using the same machinery as the auto
-    planner, so a manual support behaves exactly as an automatic one would if it
-    had chosen to anchor at that spot.
+    """Route user-supplied contact points using the same machinery as the auto
+    planner, so a manual or painted support behaves exactly as an automatic one
+    would if it had chosen to anchor at that spot.
 
     Each point is the (x, y, z) contact location in millimetres (the same world
-    coordinates the renderer draws supports in)."""
+    coordinates the renderer draws supports in). When spacing_mm is given,
+    points that land too close to an already placed support are skipped (used
+    to thin dense painted strokes); manual clicks pass None and always route."""
     pixel_x = analysis_config.pixel_size_x_mm
     pixel_y = analysis_config.pixel_size_y_mm
     layer_height = analysis_config.layer_height_mm
-    for point in manual_points:
+    layer_cache: dict[int, LayerRaster] = {}
+
+    def _layer(layer_index: int) -> LayerRaster:
+        if layer_index < 0:
+            return LayerRaster(analysis_config.resolution_x, analysis_config.resolution_y)
+        cached = layer_cache.get(layer_index)
+        if cached is None:
+            cached = render_prepared_layer(prepared, analysis_config, layer_index)
+            layer_cache[layer_index] = cached
+        return cached
+
+    for point in points:
         x_mm, y_mm, z_mm = float(point[0]), float(point[1]), float(point[2])
         x = min(max(0, int(round(x_mm / pixel_x - 0.5))), analysis_config.resolution_x - 1)
         y = min(max(0, int(round(y_mm / pixel_y - 0.5))), analysis_config.resolution_y - 1)
         layer_index = min(max(0, int(round(z_mm / layer_height - 0.5))), max(0, layer_count - 1))
 
-        current = render_prepared_layer(prepared, analysis_config, layer_index)
-        below = (
-            render_prepared_layer(prepared, analysis_config, layer_index - 1)
-            if layer_index > 0
-            else LayerRaster(analysis_config.resolution_x, analysis_config.resolution_y)
-        )
-        fallback_normal = _estimate_surface_normal(current, below, analysis_config, x, y)
+        if spacing_mm is not None:
+            out_x, out_y = _scale_point_to_output(x, y, analysis_config, config)
+            if placed_points.too_close(out_x, out_y, spacing_mm):
+                continue
+
+        fallback_normal = _estimate_surface_normal(_layer(layer_index), _layer(layer_index - 1), analysis_config, x, y)
         contact_point = (x_mm, y_mm, z_mm)
         normal = surface_normals.normal_at_contact(contact_point, fallback_normal)
 
@@ -308,7 +397,7 @@ def _append_manual_anchors(
             normal,
             body_collision_radius,
             collision_radius,
-            "manual",
+            role,
         )
         if route is None:
             continue
@@ -318,6 +407,16 @@ def _append_manual_anchors(
         anchors.append(out_anchor)
         if on_anchor is not None:
             on_anchor(out_anchor)
+
+
+def _in_paint_zones(point: Point3, zones: tuple[PaintZone, ...]) -> bool:
+    for zone in zones:
+        dx = point[0] - zone.x
+        dy = point[1] - zone.y
+        dz = point[2] - zone.z
+        if dx * dx + dy * dy + dz * dz <= zone.radius * zone.radius:
+            return True
+    return False
 
 
 def apply_supports(layer: LayerRaster, layer_index: int, plan: SupportPlan) -> None:
@@ -343,6 +442,25 @@ def apply_supports(layer: LayerRaster, layer_index: int, plan: SupportPlan) -> N
         _add_joint_sphere(layer, layer_index, anchor, plan)
         if plan.spherical_contact_enabled:
             _add_spherical_contact(layer, layer_index, anchor, plan)
+
+
+def attach_raft_masks(
+    plan: SupportPlan,
+    prepared: PreparedMesh,
+    config: PrintConfig,
+    support: SupportConfig,
+) -> SupportPlan:
+    """Fill in the projected raft masks on a plan that was built without them
+    (support previews skip the masks because the viewport draws its own raft)."""
+    if plan.raft_mask is not None:
+        return plan
+    raft_mask, raft_shadow_mask, raft_offset_px = _projected_raft_masks(prepared, config, support)
+    return replace(
+        plan,
+        raft_mask=raft_mask,
+        raft_shadow_mask=raft_shadow_mask,
+        raft_offset_px=raft_offset_px,
+    )
 
 
 def _projected_raft_masks(prepared: PreparedMesh, config: PrintConfig, support: SupportConfig) -> tuple[bytes | None, bytes | None, int]:
@@ -901,7 +1019,8 @@ def _support_angle_deg(anchor: SupportAnchor, config: PrintConfig) -> float:
 
 def _plan_braces(
     anchors: list[SupportAnchor],
-    prepared: PreparedMesh,
+    occupied_layers: list[_OccupiedLayer],
+    analysis_config: PrintConfig,
     config: PrintConfig,
     support: SupportConfig,
     layer_count: int,
@@ -917,15 +1036,24 @@ def _plan_braces(
     start_layer = max(bed_interface_layers, int(round(support.brace_height_mm / config.layer_height_mm)))
     if start_layer >= layer_count:
         return ()
+    interval_layers = (
+        max(1, int(round(support.brace_interval_mm / config.layer_height_mm)))
+        if support.brace_interval_mm > 0
+        else 0
+    )
     max_distance_px = max(
         1,
         int(round(support.brace_max_distance_mm / min(config.pixel_size_x_mm, config.pixel_size_y_mm))),
     )
     min_distance_px = max(1, radius_px * 4)
-    collision_radius_px = radius_px + _clearance_px(support.collision_clearance_mm, config)
+    # Collision checks run against the analysis-resolution layers that were
+    # already rendered for anchor planning; rendering (and caching) layers at
+    # the full printer resolution here can eat gigabytes on large machines.
+    analysis_pixel_mm = min(analysis_config.pixel_size_x_mm, analysis_config.pixel_size_y_mm)
+    collision_radius_px = mm_to_px(support.brace_radius_mm + support.collision_clearance_mm, analysis_pixel_mm)
+    occupied_by_index = {occupied.layer_index: occupied for occupied in occupied_layers}
 
     centers = [_support_center(anchor, min(start_layer, anchor.top_layer)) for anchor in brace_anchors]
-    model_layers: dict[int, LayerRaster] = {}
     braces: list[SupportBrace] = []
     seen: set[tuple[int, int]] = set()
     for i, (x0, y0) in enumerate(centers):
@@ -943,19 +1071,36 @@ def _plan_braces(
             if pair in seen:
                 continue
             seen.add(pair)
-            brace = _diagonal_brace_between(
-                brace_anchors[i],
-                brace_anchors[j],
-                start_layer,
-                layer_count,
-                radius_px,
-                collision_radius_px,
-                prepared,
-                config,
-                model_layers,
-            )
-            if brace is not None:
-                braces.append(brace)
+            # Tall supports get a brace rung at every interval level, not just
+            # the first one; alternating the diagonal direction per level makes
+            # the repeated rungs zig-zag for a stiffer truss.
+            pair_top = min(_joint_layer(brace_anchors[i]), _joint_layer(brace_anchors[j]))
+            level = 0
+            level_start = start_layer
+            while level_start <= pair_top:
+                brace = _diagonal_brace_between(
+                    brace_anchors[i],
+                    brace_anchors[j],
+                    level_start,
+                    layer_count,
+                    radius_px,
+                    collision_radius_px,
+                    occupied_by_index,
+                    analysis_config,
+                    config,
+                    reverse=level % 2 == 1,
+                    # Short supports cannot fit the 45-degree diagonal above the
+                    # configured start height (it would overshoot their joints),
+                    # so let the first rung slide down towards the bed instead
+                    # of dropping the brace entirely.
+                    min_start_layer=bed_interface_layers if level == 0 else None,
+                )
+                if brace is not None:
+                    braces.append(brace)
+                if interval_layers <= 0:
+                    break
+                level += 1
+                level_start = start_layer + level * interval_layers
     return tuple(braces)
 
 
@@ -966,13 +1111,18 @@ def _diagonal_brace_between(
     layer_count: int,
     radius_px: int,
     collision_radius_px: int,
-    prepared: PreparedMesh,
+    occupied_by_index: dict[int, _OccupiedLayer],
+    analysis_config: PrintConfig,
     config: PrintConfig,
-    model_layers: dict[int, LayerRaster],
+    reverse: bool = False,
+    min_start_layer: int | None = None,
 ) -> SupportBrace | None:
-    for source, target in ((first, second), (second, first)):
-        brace = _make_diagonal_brace(source, target, start_layer, layer_count, radius_px, config)
-        if brace is not None and not _brace_collides_with_model(brace, collision_radius_px, prepared, config, model_layers):
+    ordered = ((second, first), (first, second)) if reverse else ((first, second), (second, first))
+    for source, target in ordered:
+        brace = _make_diagonal_brace(source, target, start_layer, layer_count, radius_px, config, min_start_layer)
+        if brace is not None and not _brace_collides_with_model(
+            brace, collision_radius_px, occupied_by_index, analysis_config, config
+        ):
             return brace
     return None
 
@@ -984,20 +1134,39 @@ def _make_diagonal_brace(
     layer_count: int,
     radius_px: int,
     config: PrintConfig,
+    min_start_layer: int | None = None,
 ) -> SupportBrace | None:
     source_joint_layer = _joint_layer(source)
     target_joint_layer = _joint_layer(target)
-    if start_layer > source_joint_layer:
-        return None
 
-    x0, y0 = _support_center(source, start_layer)
+    x0, y0 = _support_center(source, min(start_layer, source_joint_layer))
     x1, y1 = _support_center(target, min(start_layer, target_joint_layer))
     dx_mm = (x1 - x0) * config.pixel_size_x_mm
     dy_mm = (y1 - y0) * config.pixel_size_y_mm
     horizontal_mm = sqrt(dx_mm * dx_mm + dy_mm * dy_mm)
     if horizontal_mm <= 0:
         return None
-    end_layer = start_layer + max(1, int(round(horizontal_mm / config.layer_height_mm)))
+    span_layers = max(1, int(round(horizontal_mm / config.layer_height_mm)))
+    end_layer = start_layer + span_layers
+    limit = min(layer_count - 1, target_joint_layer)
+    if end_layer > limit and min_start_layer is not None:
+        # The 45-degree diagonal overshoots the pair's joints (typical for
+        # lift-height supports on fine layer heights). Slide the rung down as
+        # far as the bed interface allows, then flatten its angle to the
+        # remaining height — but no shallower than a third of the 45-degree
+        # rise (~18 degrees), so the printed stack of disks stays connected.
+        start_layer = max(min_start_layer, limit - span_layers)
+        available_layers = limit - start_layer
+        min_span_layers = max(1, int(ceil(span_layers / 3)))
+        if available_layers < min_span_layers:
+            return None
+        span_layers = min(span_layers, available_layers)
+        end_layer = start_layer + span_layers
+        # Re-anchor the ends on the (possibly slanted) posts at the new layers.
+        x0, y0 = _support_center(source, min(start_layer, source_joint_layer))
+        x1, y1 = _support_center(target, min(end_layer, target_joint_layer))
+    if start_layer > source_joint_layer:
+        return None
     if end_layer >= layer_count or end_layer > target_joint_layer:
         return None
     return SupportBrace(x0, y0, x1, y1, start_layer, end_layer, radius_px)
@@ -1006,17 +1175,32 @@ def _make_diagonal_brace(
 def _brace_collides_with_model(
     brace: SupportBrace,
     radius_px: int,
-    prepared: PreparedMesh,
+    occupied_by_index: dict[int, _OccupiedLayer],
+    analysis_config: PrintConfig,
     config: PrintConfig,
-    model_layers: dict[int, LayerRaster],
 ) -> bool:
-    for layer_index in range(max(0, brace.start_layer), min(brace.end_layer, prepared.layer_count - 1) + 1):
-        layer = model_layers.get(layer_index)
-        if layer is None:
-            layer = render_prepared_layer(prepared, config, layer_index)
-            model_layers[layer_index] = layer
+    """Check the brace path against the analysis-resolution model layers.
+
+    Brace coordinates are in output pixels; the occupied layers were rendered
+    at the (possibly downscaled) analysis resolution, so scale the centre into
+    that space before testing. radius_px is already in analysis pixels."""
+    scale_x = analysis_config.resolution_x / config.resolution_x
+    scale_y = analysis_config.resolution_y / config.resolution_y
+    for layer_index in range(max(0, brace.start_layer), brace.end_layer + 1):
+        occupied = occupied_by_index.get(layer_index)
+        if occupied is None:
+            continue
         x, y = _brace_center(brace, layer_index)
-        if _disk_collides(layer.pixels, layer.width, layer.height, x, y, radius_px):
+        ax = min(max(0, int(round((x + 0.5) * scale_x - 0.5))), analysis_config.resolution_x - 1)
+        ay = min(max(0, int(round((y + 0.5) * scale_y - 0.5))), analysis_config.resolution_y - 1)
+        if (
+            ax + radius_px < occupied.min_x
+            or ax - radius_px > occupied.max_x
+            or ay + radius_px < occupied.min_y
+            or ay - radius_px > occupied.max_y
+        ):
+            continue
+        if _disk_collides(occupied.raster.pixels, analysis_config.resolution_x, analysis_config.resolution_y, ax, ay, radius_px):
             return True
     return False
 
