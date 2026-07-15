@@ -19,8 +19,14 @@ def main(argv: list[str] | None = None) -> int:
         supports = SupportConfig(
             enabled=not args.no_supports,
             model_lift_mm=args.model_lift,
+            mesh_minima_enabled=not args.no_mesh_minima,
             overhang_angle_deg=args.overhang_angle,
             support_spacing_mm=args.support_spacing,
+            peel_density_enabled=not args.no_peel_density,
+            peel_area_ref_mm2=args.peel_area_ref,
+            peel_max_boost=args.peel_max_boost,
+            cup_detection_enabled=not args.no_cup_detection,
+            cup_min_area_mm2=args.cup_min_area,
             primary_supports_enabled=args.primary_supports,
             primary_density_multiplier=args.primary_density_multiplier,
             primary_area_radius_mm=args.primary_area_radius,
@@ -40,9 +46,11 @@ def main(argv: list[str] | None = None) -> int:
             brace_height_mm=args.brace_height,
             brace_max_distance_mm=args.brace_distance,
             collision_clearance_mm=args.collision_clearance,
-            max_base_reach_mm=args.max_base_reach,
+            tree_supports_enabled=not args.no_tree_supports,
             max_support_angle_deg=args.max_support_angle,
-            enforcers_enabled=args.enforcers,
+            max_base_reach_mm=args.max_base_reach,
+            tree_stress_factor=args.tree_stress_factor,
+            enforcers_enabled=not args.no_enforcers,
             enforcer_reach_mm=args.enforcer_reach,
             enforcer_min_drop_mm=args.enforcer_min_drop,
             min_island_area_mm2=args.min_island_area,
@@ -74,6 +82,23 @@ def main(argv: list[str] | None = None) -> int:
         f"wrote {result.output_path} ({result.layer_count} layers, "
         f"{result.support_count} supports, {result.material_ml:.2f} ml estimated resin)"
     )
+    report = result.support_report
+    if report is not None:
+        if report.failed_routes and (report.residual_islands or not report.verified):
+            print(f"warning: {report.failed_routes} support points could not be routed", file=sys.stderr)
+        if report.residual_islands:
+            print(
+                f"warning: {len(report.residual_islands)} unsupported island(s) remain; "
+                "the print may fail in those regions",
+                file=sys.stderr,
+            )
+        for cup in report.suction_cups:
+            print(
+                f"warning: suction cup at ({cup.x_mm:.1f}, {cup.y_mm:.1f}, {cup.z_mm:.1f})mm — "
+                f"{cup.mouth_area_mm2:.0f}mm² mouth, {cup.volume_mm3 / 1000.0:.2f}ml cavity; "
+                "consider a drain hole or tilting the part",
+                file=sys.stderr,
+            )
     return 0
 
 
@@ -118,6 +143,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="worker threads for layer rendering; defaults to RESIN_SLICER_LAYER_WORKERS or up to 4",
     )
     parser.add_argument("--no-supports", action="store_true", help="disable automatic support generation")
+    parser.add_argument(
+        "--no-mesh-minima",
+        action="store_true",
+        help="disable mesh-based local-minima support tips (enabled by default)",
+    )
     parser.add_argument("--model-lift", type=float, default=5.0, help="raise supported models this many millimeters above the plate")
     parser.add_argument(
         "--overhang-angle",
@@ -126,6 +156,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help="minimum self-supporting angle from the build plate in degrees; higher values create more supports",
     )
     parser.add_argument("--support-spacing", type=float, default=3.0, help="target support spacing in millimeters")
+    parser.add_argument(
+        "--no-peel-density",
+        action="store_true",
+        help="disable peel-force-aware density (uniform spacing regardless of region area)",
+    )
+    parser.add_argument("--peel-area-ref", type=float, default=50.0, help="region area in mm^2 at which peel-aware tip count doubles")
+    parser.add_argument("--peel-max-boost", type=float, default=2.0, help="maximum peel-aware spacing divisor")
+    parser.add_argument("--no-cup-detection", action="store_true", help="disable suction-cup detection warnings")
+    parser.add_argument("--cup-min-area", type=float, default=5.0, help="minimum suction-cup mouth area in mm^2 worth warning about")
     parser.add_argument("--primary-supports", action="store_true", help="add denser primary supports around each detected island")
     parser.add_argument("--primary-density-multiplier", type=float, default=2.0, help="density multiplier for primary island attachment regions")
     parser.add_argument("--primary-area-radius", type=float, default=4.0, help="primary attachment region radius around each island centroid in millimeters")
@@ -157,9 +196,24 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--brace-height", type=float, default=3.0, help="starting height for diagonal braces above the bed in millimeters")
     parser.add_argument("--brace-distance", type=float, default=8.0, help="maximum distance between braced supports in millimeters")
     parser.add_argument("--collision-clearance", type=float, default=0.08, help="clearance around routed supports during collision checks")
-    parser.add_argument("--max-base-reach", type=float, default=45.0, help="maximum horizontal search distance for support bases")
-    parser.add_argument("--max-support-angle", type=float, default=35.0, help="maximum shaft angle from vertical for generated supports")
-    parser.add_argument("--enforcers", action="store_true", help="allow part-to-part enforcer supports for bed-inaccessible regions")
+    parser.add_argument(
+        "--no-tree-supports",
+        action="store_true",
+        help="keep every support as its own pillar instead of merging nearby shafts into shared trunks",
+    )
+    parser.add_argument("--max-support-angle", type=float, default=35.0, help="maximum lean from vertical for merged tree shafts, degrees")
+    parser.add_argument("--max-base-reach", type=float, default=20.0, help="maximum horizontal distance a shaft may travel to reach a trunk, millimeters")
+    parser.add_argument(
+        "--tree-stress-factor",
+        type=float,
+        default=8.0,
+        help="trunk stress budget as a multiple of a lone post's axial stress; lower = thicker, earlier-saturating trunks",
+    )
+    parser.add_argument(
+        "--no-enforcers",
+        action="store_true",
+        help="disable part-to-part enforcer supports for bed-inaccessible regions (enabled by default)",
+    )
     parser.add_argument("--enforcer-reach", type=float, default=10.0, help="maximum horizontal part-to-part enforcer search distance")
     parser.add_argument("--enforcer-min-drop", type=float, default=1.0, help="minimum vertical drop for part-to-part enforcers")
     parser.add_argument("--min-island-area", type=float, default=0.08, help="minimum unsupported island area in mm^2")

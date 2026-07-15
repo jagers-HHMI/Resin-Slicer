@@ -402,26 +402,126 @@ body {
 }
 
 .viewer-status span,
-.viewer-toast {
+.viewer-status .status-button,
+.viewer-toast-entry {
   background: rgba(17, 20, 24, 0.84);
   border: 1px solid rgba(255, 255, 255, 0.12);
   padding: 7px 9px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.24);
 }
 
-.viewer-toast {
+.viewer-status .status-button {
+  pointer-events: auto;
+  cursor: pointer;
+  color: #d9e1e8;
+  font-size: 12px;
+  border-radius: 0;
+}
+
+.viewer-status .status-button:hover {
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.viewer-status .status-button.has-warnings {
+  border-color: rgba(255, 180, 84, 0.75);
+  color: #ffd9a0;
+}
+
+.viewer-toast-stack {
   position: absolute;
   left: 50%;
   bottom: 54px;
   transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
   max-width: min(720px, calc(100% - 28px));
-  color: #eef2f5;
-  font-size: 13px;
   pointer-events: none;
+  z-index: 6;
 }
 
-.viewer-toast[hidden] {
+.viewer-toast-entry {
+  color: #eef2f5;
+  font-size: 13px;
+  pointer-events: auto;
+  cursor: pointer;
+  transition: opacity 0.4s ease;
+}
+
+.viewer-toast-entry.warning {
+  background: rgba(52, 34, 10, 0.92);
+  border-color: rgba(255, 180, 84, 0.65);
+  color: #ffd9a0;
+}
+
+.viewer-toast-entry.fading {
+  opacity: 0;
+}
+
+.message-history {
+  position: absolute;
+  right: 14px;
+  bottom: 54px;
+  z-index: 7;
+  width: min(460px, calc(100% - 28px));
+  max-height: min(48vh, 420px);
+  display: flex;
+  flex-direction: column;
+  background: rgba(17, 20, 24, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  color: #d9e1e8;
+  font-size: 12px;
+}
+
+.message-history[hidden] {
   display: none;
+}
+
+.message-history-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  font-weight: 600;
+}
+
+.message-history-head button {
+  font-size: 11px;
+  padding: 3px 8px;
+  cursor: pointer;
+}
+
+.message-history-list {
+  overflow-y: auto;
+  padding: 6px 10px;
+  display: grid;
+  gap: 4px;
+}
+
+.message-history-entry {
+  display: grid;
+  grid-template-columns: 58px 1fr;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.message-history-entry time {
+  color: #8b98a5;
+  font-variant-numeric: tabular-nums;
+}
+
+.message-history-entry.warning {
+  color: #ffd9a0;
+}
+
+.message-history-empty {
+  color: #8b98a5;
+  padding: 8px 0;
 }
 
 .load-progress-panel {

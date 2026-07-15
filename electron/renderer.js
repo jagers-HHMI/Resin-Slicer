@@ -13,8 +13,8 @@ const fields = [
   "primaryDensityMultiplier", "primaryAreaDiameter", "primaryMaxExtra",
   "tipDiameter", "tipType", "sphericalContactDiameter", "sphericalContactInsetPercent",
   "tipLength", "footDiameter",
-  "bedInterface", "raftOffset", "raftChamferWidth", "raftChamferAngle", "bedInterfaceThickness", "collisionClearance", "maxBaseReach",
-  "maxSupportAngle", "enforcerReach", "enforcerMinDrop", "cadSlicingMode",
+  "bedInterface", "raftOffset", "raftChamferWidth", "raftChamferAngle", "bedInterfaceThickness", "collisionClearance",
+  "maxSupportAngle", "maxBaseReach", "enforcerReach", "enforcerMinDrop", "cadSlicingMode",
   "braceDiameter", "braceHeight", "braceDistance", "braceInterval"
 ];
 
@@ -57,7 +57,6 @@ let partClipboard = [];
 let soundPlayer = null;
 let soundInitError = null;
 let sceneUpdateFrame = null;
-let toastTimer = null;
 let themedPromptResolver = null;
 let activeRightMenuId = "job";
 let placementUnit = "mm";
@@ -108,6 +107,8 @@ const defaultSupportPresets = {
     modelLift: 4,
     overhangAngle: 42,
     supportSpacing: 4,
+    peelDensityEnabled: true,
+    cupDetectionEnabled: true,
     primarySupportsEnabled: false,
     primaryDensityMultiplier: 1.6,
     primaryAreaDiameter: 6,
@@ -126,9 +127,10 @@ const defaultSupportPresets = {
     raftChamferAngle: 45,
     bedInterfaceThickness: 0.25,
     collisionClearance: 0.06,
-    maxBaseReach: 40,
+    treeSupportsEnabled: true,
     maxSupportAngle: 40,
-    enforcersEnabled: false,
+    maxBaseReach: 20,
+    enforcersEnabled: true,
     enforcerReach: 8,
     enforcerMinDrop: 1,
     braceEnabled: false,
@@ -142,6 +144,8 @@ const defaultSupportPresets = {
     modelLift: 5,
     overhangAngle: 45,
     supportSpacing: 3,
+    peelDensityEnabled: true,
+    cupDetectionEnabled: true,
     primarySupportsEnabled: false,
     primaryDensityMultiplier: 2,
     primaryAreaDiameter: 8,
@@ -160,9 +164,10 @@ const defaultSupportPresets = {
     raftChamferAngle: 45,
     bedInterfaceThickness: 0.35,
     collisionClearance: 0.08,
-    maxBaseReach: 45,
+    treeSupportsEnabled: true,
     maxSupportAngle: 35,
-    enforcersEnabled: false,
+    maxBaseReach: 20,
+    enforcersEnabled: true,
     enforcerReach: 10,
     enforcerMinDrop: 1,
     braceEnabled: true,
@@ -176,6 +181,8 @@ const defaultSupportPresets = {
     modelLift: 6,
     overhangAngle: 50,
     supportSpacing: 2,
+    peelDensityEnabled: true,
+    cupDetectionEnabled: true,
     primarySupportsEnabled: true,
     primaryDensityMultiplier: 2.4,
     primaryAreaDiameter: 10,
@@ -194,8 +201,9 @@ const defaultSupportPresets = {
     raftChamferAngle: 45,
     bedInterfaceThickness: 0.5,
     collisionClearance: 0.1,
-    maxBaseReach: 50,
+    treeSupportsEnabled: true,
     maxSupportAngle: 30,
+    maxBaseReach: 15,
     enforcersEnabled: true,
     enforcerReach: 12,
     enforcerMinDrop: 1,
@@ -295,6 +303,9 @@ async function init() {
   $("paintExcludeButton").addEventListener("click", () => togglePaintMode("exclude"));
   $("paintEraseButton").addEventListener("click", () => togglePaintMode("erase"));
   $("clearPaintButton").addEventListener("click", clearSupportPaint);
+  $("messageHistoryButton").addEventListener("click", () => toggleMessageHistory());
+  $("messageHistoryCloseButton").addEventListener("click", () => toggleMessageHistory(false));
+  $("messageHistoryClearButton").addEventListener("click", clearMessageHistory);
   $("sliceButton").addEventListener("click", slice);
   $("sliceAllButton").addEventListener("click", sliceAll);
   $("viewSliceButton").addEventListener("click", toggleSlicePreview);
@@ -352,7 +363,7 @@ async function init() {
       setDefaultOutput();
     }
   });
-  for (const id of ["centerModel", "supportsEnabled", "primarySupportsEnabled", "sphericalContactEnabled", "enforcersEnabled", "braceEnabled"]) {
+  for (const id of ["centerModel", "supportsEnabled", "peelDensityEnabled", "primarySupportsEnabled", "sphericalContactEnabled", "treeSupportsEnabled", "enforcersEnabled", "cupDetectionEnabled", "braceEnabled"]) {
     $(id).addEventListener("change", () => {
       if (id === "sphericalContactEnabled") syncSphericalContactFields();
       if (id === "primarySupportsEnabled") syncPrimarySupportFields();
@@ -1567,6 +1578,8 @@ function buildPlateSettingsFromForm() {
       modelLift: number("modelLift"),
       overhangAngle: number("overhangAngle"),
       spacing: number("supportSpacing"),
+      peelDensityEnabled: $("peelDensityEnabled").checked,
+      cupDetectionEnabled: $("cupDetectionEnabled").checked,
       primarySupportsEnabled: $("primarySupportsEnabled").checked,
       primaryDensityMultiplier: number("primaryDensityMultiplier"),
       primaryAreaDiameter: number("primaryAreaDiameter"),
@@ -1585,8 +1598,9 @@ function buildPlateSettingsFromForm() {
       raftChamferAngle: number("raftChamferAngle"),
       bedInterfaceThickness: number("bedInterfaceThickness"),
       collisionClearance: number("collisionClearance"),
-      maxBaseReach: number("maxBaseReach"),
+      treeSupportsEnabled: $("treeSupportsEnabled").checked,
       maxSupportAngle: number("maxSupportAngle"),
+      maxBaseReach: number("maxBaseReach"),
       enforcersEnabled: $("enforcersEnabled").checked,
       enforcerReach: number("enforcerReach"),
       enforcerMinDrop: number("enforcerMinDrop"),
@@ -1677,6 +1691,8 @@ function applyBuildPlateSettingsToForm(plate) {
   $("modelLift").value = support.modelLift;
   $("overhangAngle").value = support.overhangAngle;
   $("supportSpacing").value = support.spacing;
+  $("peelDensityEnabled").checked = support.peelDensityEnabled !== false;
+  $("cupDetectionEnabled").checked = support.cupDetectionEnabled !== false;
   $("primarySupportsEnabled").checked = !!support.primarySupportsEnabled;
   $("primaryDensityMultiplier").value = support.primaryDensityMultiplier;
   $("primaryAreaDiameter").value = diameterSetting(support, "primaryAreaDiameter", "primaryAreaRadius", 8);
@@ -1695,9 +1711,10 @@ function applyBuildPlateSettingsToForm(plate) {
   $("raftChamferAngle").value = settingsValue(support, "raftChamferAngle", settingsValue(support, "raft_chamfer_angle_deg", 45));
   $("bedInterfaceThickness").value = settingsValue(support, "bedInterfaceThickness", 0.35);
   $("collisionClearance").value = support.collisionClearance;
-  $("maxBaseReach").value = support.maxBaseReach;
-  $("maxSupportAngle").value = support.maxSupportAngle;
-  $("enforcersEnabled").checked = !!support.enforcersEnabled;
+  $("treeSupportsEnabled").checked = support.treeSupportsEnabled !== false;
+  $("maxSupportAngle").value = settingsValue(support, "maxSupportAngle", 35);
+  $("maxBaseReach").value = settingsValue(support, "maxBaseReach", 20);
+  $("enforcersEnabled").checked = support.enforcersEnabled !== false;
   $("enforcerReach").value = support.enforcerReach;
   $("enforcerMinDrop").value = support.enforcerMinDrop;
   $("braceEnabled").checked = !!support.braceEnabled;
@@ -1736,6 +1753,8 @@ function supportPresetFromForm() {
     modelLift: number("modelLift"),
     overhangAngle: number("overhangAngle"),
     supportSpacing: number("supportSpacing"),
+    peelDensityEnabled: $("peelDensityEnabled").checked,
+    cupDetectionEnabled: $("cupDetectionEnabled").checked,
     primarySupportsEnabled: $("primarySupportsEnabled").checked,
     primaryDensityMultiplier: number("primaryDensityMultiplier"),
     primaryAreaDiameter: number("primaryAreaDiameter"),
@@ -1754,8 +1773,9 @@ function supportPresetFromForm() {
     raftChamferAngle: number("raftChamferAngle"),
     bedInterfaceThickness: number("bedInterfaceThickness"),
     collisionClearance: number("collisionClearance"),
-    maxBaseReach: number("maxBaseReach"),
+    treeSupportsEnabled: $("treeSupportsEnabled").checked,
     maxSupportAngle: number("maxSupportAngle"),
+    maxBaseReach: number("maxBaseReach"),
     enforcersEnabled: $("enforcersEnabled").checked,
     enforcerReach: number("enforcerReach"),
     enforcerMinDrop: number("enforcerMinDrop"),
@@ -3937,6 +3957,55 @@ async function exportProfile(kind) {
   }
 }
 
+// Format the support-status line from the planner's verification report:
+// rescue supports it added, points it could not route, and any regions still
+// unsupported in the final plan (a real print-failure risk worth a warning).
+function supportStatusText(supportCount, report) {
+  let text = `${supportCount.toLocaleString()} supports generated`;
+  if (!report) return text;
+  const extras = [];
+  if (report.rescueCount) extras.push(`${report.rescueCount} rescue`);
+  // Failed candidates only matter when coverage is actually incomplete;
+  // verification passing means the other supports cover those regions.
+  if (report.failedRoutes && (report.residualIslandCount || !report.verified)) {
+    extras.push(`${report.failedRoutes} unroutable`);
+  }
+  if (extras.length) text += ` (${extras.join(", ")})`;
+  if (report.residualIslandCount) {
+    text += ` — ⚠ ${report.residualIslandCount} unsupported island${report.residualIslandCount === 1 ? "" : "s"}`;
+  } else if (report.verified) {
+    text += " — verified";
+  }
+  if (report.suctionCupCount) {
+    text += ` — ⚠ ${report.suctionCupCount} suction cup${report.suctionCupCount === 1 ? "" : "s"}`;
+  }
+  return text;
+}
+
+function logSupportReport(report) {
+  if (!report) return;
+  if (report.failedRoutes && (report.residualIslandCount || !report.verified)) {
+    log(`Warning: ${report.failedRoutes} support point${report.failedRoutes === 1 ? "" : "s"} could not be routed to the bed or model.`);
+  }
+  if (report.rescueCount) {
+    log(`Verification added ${report.rescueCount} rescue support${report.rescueCount === 1 ? "" : "s"} for regions the initial pass missed.`);
+  }
+  if (report.residualIslandCount) {
+    const spots = (report.residualIslands || [])
+      .slice(0, 5)
+      .map((island) => `(${island.x.toFixed(1)}, ${island.y.toFixed(1)}, ${island.z.toFixed(1)}) ${island.areaMm2.toFixed(2)}mm²`)
+      .join(", ");
+    log(`Warning: ${report.residualIslandCount} unsupported island${report.residualIslandCount === 1 ? "" : "s"} remain${report.residualIslandCount === 1 ? "s" : ""} — the print may fail there. ${spots ? `First at ${spots}` : ""}`);
+  }
+  if (report.suctionCupCount) {
+    const cups = (report.suctionCups || [])
+      .slice(0, 3)
+      .map((cup) => `(${cup.x.toFixed(1)}, ${cup.y.toFixed(1)}, ${cup.z.toFixed(1)}) ${cup.mouthAreaMm2.toFixed(0)}mm² mouth, ${cup.volumeMl.toFixed(2)}ml`)
+      .join("; ");
+    log(`Warning: ${report.suctionCupCount} suction cup${report.suctionCupCount === 1 ? "" : "s"} detected — each peel fights the vacuum inside. Consider drain holes or tilting. ${cups ? `At ${cups}` : ""}`);
+  }
+}
+
 async function generatePreview() {
   if (!ensureReady(false, true)) return;
   const plate = activePlate();
@@ -4025,11 +4094,13 @@ async function generatePreview() {
     plate.supports = keepSupports.concat(result.supports || []);
     plate.supportBraces = keepBraces.concat(result.braces || []);
     plate.supportRaft = result.raft || keepRaft;
+    plate.supportReport = result.report || null;
     plate.layersGenerated = true;
-    $("supportStatus").textContent = `${plate.supports.length.toLocaleString()} supports generated`;
+    $("supportStatus").textContent = supportStatusText(plate.supports.length, result.report);
     updateScene();
     log(`Generated ${scopeLabel}: ${result.layers} layers, ${(result.supports || []).length} new supports, ${(result.braces || []).length} braces`);
-    playSound("success");
+    logSupportReport(result.report);
+    playSound(result.report && (result.report.residualIslandCount || result.report.suctionCupCount) ? "warning" : "success");
   } catch (error) {
     $("supportStatus").textContent = "Support generation failed";
     log(`Generate supports failed: ${error.message}`);
@@ -4088,9 +4159,14 @@ async function generateManualSupports() {
     // Leave add-support mode (this also rebuilds the scene) so the user can move
     // parts again right away.
     setManualSupportMode(false);
-    $("supportStatus").textContent = `${plate.supports.length.toLocaleString()} supports (${count.toLocaleString()} manual)`;
+    const failedManual = result.report ? result.report.failedRoutes : 0;
+    $("supportStatus").textContent = `${plate.supports.length.toLocaleString()} supports (${count.toLocaleString()} manual)`
+      + (failedManual ? ` — ⚠ ${failedManual} could not be routed` : "");
     log(`Routed ${count} manual support${count === 1 ? "" : "s"} on ${plate.name}. Add-support mode off — move parts freely.`);
-    playSound("success");
+    if (failedManual) {
+      log(`Warning: ${failedManual} manual/painted point${failedManual === 1 ? "" : "s"} could not be routed to the bed or model.`);
+    }
+    playSound(failedManual ? "warning" : "success");
   } catch (error) {
     $("supportStatus").textContent = "Manual support generation failed";
     log(`Generate manual supports failed: ${error.message}`);
@@ -4972,6 +5048,8 @@ function applySupportProfile(flat) {
   changed += applyNumberValue("modelLift", flat, ["modelLift", "model_lift_mm"]);
   changed += applyNumberValue("overhangAngle", flat, ["overhangAngle", "overhang_angle_deg"]);
   changed += applyNumberValue("supportSpacing", flat, ["supportSpacing", "spacing", "support_spacing_mm"]);
+  changed += applyCheckedValue("peelDensityEnabled", flat, ["peelDensityEnabled", "peel_density_enabled"]);
+  changed += applyCheckedValue("cupDetectionEnabled", flat, ["cupDetectionEnabled", "cup_detection_enabled"]);
   changed += applyCheckedValue("primarySupportsEnabled", flat, ["primarySupportsEnabled", "primary_supports_enabled"]);
   changed += applyNumberValue("primaryDensityMultiplier", flat, ["primaryDensityMultiplier", "primary_density_multiplier"]);
   changed += applyDiameterValue("primaryAreaDiameter", flat, ["primaryAreaDiameter", "primary_area_diameter_mm"], ["primaryAreaRadius", "primary_area_radius_mm"]);
@@ -4990,8 +5068,9 @@ function applySupportProfile(flat) {
   changed += applyNumberValue("raftChamferAngle", flat, ["raftChamferAngle", "raft_chamfer_angle_deg"]);
   changed += applyNumberValue("bedInterfaceThickness", flat, ["bedInterfaceThickness", "bed_interface_thickness_mm"]);
   changed += applyNumberValue("collisionClearance", flat, ["collisionClearance", "collision_clearance_mm", "pathClearance"]);
-  changed += applyNumberValue("maxBaseReach", flat, ["maxBaseReach", "max_base_reach_mm"]);
+  changed += applyCheckedValue("treeSupportsEnabled", flat, ["treeSupportsEnabled", "tree_supports_enabled"]);
   changed += applyNumberValue("maxSupportAngle", flat, ["maxSupportAngle", "max_support_angle_deg"]);
+  changed += applyNumberValue("maxBaseReach", flat, ["maxBaseReach", "max_base_reach_mm"]);
   changed += applyCheckedValue("enforcersEnabled", flat, ["enforcersEnabled", "enforcers_enabled"]);
   changed += applyNumberValue("enforcerReach", flat, ["enforcerReach", "enforcer_reach_mm"]);
   changed += applyNumberValue("enforcerMinDrop", flat, ["enforcerMinDrop", "enforcer_min_drop_mm"]);
@@ -5273,7 +5352,7 @@ function updateScene({ renderLists = true, updateStatus = true, skipDerivedGeome
     : `${activeModels.length.toLocaleString()} object${activeModels.length === 1 ? "" : "s"} on ${active.name}`;
   if (slicePreviewActive && (!active.sliced || slicePreviewPlateId !== active.id)) closeSlicePreview();
   if (active.layersGenerated) {
-    $("supportStatus").textContent = `${active.supports.length.toLocaleString()} supports generated`;
+    $("supportStatus").textContent = supportStatusText(active.supports.length, active.supportReport);
   } else if (isGeneratingSupports) {
     // preserve the "Generating supports..." text set by generatePreview
   } else if (activeModels.some((model) => modelOutOfBounds(model, active))) {
@@ -6275,16 +6354,82 @@ function intNumber(id) {
   return Math.round(number(id));
 }
 
-function log(message) {
-  const toast = $("viewerToast");
-  if (!toast) return;
-  toast.textContent = message;
-  toast.hidden = false;
-  if (toastTimer) clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => {
-    toast.hidden = true;
-    toastTimer = null;
-  }, 4200);
+// Messages stack instead of replacing each other (rapid-fire logs used to wipe
+// the previous toast before anyone could read it), warnings stay up much
+// longer, and everything is kept in a session history panel.
+const messageHistory = [];
+const TOAST_LIFETIME_MS = { info: 10000, warning: 30000 };
+const TOAST_MAX_VISIBLE = 5;
+
+function log(message, level) {
+  const resolved = level || (/^(warning|error)\b|failed/i.test(message) ? "warning" : "info");
+  messageHistory.push({ time: new Date(), message, level: resolved });
+  if (messageHistory.length > 500) messageHistory.shift();
+  appendToastEntry(message, resolved);
+  updateMessageHistoryButton();
+  renderMessageHistory();
+}
+
+function appendToastEntry(message, level) {
+  const stack = $("viewerToast");
+  if (!stack) return;
+  const entry = document.createElement("div");
+  entry.className = `viewer-toast-entry ${level}`;
+  entry.textContent = message;
+  entry.title = "Click to dismiss";
+  entry.addEventListener("click", () => entry.remove());
+  stack.appendChild(entry);
+  while (stack.children.length > TOAST_MAX_VISIBLE) stack.removeChild(stack.firstChild);
+  setTimeout(() => {
+    entry.classList.add("fading");
+    setTimeout(() => entry.remove(), 450);
+  }, TOAST_LIFETIME_MS[level] || TOAST_LIFETIME_MS.info);
+}
+
+function updateMessageHistoryButton() {
+  const button = $("messageHistoryButton");
+  if (!button) return;
+  const warnings = messageHistory.filter((entry) => entry.level === "warning").length;
+  button.textContent = warnings ? `Messages (${warnings}⚠)` : "Messages";
+  button.classList.toggle("has-warnings", warnings > 0);
+}
+
+function toggleMessageHistory(force) {
+  const panel = $("messageHistoryPanel");
+  if (!panel) return;
+  panel.hidden = force !== undefined ? !force : !panel.hidden;
+  if (!panel.hidden) renderMessageHistory();
+}
+
+function renderMessageHistory() {
+  const panel = $("messageHistoryPanel");
+  const list = $("messageHistoryList");
+  if (!panel || !list || panel.hidden) return;
+  if (!messageHistory.length) {
+    list.innerHTML = '<div class="message-history-empty">No messages yet this session.</div>';
+    return;
+  }
+  list.replaceChildren(
+    ...messageHistory
+      .slice()
+      .reverse()
+      .map((item) => {
+        const row = document.createElement("div");
+        row.className = `message-history-entry ${item.level}`;
+        const time = document.createElement("time");
+        time.textContent = item.time.toLocaleTimeString([], { hour12: false });
+        const text = document.createElement("span");
+        text.textContent = item.message;
+        row.append(time, text);
+        return row;
+      })
+  );
+}
+
+function clearMessageHistory() {
+  messageHistory.length = 0;
+  updateMessageHistoryButton();
+  renderMessageHistory();
 }
 
 function createLoadProgressItem(path) {
@@ -8421,7 +8566,10 @@ function makeSupportGeometry(items, braces) {
     const base = [baseX, baseY, baseZ];
     const joint = [jointX, jointY, Math.min(jointZ, z)];
     const top = [support.x, support.y, z];
-    const postRadius = support.postRadius || 0.28;
+    // Trunk thickness comes from the slicer's stress-budget solve (load +
+    // net moment of the joined children); drawn uniform at the base radius.
+    const trunkScale = Number.isFinite(support.trunkScale) ? Math.max(1, support.trunkScale) : 1;
+    const postRadius = (support.postRadius || 0.28) * trunkScale;
     const tipRadius = support.tipRadius || 0.18;
     addSegmentCylinder(vertices, normals, base, joint, postRadius, seg(30));
     addSphere(vertices, normals, joint, Math.max(postRadius, tipRadius), seg(42), rings(21));
@@ -9299,7 +9447,9 @@ function normalize(a) {
 init().catch((error) => {
   const toast = $("viewerToast");
   if (toast) {
-    toast.textContent = `Startup failed: ${error.message}`;
-    toast.hidden = false;
+    const entry = document.createElement("div");
+    entry.className = "viewer-toast-entry warning";
+    entry.textContent = `Startup failed: ${error.message}`;
+    toast.appendChild(entry);
   }
 });

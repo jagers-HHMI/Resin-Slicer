@@ -24,10 +24,12 @@ from .supports import (
     SupportAnchor,
     SupportBrace,
     SupportPlan,
+    SupportReport,
     _add_projected_triangle,
     _analysis_config,
+    anchor_trunk_scale,
     build_support_plan,
-    plan_supports,
+    plan_supports_verified,
 )
 from .transform import MeshTransform, apply_transform
 
@@ -86,11 +88,12 @@ def _preview(request: dict[str, Any]) -> None:
     )
     manual_only = bool(request.get("manualOnly"))
     plan = SupportPlan((), 0, 0, 0, 0.0, 0)
+    report = SupportReport()
     if support.enabled:
         def _emit_support(anchor: Any) -> None:
             _write_json({"type": "support", "support": _support_to_json(anchor, None, config, support)})
 
-        plan = plan_supports(
+        plan, report = plan_supports_verified(
             prepared,
             config,
             support,
@@ -114,6 +117,7 @@ def _preview(request: dict[str, Any]) -> None:
                 preserve_coordinates=has_model_entries,
             )
             plan = SupportPlan((), 0, 0, 0, 0.0, 0)
+            report = SupportReport(failed_routes=report.failed_routes)
         # Remember this plan so slicing the same setup does not have to re-run
         # the support analysis in the slice process. Manual-only plans cache
         # under a manual-only key, so a manual-only slice reuses exactly the
@@ -139,6 +143,7 @@ def _preview(request: dict[str, Any]) -> None:
             "raft": _raft_preview_to_json(prepared, config, support) if support.enabled else None,
             "supportCount": len(plan.anchors),
             "materialLiftMm": model_lift,
+            "report": _report_to_json(report),
         }
     )
 
@@ -195,8 +200,42 @@ def _slice(request: dict[str, Any]) -> None:
             "materialMl": result.material_ml,
             "previewDir": preview_dir,
             "previewLayerCount": result.layer_count,
+            "report": _report_to_json(result.support_report) if result.support_report is not None else None,
         }
     )
+
+
+def _report_to_json(report: SupportReport) -> dict[str, Any]:
+    islands = report.residual_islands
+    return {
+        "failedRoutes": report.failed_routes,
+        "rescueCount": report.rescue_count,
+        "verified": report.verified,
+        "residualIslandCount": len(islands),
+        # Cap the payloads; the counts are always the full totals.
+        "residualIslands": [
+            {
+                "x": round(island.x_mm, 3),
+                "y": round(island.y_mm, 3),
+                "z": round(island.z_mm, 3),
+                "areaMm2": round(island.area_mm2, 3),
+                "layer": island.layer_index,
+            }
+            for island in islands[:200]
+        ],
+        "suctionCupCount": len(report.suction_cups),
+        "suctionCups": [
+            {
+                "x": round(cup.x_mm, 3),
+                "y": round(cup.y_mm, 3),
+                "z": round(cup.z_mm, 3),
+                "mouthAreaMm2": round(cup.mouth_area_mm2, 2),
+                "heightMm": round(cup.height_mm, 2),
+                "volumeMl": round(cup.volume_mm3 / 1000.0, 3),
+            }
+            for cup in report.suction_cups[:50]
+        ],
+    }
 
 
 def _mesh_from_request(request: dict[str, Any], *, include_step: bool = True) -> Mesh | None:
@@ -230,7 +269,9 @@ def _preview_support_has_geometry(plan: SupportPlan, support: SupportConfig) -> 
 # processes, so the plan generated for the viewport is written to a temp file,
 # keyed by everything that can change the plan. Slicing reuses it only on an
 # exact key match; any settings/model change falls back to a fresh analysis.
-_PLAN_CACHE_VERSION = 1
+# Bump when SupportPlan/SupportAnchor gain fields, so stale pickled plans from
+# an older build are discarded instead of unpickling without the new attributes.
+_PLAN_CACHE_VERSION = 3
 _PLAN_CACHE_MAX_AGE_S = 24 * 60 * 60
 
 
@@ -390,6 +431,11 @@ def _plan_from_preview_request(request: dict[str, Any], config: PrintConfig, sup
                     normal_x=float(normal.get("x", 0.0)),
                     normal_y=float(normal.get("y", 0.0)),
                     normal_z=float(normal.get("z", -1.0)),
+                    load=max(1, int(entry.get("load", 1))),
+                    junctions=tuple(
+                        (int(junction[0]), float(junction[1]), float(junction[2]))
+                        for junction in entry.get("junctions") or ()
+                    ),
                 )
             )
         except (KeyError, TypeError, ValueError):
@@ -531,9 +577,15 @@ def _support_from_request(request: dict[str, Any]) -> SupportConfig:
     return SupportConfig(
         enabled=bool(support.get("enabled", True)),
         model_lift_mm=float(support.get("modelLift", 5.0)),
+        mesh_minima_enabled=bool(support.get("meshMinimaEnabled", True)),
         min_island_area_mm2=float(support.get("minIslandArea", 0.08)),
         overhang_angle_deg=float(support.get("overhangAngle", 45.0)),
         support_spacing_mm=float(support.get("spacing", 3.0)),
+        peel_density_enabled=bool(support.get("peelDensityEnabled", True)),
+        peel_area_ref_mm2=float(support.get("peelAreaRef", 50.0)),
+        peel_max_boost=float(support.get("peelMaxBoost", 2.0)),
+        cup_detection_enabled=bool(support.get("cupDetectionEnabled", True)),
+        cup_min_area_mm2=float(support.get("cupMinArea", 5.0)),
         primary_supports_enabled=bool(support.get("primarySupportsEnabled", False)),
         primary_density_multiplier=float(support.get("primaryDensityMultiplier", 2.0)),
         primary_area_radius_mm=_support_radius(support, "primaryAreaDiameter", "primaryAreaRadius", 4.0),
@@ -557,9 +609,11 @@ def _support_from_request(request: dict[str, Any]) -> SupportConfig:
         brace_max_distance_mm=float(support.get("braceDistance", 8.0)),
         brace_interval_mm=float(support.get("braceInterval", 0.0)),
         collision_clearance_mm=float(support.get("collisionClearance", 0.08)),
-        max_base_reach_mm=float(support.get("maxBaseReach", 45.0)),
+        tree_supports_enabled=bool(support.get("treeSupportsEnabled", True)),
         max_support_angle_deg=float(support.get("maxSupportAngle", 35.0)),
-        enforcers_enabled=bool(support.get("enforcersEnabled", False)),
+        max_base_reach_mm=float(support.get("maxBaseReach", 20.0)),
+        tree_stress_factor=float(support.get("treeStressFactor", 8.0)),
+        enforcers_enabled=bool(support.get("enforcersEnabled", True)),
         enforcer_reach_mm=float(support.get("enforcerReach", 10.0)),
         enforcer_min_drop_mm=float(support.get("enforcerMinDrop", 1.0)),
         analysis_max_pixels=int(support.get("analysisPixels", 250_000)),
@@ -614,6 +668,9 @@ def _support_to_json(anchor: Any, plan: SupportPlan | None, config: PrintConfig,
         "jointLayer": joint_layer,
         "kind": anchor.kind,
         "role": anchor.role,
+        "load": anchor.load,
+        "junctions": [list(junction) for junction in anchor.junctions],
+        "trunkScale": round(anchor_trunk_scale(anchor, support.post_radius_mm, support.tree_stress_factor), 3),
         "postRadius": support.post_radius_mm,
         "tipRadius": support.tip_radius_mm,
         "tipType": anchor.tip_type,

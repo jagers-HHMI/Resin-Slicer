@@ -72,7 +72,9 @@ class ElectronBridgeTests(unittest.TestCase):
         self.assertEqual(_cad_slice_mode_from_request({}), "tessellated")
 
     def test_slice_preview_uses_full_printer_resolution(self) -> None:
-        result = SimpleNamespace(output_path=Path("out.goo"), layer_count=1, support_count=0, material_ml=0.1)
+        result = SimpleNamespace(
+            output_path=Path("out.goo"), layer_count=1, support_count=0, material_ml=0.1, support_report=None
+        )
 
         with (
             patch("resin_slicer.electron_bridge._mesh_from_request", return_value=cube_mesh(1)),
@@ -86,7 +88,9 @@ class ElectronBridgeTests(unittest.TestCase):
         self.assertEqual(slice_to_file.call_args.kwargs["preview_scale"], 1)
 
     def test_slice_passes_manual_only_flag(self) -> None:
-        result = SimpleNamespace(output_path=Path("out.goo"), layer_count=1, support_count=0, material_ml=0.1)
+        result = SimpleNamespace(
+            output_path=Path("out.goo"), layer_count=1, support_count=0, material_ml=0.1, support_report=None
+        )
 
         with (
             patch("resin_slicer.electron_bridge._mesh_from_request", return_value=cube_mesh(1)),
@@ -214,7 +218,7 @@ class SupportPlanCacheTests(unittest.TestCase):
                 with (
                     patch("resin_slicer.electron_bridge._write_json"),
                     patch(
-                        "resin_slicer.pipeline.plan_supports",
+                        "resin_slicer.pipeline.plan_supports_verified",
                         side_effect=AssertionError("slice should reuse the previewed support plan"),
                     ),
                 ):
@@ -243,7 +247,7 @@ class SupportPlanCacheTests(unittest.TestCase):
                 with (
                     patch("resin_slicer.electron_bridge._write_json", side_effect=messages.append),
                     patch(
-                        "resin_slicer.pipeline.plan_supports",
+                        "resin_slicer.pipeline.plan_supports_verified",
                         side_effect=AssertionError("slicing must not replan supports"),
                     ),
                 ):

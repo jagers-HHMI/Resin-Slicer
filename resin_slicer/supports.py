@@ -42,6 +42,16 @@ class SupportAnchor:
     normal_x: float = 0.0
     normal_y: float = 0.0
     normal_z: float = -1.0
+    # Number of contact tips this shaft carries: 1 for a plain support, higher
+    # for a tree trunk that other shafts merged into.
+    load: int = 1
+    # For trunks: one entry per merged child, (junction_layer, ex_mm, ey_mm)
+    # where e is the child contact's horizontal offset from the trunk axis.
+    # Junction layers and mm offsets are resolution-independent, so these
+    # survive analysis/output rescaling untouched. The trunk radius at a layer
+    # is solved from the cumulative load and net moment of the children joining
+    # above that layer (see _trunk_radius_scale).
+    junctions: tuple[tuple[int, float, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -64,6 +74,19 @@ class _AnchorCandidate:
     y: int
     spacing_mm: float
     role: str
+
+
+@dataclass(frozen=True)
+class _MeshCandidate:
+    """A contact candidate derived from the mesh itself (full float precision)
+    rather than from the downsampled analysis raster."""
+
+    x: int
+    y: int
+    layer_index: int
+    spacing_mm: float
+    role: str
+    point_mm: Point3
 
 
 @dataclass(frozen=True)
@@ -90,6 +113,49 @@ class SupportBrace:
 
 
 @dataclass(frozen=True)
+class ResidualIsland:
+    """A connected model region that is still floating (no cured material below
+    it) after the planned supports were stamped into the layer stack."""
+
+    x_mm: float
+    y_mm: float
+    z_mm: float
+    area_mm2: float
+    layer_index: int
+
+
+@dataclass(frozen=True)
+class SuctionCup:
+    """A downward-opening cavity that seals at the top: each peel has to pull
+    against the vacuum inside it. Position is the mouth centroid; volume is
+    the enclosed cavity volume."""
+
+    x_mm: float
+    y_mm: float
+    z_mm: float
+    mouth_area_mm2: float
+    height_mm: float
+    volume_mm3: float
+
+
+@dataclass(frozen=True)
+class SupportReport:
+    """Diagnostics from support planning. failed_routes counts contact points
+    (automatic, manual, painted, or rescue) that could not be routed to the bed
+    or model; rescue_count is how many extra supports the closed-loop
+    verification added; residual_islands lists regions that remain unsupported
+    in the final plan; suction_cups lists sealed downward-opening cavities.
+    verified is False when the verification pass was skipped (manual-only
+    planning)."""
+
+    failed_routes: int = 0
+    rescue_count: int = 0
+    residual_islands: tuple[ResidualIsland, ...] = ()
+    suction_cups: tuple[SuctionCup, ...] = ()
+    verified: bool = False
+
+
+@dataclass(frozen=True)
 class SupportPlan:
     anchors: tuple[SupportAnchor, ...]
     post_radius_px: int
@@ -112,6 +178,9 @@ class SupportPlan:
     raft_offset_px: int = 0
     raft_chamfer_width_mm: float = 0.0
     raft_chamfer_angle_deg: float = 45.0
+    # Needed to solve trunk radii from junction data at stamping time.
+    post_radius_mm: float = 0.28
+    tree_stress_factor: float = 8.0
 
 
 def plan_supports(
@@ -126,6 +195,43 @@ def plan_supports(
     manual_only: bool = False,
     paint_zones: tuple[PaintZone, ...] = (),
 ) -> SupportPlan:
+    plan, _report = plan_supports_verified(
+        prepared,
+        config,
+        support,
+        layer_count,
+        progress=progress,
+        include_raft_mask=include_raft_mask,
+        on_anchor=on_anchor,
+        manual_points=manual_points,
+        manual_only=manual_only,
+        paint_zones=paint_zones,
+        verify=False,
+    )
+    return plan
+
+
+def plan_supports_verified(
+    prepared: PreparedMesh,
+    config: PrintConfig,
+    support: SupportConfig,
+    layer_count: int,
+    progress: Progress | None = None,
+    include_raft_mask: bool = True,
+    on_anchor: Callable[[SupportAnchor], None] | None = None,
+    manual_points: tuple[tuple[float, float, float], ...] = (),
+    manual_only: bool = False,
+    paint_zones: tuple[PaintZone, ...] = (),
+    verify: bool = True,
+    max_rescue_passes: int = 3,
+) -> tuple[SupportPlan, SupportReport]:
+    """Plan supports, then verify the result by stamping the supports into the
+    layer stack and re-running island detection on the combined rasters. Any
+    region still floating gets rescue supports (same routing machinery as the
+    auto planner), and whatever remains unsupported after the rescue passes is
+    reported so the caller can surface it instead of silently printing a
+    failure. Verification is skipped for manual-only planning, which must never
+    invent supports the user did not ask for."""
     support.validate()
     exclude_zones = tuple(zone for zone in paint_zones if zone.mode == "exclude")
     require_zones = tuple(zone for zone in paint_zones if zone.mode == "require")
@@ -143,7 +249,6 @@ def plan_supports(
     analysis_pixel_mm = min(analysis_config.pixel_size_x_mm, analysis_config.pixel_size_y_mm)
     lookback_layers = _overhang_lookback_layers(analysis_config, support, analysis_pixel_mm)
     min_area_px = max(1, int(ceil(support.min_island_area_mm2 / analysis_config.pixel_area_mm2)))
-    body_collision_radius = mm_to_px(max(support.post_radius_mm, support.tip_radius_mm), analysis_pixel_mm)
     collision_radius = mm_to_px(
         max(support.post_radius_mm, support.tip_radius_mm) + support.collision_clearance_mm,
         analysis_pixel_mm,
@@ -153,6 +258,12 @@ def plan_supports(
     anchors: list[SupportAnchor] = []
     placed_points = _PlacedPointIndex(config)
     surface_normals = _SurfaceNormalSampler(prepared.mesh.triangles)
+    failed_contacts: list[_FailedContact] = []
+    mesh_candidates: dict[int, list[_MeshCandidate]] = {}
+    if not manual_only and support.mesh_minima_enabled:
+        mesh_candidates = _minima_contact_candidates(
+            prepared.mesh.triangles, analysis_config, support, layer_count
+        )
 
     interval = max(1, layer_count // 20)
     for layer_index in range(layer_count):
@@ -161,6 +272,42 @@ def plan_supports(
 
         current = render_prepared_layer(prepared, analysis_config, layer_index)
         occupied = _occupied_layer(layer_index, current)
+
+        # Mesh-derived minima route before this layer's raster candidates so
+        # the true first-contact points win the spacing contest. They also run
+        # when the layer rasterises empty — a feature smaller than an analysis
+        # pixel still needs its support.
+        for candidate in mesh_candidates.get(layer_index, ()):
+            out_x, out_y = _scale_point_to_output(candidate.x, candidate.y, analysis_config, config)
+            if placed_points.too_close(out_x, out_y, candidate.spacing_mm):
+                continue
+            if exclude_zones and _in_paint_zones(candidate.point_mm, exclude_zones):
+                continue
+            below = history[-1] if history else LayerRaster(analysis_config.resolution_x, analysis_config.resolution_y)
+            fallback_normal = _estimate_surface_normal(current, below, analysis_config, candidate.x, candidate.y)
+            normal = surface_normals.normal_at_contact(candidate.point_mm, fallback_normal)
+            route = _find_support_route(
+                occupied_layers,
+                analysis_config,
+                support,
+                candidate.x,
+                candidate.y,
+                layer_index,
+                normal,
+                collision_radius,
+                candidate.role,
+            )
+            if route is None:
+                failed_contacts.append(
+                    _FailedContact(candidate.x, candidate.y, layer_index, normal, candidate.role, candidate.spacing_mm)
+                )
+                continue
+            out_anchor = _scale_anchor_to_output(route, analysis_config, config)
+            placed_points.add(out_anchor.x, out_anchor.y)
+            anchors.append(out_anchor)
+            if on_anchor is not None:
+                on_anchor(out_anchor)
+
         if occupied is None:
             # Empty layer (e.g. the model-lift gap or an internal void): there is
             # nothing here to support or to collide against, so skip the costly
@@ -211,11 +358,13 @@ def plan_supports(
                     y,
                     layer_index,
                     normal,
-                    body_collision_radius,
                     collision_radius,
                     candidate.role,
                 )
                 if route is None:
+                    failed_contacts.append(
+                        _FailedContact(x, y, layer_index, normal, candidate.role, candidate.spacing_mm)
+                    )
                     continue
 
                 out_anchor = _scale_anchor_to_output(route, analysis_config, config)
@@ -228,7 +377,7 @@ def plan_supports(
         occupied_layers.append(occupied)
 
     if manual_points:
-        _append_point_anchors(
+        failed_contacts.extend(_append_point_anchors(
             manual_points,
             "manual",
             None,
@@ -239,18 +388,17 @@ def plan_supports(
             config,
             support,
             surface_normals,
-            body_collision_radius,
             collision_radius,
             placed_points,
             on_anchor,
             layer_count,
-        )
+        ))
 
     if require_zones:
         # Painted "grow supports here" areas: each brush sample becomes a
         # candidate contact, thinned to the normal support spacing so a dense
         # stroke produces a sanely spaced cluster of supports.
-        _append_point_anchors(
+        failed_contacts.extend(_append_point_anchors(
             tuple((zone.x, zone.y, zone.z) for zone in require_zones),
             "painted",
             support.support_spacing_mm,
@@ -261,12 +409,24 @@ def plan_supports(
             config,
             support,
             surface_normals,
-            body_collision_radius,
             collision_radius,
             placed_points,
             on_anchor,
             layer_count,
-        )
+        ))
+
+    # Tree merging reroutes nearby shafts into shared trunks, in place on the
+    # anchors list. Manual-only passes skip it: the user placed those supports
+    # deliberately, and slicing replans everything together anyway. Contacts
+    # whose straight route failed then get a second chance as tree children —
+    # a leaning shaft onto a trunk can reach places a pillar cannot.
+    tree_builder = _TreeBuilder(
+        anchors, occupied_layers, analysis_config, config, support, collision_radius, bed_interface_layers
+    )
+    if not manual_only:
+        _merge_tree_supports(tree_builder)
+        failed_contacts = _attach_failed_contacts(tree_builder, failed_contacts, placed_points, on_anchor)
+    failed_routes = len(failed_contacts)
 
     # Manual-only passes brace among the freshly routed manual/painted anchors
     # (the existing auto supports are not visible to this pass; slicing replans
@@ -274,7 +434,7 @@ def plan_supports(
     braces = _plan_braces(
         anchors, occupied_layers, analysis_config, config, support, layer_count, brace_radius, bed_interface_layers
     )
-    return build_support_plan(
+    plan = build_support_plan(
         tuple(anchors),
         braces,
         config,
@@ -283,6 +443,72 @@ def plan_supports(
         raft_shadow_mask=raft_shadow_mask,
         raft_offset_px=raft_offset_px,
     )
+
+    rescue_count = 0
+    islands: list[tuple[Component, int]] = []
+    suction_cups: tuple[SuctionCup, ...] = ()
+    run_verification = verify and not manual_only and layer_count > 0
+    if run_verification:
+        occupied_by_index = {occupied.layer_index: occupied for occupied in occupied_layers}
+        suction_cups = _detect_suction_cups(occupied_by_index, analysis_config, support, layer_count)
+        attempted_rescues: set[tuple[int, int, int]] = set()
+        for pass_index in range(max_rescue_passes + 1):
+            if progress:
+                progress(f"verifying support coverage (pass {pass_index + 1})")
+            islands = _unsupported_islands(
+                plan, occupied_by_index, config, analysis_config, support, layer_count, min_area_px, lookback_layers
+            )
+            if not islands or pass_index == max_rescue_passes:
+                break
+            rescued, rescue_contacts = _rescue_islands(
+                islands,
+                occupied_layers,
+                occupied_by_index,
+                analysis_config,
+                config,
+                support,
+                surface_normals,
+                collision_radius,
+                placed_points,
+                exclude_zones,
+                on_anchor,
+                attempted_rescues,
+            )
+            anchors.extend(rescued)
+            # Rescue points that could not route straight also get the tree
+            # fallback before being given up on.
+            recovered_start = len(anchors)
+            rescue_contacts = _attach_failed_contacts(tree_builder, rescue_contacts, placed_points, on_anchor)
+            added = len(rescued) + (len(anchors) - recovered_start)
+            failed_routes += len(rescue_contacts)
+            if not added:
+                break
+            rescue_count += added
+            if progress:
+                progress(f"added {len(rescued)} rescue support{'s' if len(rescued) != 1 else ''}")
+            braces = _plan_braces(
+                anchors, occupied_layers, analysis_config, config, support, layer_count, brace_radius, bed_interface_layers
+            )
+            plan = build_support_plan(
+                tuple(anchors),
+                braces,
+                config,
+                support,
+                raft_mask=raft_mask,
+                raft_shadow_mask=raft_shadow_mask,
+                raft_offset_px=raft_offset_px,
+            )
+
+    report = SupportReport(
+        failed_routes=failed_routes,
+        rescue_count=rescue_count,
+        residual_islands=tuple(
+            _residual_island(component, layer_index, analysis_config) for component, layer_index in islands
+        ),
+        suction_cups=suction_cups,
+        verified=run_verification,
+    )
+    return plan, report
 
 
 def build_support_plan(
@@ -330,6 +556,8 @@ def build_support_plan(
         raft_offset_px=raft_offset_px,
         raft_chamfer_width_mm=support.raft_chamfer_width_mm,
         raft_chamfer_angle_deg=support.raft_chamfer_angle_deg,
+        post_radius_mm=post_mm,
+        tree_stress_factor=support.tree_stress_factor,
     )
 
 
@@ -344,15 +572,16 @@ def _append_point_anchors(
     config: PrintConfig,
     support: SupportConfig,
     surface_normals: "_SurfaceNormalSampler",
-    body_collision_radius: int,
     collision_radius: int,
     placed_points: "_PlacedPointIndex",
     on_anchor: Callable[[SupportAnchor], None] | None,
     layer_count: int,
-) -> None:
+) -> list[_FailedContact]:
     """Route user-supplied contact points using the same machinery as the auto
     planner, so a manual or painted support behaves exactly as an automatic one
-    would if it had chosen to anchor at that spot.
+    would if it had chosen to anchor at that spot. Returns the points that
+    could not be routed, so the caller can retry them as tree children and
+    report whatever remains.
 
     Each point is the (x, y, z) contact location in millimetres (the same world
     coordinates the renderer draws supports in). When spacing_mm is given,
@@ -372,6 +601,7 @@ def _append_point_anchors(
             layer_cache[layer_index] = cached
         return cached
 
+    failed: list[_FailedContact] = []
     for point in points:
         x_mm, y_mm, z_mm = float(point[0]), float(point[1]), float(point[2])
         x = min(max(0, int(round(x_mm / pixel_x - 0.5))), analysis_config.resolution_x - 1)
@@ -395,11 +625,11 @@ def _append_point_anchors(
             y,
             layer_index,
             normal,
-            body_collision_radius,
             collision_radius,
             role,
         )
         if route is None:
+            failed.append(_FailedContact(x, y, layer_index, normal, role, spacing_mm or 0.0))
             continue
 
         out_anchor = _scale_anchor_to_output(route, analysis_config, config)
@@ -407,6 +637,7 @@ def _append_point_anchors(
         anchors.append(out_anchor)
         if on_anchor is not None:
             on_anchor(out_anchor)
+    return failed
 
 
 def _in_paint_zones(point: Point3, zones: tuple[PaintZone, ...]) -> bool:
@@ -821,6 +1052,923 @@ def _analysis_config(config: PrintConfig, support: SupportConfig) -> PrintConfig
     )
 
 
+def _trunk_radius_scale(tips: int, net_moment_mm: float, post_radius_mm: float, stress_factor: float) -> float:
+    """Smallest radius multiple rho of a lone post keeping the trunk's worst
+    fiber inside the stress budget. With per-tip unit force F, a trunk of
+    radius rho*r0 carrying `tips` tips and a net moment F*E sees
+
+        sigma/sigma0 = tips/rho^2 (axial) + (4*E/r0)/rho^3 (bending),
+
+    where sigma0 = F/(pi*r0^2) is a lone post's axial stress. Solving
+    sigma/sigma0 = stress_factor gives the cubic rho^3 = a*rho + b below.
+    Balanced children cancel E, so symmetric trunks stay thin (sub-linear
+    area — the I ~ A^2 bending gain is what pays for consolidation), while
+    one-sided branches buy real thickness. Clamped to [1, 2]."""
+    if tips <= 1 and net_moment_mm <= 1e-9:
+        return 1.0
+    a = tips / stress_factor
+    b = 4.0 * max(0.0, net_moment_mm) / (max(1e-6, post_radius_mm) * stress_factor)
+    rho = max(1.0, a ** 0.5, b ** (1.0 / 3.0))
+    for _ in range(24):
+        f = rho * rho * rho - a * rho - b
+        if abs(f) < 1e-9:
+            break
+        df = 3.0 * rho * rho - a
+        if df <= 1e-9:
+            break
+        rho -= f / df
+    return min(2.0, max(1.0, rho))
+
+
+def _trunk_capacity_ok(tips: int, net_moment_mm: float, post_radius_mm: float, stress_factor: float) -> bool:
+    """Whether the stress budget still holds at the 2x radius cap; when it
+    does not, the trunk is saturated and must refuse further merges."""
+    return tips / 4.0 + net_moment_mm / (2.0 * max(1e-6, post_radius_mm)) <= stress_factor
+
+
+def anchor_trunk_scale(anchor: SupportAnchor, post_radius_mm: float, stress_factor: float) -> float:
+    """Radius multiple of the trunk at its base (all junctions above)."""
+    if not anchor.junctions:
+        return 1.0
+    ex = sum(junction[1] for junction in anchor.junctions)
+    ey = sum(junction[2] for junction in anchor.junctions)
+    return _trunk_radius_scale(
+        1 + len(anchor.junctions), sqrt(ex * ex + ey * ey), post_radius_mm, stress_factor
+    )
+
+
+@dataclass(frozen=True)
+class _FailedContact:
+    """A contact point whose straight route failed; kept so the tree pass can
+    try leaning it onto a trunk before it is reported as unroutable."""
+
+    x: int  # analysis px
+    y: int
+    layer_index: int
+    normal: tuple[float, float, float]
+    role: str
+    spacing_mm: float  # 0 = never thin (manual clicks)
+
+
+class _TreeBuilder:
+    """Trunk bookkeeping for tree merging: which anchors are trunks, where
+    children join them, the running load/moment stress budget, and the
+    collision state of trunks as they thicken. Children lean from their joint
+    down to a junction on a trunk, bounded by max_support_angle_deg and
+    max_base_reach_mm; every acceptance re-checks both the leaning shaft and
+    the trunk at its new (thicker) radius against the model."""
+
+    def __init__(
+        self,
+        anchors: list[SupportAnchor],
+        occupied_layers: list[_OccupiedLayer],
+        analysis_config: PrintConfig,
+        config: PrintConfig,
+        support: SupportConfig,
+        collision_radius: int,
+        bed_interface_layers: int,
+    ) -> None:
+        self.anchors = anchors
+        self.occupied_layers = occupied_layers
+        self.analysis_config = analysis_config
+        self.config = config
+        self.support = support
+        self.collision_radius = collision_radius
+        self.min_junction_layer = bed_interface_layers + 1
+        self.tan_max = tan(radians(support.max_support_angle_deg)) if support.max_support_angle_deg > 0 else 0.0
+        self.reach2 = support.max_base_reach_mm * support.max_base_reach_mm
+        self.cell_mm = max(1.0, support.max_base_reach_mm)
+        self.grid: dict[tuple[int, int], list[int]] = {}
+        self.junctions: dict[int, list[tuple[int, float, float]]] = {}
+        # Merge-loop children (they had a valid straight route and can revert
+        # to it): child anchor index -> (parent index, junction entry).
+        self.children: dict[int, tuple[int, tuple[int, float, float]]] = {}
+        self._analysis_cache: dict[int, SupportAnchor] = {}
+        self._checked_extra_px: dict[int, int] = {}
+        self._analysis_pixel_mm = min(analysis_config.pixel_size_x_mm, analysis_config.pixel_size_y_mm)
+
+    @property
+    def enabled(self) -> bool:
+        return self.support.tree_supports_enabled and self.tan_max > 0
+
+    def _grid_key(self, x_px: int, y_px: int) -> tuple[int, int]:
+        return (
+            int(floor(x_px * self.config.pixel_size_x_mm / self.cell_mm)),
+            int(floor(y_px * self.config.pixel_size_y_mm / self.cell_mm)),
+        )
+
+    def register_parent(self, index: int) -> None:
+        base_x, base_y = _base_xy(self.anchors[index])
+        self.grid.setdefault(self._grid_key(base_x, base_y), []).append(index)
+
+    def _trunk_analysis(self, index: int) -> SupportAnchor:
+        cached = self._analysis_cache.get(index)
+        if cached is None:
+            cached = _scale_anchor_to_output(self.anchors[index], self.config, self.analysis_config)
+            self._analysis_cache[index] = cached
+        return cached
+
+    def _moment_sum(self, index: int, ex: float, ey: float) -> float:
+        total_x = ex
+        total_y = ey
+        for _layer, jx, jy in self.junctions.get(index, ()):
+            total_x += jx
+            total_y += jy
+        return sqrt(total_x * total_x + total_y * total_y)
+
+    def try_attach(self, child: SupportAnchor, revertible_index: int | None = None) -> SupportAnchor | None:
+        """Find the best trunk for this (output-space) child and return the
+        reanchored tree anchor, or None if no trunk works. Candidates are
+        scored by distance plus resulting net moment, so merges that balance
+        an existing one-sided load are preferred over merely-near ones. When
+        revertible_index is given, the attachment is recorded so the material
+        audit can undo it if the trunk ends up a net loss."""
+        if not self.enabled:
+            return None
+        child_joint = _joint_layer(child)
+        joint_x, joint_y = _joint_xy(child)
+        child_a: SupportAnchor | None = None
+        key = self._grid_key(joint_x, joint_y)
+        best: tuple[int, int, float, float] | None = None
+        best_cost: float | None = None
+        for cell_x in (key[0] - 1, key[0], key[0] + 1):
+            for cell_y in (key[1] - 1, key[1], key[1] + 1):
+                for parent_index in self.grid.get((cell_x, cell_y), ()):
+                    trunk = self.anchors[parent_index]
+                    base_x, base_y = _base_xy(trunk)
+                    dx_mm = (joint_x - base_x) * self.config.pixel_size_x_mm
+                    dy_mm = (joint_y - base_y) * self.config.pixel_size_y_mm
+                    d2 = dx_mm * dx_mm + dy_mm * dy_mm
+                    if d2 > self.reach2:
+                        continue
+                    ex = (child.x - base_x) * self.config.pixel_size_x_mm
+                    ey = (child.y - base_y) * self.config.pixel_size_y_mm
+                    tips = 2 + len(self.junctions.get(parent_index, ()))
+                    net_moment = self._moment_sum(parent_index, ex, ey)
+                    cost = sqrt(d2) + net_moment
+                    if best_cost is not None and cost >= best_cost:
+                        continue
+                    if not _trunk_capacity_ok(
+                        tips, net_moment, self.support.post_radius_mm, self.support.tree_stress_factor
+                    ):
+                        continue
+                    # Material rule: a merge saves one post-area over the
+                    # child's junction span and thickens the trunk over (at
+                    # most) the same span, so it pays iff the base area grows
+                    # by less than one post-area. The first child gets slack —
+                    # later children on the far side cancel its moment and
+                    # recover the cost — but a trunk must never keep growing
+                    # one-sided at a loss.
+                    old_scale = _trunk_radius_scale(
+                        tips - 1,
+                        self._moment_sum(parent_index, 0.0, 0.0),
+                        self.support.post_radius_mm,
+                        self.support.tree_stress_factor,
+                    )
+                    new_scale = _trunk_radius_scale(
+                        tips, net_moment, self.support.post_radius_mm, self.support.tree_stress_factor
+                    )
+                    area_growth = new_scale * new_scale - old_scale * old_scale
+                    if area_growth > (2.5 if tips == 2 else 1.0) + 1e-9:
+                        continue
+                    rise_layers = max(1, int(ceil(sqrt(d2) / self.tan_max / self.config.layer_height_mm)))
+                    junction_layer = min(child_joint - rise_layers, _joint_layer(trunk))
+                    if junction_layer < self.min_junction_layer:
+                        continue
+                    if child_a is None:
+                        child_a = _scale_anchor_to_output(child, self.config, self.analysis_config)
+                    if self._child_collides(child_a, parent_index, junction_layer):
+                        continue
+                    if self._trunk_collides_thickened(parent_index, tips, net_moment):
+                        continue
+                    best = (parent_index, junction_layer, ex, ey)
+                    best_cost = cost
+        if best is None:
+            return None
+        parent_index, junction_layer, ex, ey = best
+        entry = (junction_layer, ex, ey)
+        self.junctions.setdefault(parent_index, []).append(entry)
+        if revertible_index is not None:
+            self.children[revertible_index] = (parent_index, entry)
+        tips = 1 + len(self.junctions[parent_index])
+        scale = _trunk_radius_scale(
+            tips,
+            self._moment_sum(parent_index, 0.0, 0.0),
+            self.support.post_radius_mm,
+            self.support.tree_stress_factor,
+        )
+        self._checked_extra_px[parent_index] = max(
+            self._checked_extra_px.get(parent_index, 0), self._extra_px(scale)
+        )
+        trunk_base_x, trunk_base_y = _base_xy(self.anchors[parent_index])
+        return replace(
+            child,
+            base_x=trunk_base_x,
+            base_y=trunk_base_y,
+            base_layer=junction_layer,
+            kind="tree",
+        )
+
+    def _extra_px(self, scale: float) -> int:
+        extra_mm = self.support.post_radius_mm * max(0.0, scale - 1.0)
+        if extra_mm <= 1e-9:
+            return 0
+        return int(ceil(extra_mm / self._analysis_pixel_mm))
+
+    def _child_collides(self, child_a: SupportAnchor, parent_index: int, junction_layer: int) -> bool:
+        trunk_a = self._trunk_analysis(parent_index)
+        trunk_base = _base_xy(trunk_a)
+        child_joint_xy = _joint_xy(child_a)
+        synthetic = SupportAnchor(
+            x=child_a.x,
+            y=child_a.y,
+            top_layer=child_a.top_layer,
+            base_x=trunk_base[0],
+            base_y=trunk_base[1],
+            base_layer=junction_layer,
+            joint_x=child_joint_xy[0],
+            joint_y=child_joint_xy[1],
+            joint_layer=child_a.joint_layer,
+            tip_type=child_a.tip_type,
+            kind="tree",
+            role=child_a.role,
+        )
+        return _route_collides(
+            self.occupied_layers,
+            self.analysis_config.resolution_x,
+            self.analysis_config.resolution_y,
+            synthetic,
+            self.collision_radius,
+        )
+
+    def _trunk_collides_thickened(self, parent_index: int, tips: int, net_moment: float) -> bool:
+        """The trunk was collision-checked at its plain radius when routed;
+        accepting more load thickens it, which can clip geometry the thin
+        shaft cleared. Re-check whenever the pixel radius would grow."""
+        scale = _trunk_radius_scale(
+            tips, net_moment, self.support.post_radius_mm, self.support.tree_stress_factor
+        )
+        extra_px = self._extra_px(scale)
+        if extra_px <= self._checked_extra_px.get(parent_index, 0):
+            return False
+        return _route_collides(
+            self.occupied_layers,
+            self.analysis_config.resolution_x,
+            self.analysis_config.resolution_y,
+            self._trunk_analysis(parent_index),
+            self.collision_radius + extra_px,
+        )
+
+    def _added_area_layers(self, parent_index: int, junctions: list[tuple[int, float, float]]) -> float:
+        """Extra trunk shaft material versus a plain post, in units of one
+        post-area x layer, computed per layer from the cumulative load and net
+        moment above it (the same quantities the stamper tapers by)."""
+        trunk_joint = _joint_layer(self.anchors[parent_index])
+        total = 0.0
+        for layer in range(0, trunk_joint + 1):
+            tips = 1
+            ex = 0.0
+            ey = 0.0
+            for junction_layer, jx, jy in junctions:
+                if junction_layer > layer:
+                    tips += 1
+                    ex += jx
+                    ey += jy
+            if tips <= 1:
+                continue
+            scale = _trunk_radius_scale(
+                tips, sqrt(ex * ex + ey * ey), self.support.post_radius_mm, self.support.tree_stress_factor
+            )
+            total += scale * scale - 1.0
+        return total
+
+    def audit_material(self) -> None:
+        """Undo merges that ended up a net material loss. Per-child greedy
+        acceptance gambles that later children will balance a trunk's moment;
+        when that never happened, the trunk carries expensive thickness for
+        little pillar savings. Reverting a merge is safe: these children's
+        straight bed routes were collision-checked when they were first
+        planned. Fallback children (no straight alternative) never revert."""
+        by_parent: dict[int, list[int]] = {}
+        for child_index, (parent_index, _entry) in self.children.items():
+            by_parent.setdefault(parent_index, []).append(child_index)
+        for parent_index, child_indices in sorted(by_parent.items()):
+            while True:
+                junctions = self.junctions.get(parent_index, [])
+                revertible = [index for index in child_indices if index in self.children]
+                if not revertible:
+                    break
+                added = self._added_area_layers(parent_index, junctions)
+                saved = sum(float(self.children[index][1][0]) for index in revertible)
+                net = added - saved
+                if net <= 1e-9:
+                    break
+                best_index = None
+                best_net = net
+                for index in revertible:
+                    entry = self.children[index][1]
+                    trial = list(junctions)
+                    trial.remove(entry)
+                    trial_net = self._added_area_layers(parent_index, trial) - (saved - float(entry[0]))
+                    if trial_net < best_net - 1e-9:
+                        best_net = trial_net
+                        best_index = index
+                if best_index is None:
+                    break
+                entry = self.children.pop(best_index)[1]
+                junctions.remove(entry)
+                child = self.anchors[best_index]
+                self.anchors[best_index] = replace(
+                    child,
+                    base_x=child.joint_x,
+                    base_y=child.joint_y,
+                    base_layer=0,
+                    kind="bed",
+                )
+
+    def apply_junctions(self) -> None:
+        """Write accumulated junction data onto the trunk anchors in place.
+        Idempotent: junction lists are the source of truth, so re-applying
+        after later attaches just refreshes the same anchors."""
+        for parent_index, junctions in self.junctions.items():
+            ordered = tuple(sorted(junctions))
+            self.anchors[parent_index] = replace(
+                self.anchors[parent_index],
+                junctions=ordered,
+                load=1 + len(ordered),
+            )
+
+
+def _merge_tree_supports(builder: _TreeBuilder) -> None:
+    """Merge nearby bed-routed shafts into shared trunks, in place on
+    builder.anchors. Processing lowest joints first makes the shafts closest
+    to the bed become the trunks that higher contacts lean onto. Manual and
+    painted supports never lean (the user chose those spots) but may serve as
+    trunks."""
+    anchors = builder.anchors
+    if not builder.enabled or len(anchors) < 2:
+        return
+    eligible = [
+        index
+        for index, anchor in enumerate(anchors)
+        if anchor.kind == "bed" and anchor.base_layer == 0
+    ]
+    if not eligible:
+        return
+    # Centroid-first ordering: for equal joint heights, the most central
+    # contact seeds the trunk, so children spread around it and their moment
+    # contributions cancel (which is what keeps trunks thin).
+    mean_x = sum(anchors[index].x for index in eligible) / len(eligible)
+    mean_y = sum(anchors[index].y for index in eligible) / len(eligible)
+    order = sorted(
+        eligible,
+        key=lambda index: (
+            _joint_layer(anchors[index]),
+            (anchors[index].x - mean_x) ** 2 + (anchors[index].y - mean_y) ** 2,
+            anchors[index].x,
+            anchors[index].y,
+        ),
+    )
+    for index in order:
+        child = anchors[index]
+        if child.role in {"manual", "painted"}:
+            builder.register_parent(index)
+            continue
+        attached = builder.try_attach(child, revertible_index=index)
+        if attached is None:
+            builder.register_parent(index)
+        else:
+            anchors[index] = attached
+    builder.audit_material()
+    builder.apply_junctions()
+
+
+def _attach_failed_contacts(
+    builder: _TreeBuilder,
+    contacts: list[_FailedContact],
+    placed_points: "_PlacedPointIndex",
+    on_anchor: Callable[[SupportAnchor], None] | None,
+) -> list[_FailedContact]:
+    """Second chance for contacts whose straight route hit the model: lean
+    them onto an existing trunk. Straight-first ordering means trunks are laid
+    down before this runs, so a contact that is only reachable through a tree
+    still gets its support. Returns the contacts that still cannot route."""
+    if not builder.enabled or not contacts:
+        return contacts
+    analysis_config = builder.analysis_config
+    config = builder.config
+    support = builder.support
+    remaining: list[_FailedContact] = []
+    for contact in contacts:
+        route_a = _build_route(
+            analysis_config,
+            support,
+            contact.x,
+            contact.y,
+            contact.layer_index,
+            contact.normal,
+            contact.x,
+            contact.y,
+            0,
+            "bed",
+            contact.role,
+        )
+        child = _scale_anchor_to_output(route_a, analysis_config, config)
+        if contact.spacing_mm > 0 and placed_points.too_close(child.x, child.y, contact.spacing_mm):
+            # A neighbouring support landed here in the meantime; the contact
+            # would have been thinned away anyway, so it is not a failure.
+            continue
+        attached = builder.try_attach(child)
+        if attached is None:
+            remaining.append(contact)
+            continue
+        builder.anchors.append(attached)
+        placed_points.add(attached.x, attached.y)
+        if on_anchor is not None:
+            on_anchor(attached)
+    builder.apply_junctions()
+    return remaining
+
+
+def _minima_contact_candidates(
+    triangles: tuple[Triangle, ...],
+    config: PrintConfig,
+    support: SupportConfig,
+    layer_count: int,
+) -> dict[int, list[_MeshCandidate]]:
+    """Find local z-minima of the mesh: the points that print first in their
+    neighbourhood and therefore need a support tip exactly there, before the
+    raster island sweep can even see them (it detects an island only once it
+    spans an analysis pixel, one or more layers late and off-centre).
+
+    Strict minima (a downward tip, lower than every welded neighbour) thin at a
+    tighter spacing because nothing else can hold that first layer. Plateau
+    minima (the boundary of a flat bottom: no lower neighbour, some equal, some
+    higher) use the normal spacing — the island sweep covers their interior."""
+    if layer_count <= 0 or not triangles:
+        return {}
+    tol = 1e-4
+
+    def key_of(point: Point3) -> tuple[float, float, float]:
+        return (round(point[0], 5), round(point[1], 5), round(point[2], 5))
+
+    points: dict[tuple[float, float, float], Point3] = {}
+    neighbors: dict[tuple[float, float, float], set[tuple[float, float, float]]] = {}
+    for triangle in triangles:
+        keys = tuple(key_of(point) for point in triangle)
+        for index in range(3):
+            points.setdefault(keys[index], triangle[index])
+            other = keys[(index + 1) % 3]
+            if keys[index] == other:
+                continue
+            neighbors.setdefault(keys[index], set()).add(other)
+            neighbors.setdefault(other, set()).add(keys[index])
+
+    tip_spacing = max(support.post_radius_mm * 3.0, support.support_spacing_mm / 2.0)
+    out: dict[int, list[_MeshCandidate]] = {}
+    for key, point in points.items():
+        near = neighbors.get(key)
+        if not near:
+            continue
+        z = key[2]
+        lower = False
+        higher = False
+        strict = True
+        for other in near:
+            if other[2] < z - tol:
+                lower = True
+                break
+            if other[2] > z + tol:
+                higher = True
+            else:
+                strict = False
+        if lower or not higher:
+            continue
+        layer_index = int(round(z / config.layer_height_mm - 0.5))
+        # Minima on (or below) the first layer sit on the build plate already.
+        if layer_index <= 0 or layer_index >= layer_count:
+            continue
+        x = min(max(0, int(round(point[0] / config.pixel_size_x_mm - 0.5))), config.resolution_x - 1)
+        y = min(max(0, int(round(point[1] / config.pixel_size_y_mm - 0.5))), config.resolution_y - 1)
+        spacing = tip_spacing if strict else support.support_spacing_mm
+        out.setdefault(layer_index, []).append(
+            _MeshCandidate(x, y, layer_index, spacing, "minima", point)
+        )
+    # Strict tips route first (smaller spacing sorts first), then stable x/y
+    # order keeps plans deterministic.
+    for candidates in out.values():
+        candidates.sort(key=lambda c: (c.spacing_mm, c.point_mm[0], c.point_mm[1]))
+    return out
+
+
+def _analysis_scaled_plan(
+    plan: SupportPlan,
+    config: PrintConfig,
+    analysis_config: PrintConfig,
+    support: SupportConfig,
+) -> SupportPlan:
+    """Rescale an output-resolution plan into the analysis raster space so the
+    verification pass can stamp supports onto the analysis-resolution layers.
+    The raft masks are dropped: everything on the first layer is treated as
+    plate-supported anyway, so the raft cannot change the island result."""
+    anchors = tuple(_scale_anchor_to_output(anchor, config, analysis_config) for anchor in plan.anchors)
+    analysis_pixel_mm = min(analysis_config.pixel_size_x_mm, analysis_config.pixel_size_y_mm)
+    brace_radius_px = mm_to_px(support.brace_radius_mm, analysis_pixel_mm)
+    braces = []
+    for brace in plan.braces:
+        x0, y0 = _scale_point_to_output(brace.x0, brace.y0, config, analysis_config)
+        x1, y1 = _scale_point_to_output(brace.x1, brace.y1, config, analysis_config)
+        braces.append(SupportBrace(x0, y0, x1, y1, brace.start_layer, brace.end_layer, brace_radius_px))
+    return build_support_plan(anchors, tuple(braces), analysis_config, support)
+
+
+def _unsupported_islands(
+    plan: SupportPlan,
+    occupied_by_index: dict[int, _OccupiedLayer],
+    config: PrintConfig,
+    analysis_config: PrintConfig,
+    support: SupportConfig,
+    layer_count: int,
+    min_area_px: int,
+    lookback_layers: int,
+) -> list[tuple[Component, int]]:
+    """Closed-loop verification: stamp the planned supports into copies of the
+    analysis layers and re-run island detection on what will actually print.
+    A region is an island when no pixel of its connected component sits above
+    cured material (model or support) within the overhang allowance."""
+    analysis_plan = _analysis_scaled_plan(plan, config, analysis_config, support)
+    pixel_mm = min(analysis_config.pixel_size_x_mm, analysis_config.pixel_size_y_mm)
+    width = analysis_config.resolution_x
+    height = analysis_config.resolution_y
+    empty = LayerRaster(width, height)
+    history: deque[LayerRaster] = deque(maxlen=lookback_layers)
+    islands: list[tuple[Component, int]] = []
+    tip_grace_radius = max(1, analysis_plan.tip_radius_px)
+    for layer_index in range(layer_count):
+        occupied = occupied_by_index.get(layer_index)
+        current = occupied.raster.copy() if occupied is not None else LayerRaster(width, height)
+        apply_supports(current, layer_index, analysis_plan)
+        # A tip also covers material that appears within the lookback window
+        # above it: a feature narrower than an analysis pixel (e.g. a spire
+        # growing off its supported apex) rasterises a few layers late here even
+        # though it prints continuously at full output resolution. Without this
+        # vertical grace — the mirror of the horizontal dilation allowance —
+        # those layers read as islands and attract stacked rescue supports.
+        for anchor in analysis_plan.anchors:
+            if anchor.top_layer < layer_index <= anchor.top_layer + lookback_layers:
+                current.add_disk(anchor.x, anchor.y, tip_grace_radius, 255)
+        # The first layer sits on the build plate; everything is supported.
+        if layer_index == 0 or current.count_on() == 0:
+            history.append(current)
+            continue
+        base_layer = history[0] if history else empty
+        previous = history[-1] if history else empty
+        overhang_px = _overhang_allowance_px(analysis_config, support, pixel_mm, max(1, len(history)))
+        support_mask = dilate_mask(base_layer, overhang_px)
+        unsupported = current.unsupported_mask(support_mask)
+        for component in current.connected_components(unsupported, min_area_px):
+            if _component_attached(component, current, support_mask):
+                continue
+            # Diagonal structures (braces, steep tree shafts) print by direct
+            # layer-to-layer disk overlap even when they outrun the model's
+            # overhang allowance; anything overlapping or bordering cured
+            # material in the layer immediately below is not an island.
+            if _component_continuous_below(component, previous):
+                continue
+            islands.append((component, layer_index))
+        history.append(current)
+    return islands
+
+
+def _component_attached(component: Component, current: LayerRaster, support_mask: bytearray) -> bool:
+    """An unsupported blob is still fine when it merges laterally with cured
+    material in the same layer (the layer prints as one connected region). Only
+    blobs with no supported neighbour anywhere on their boundary are islands."""
+    width = current.width
+    height = current.height
+    pixels = current.pixels
+    for index in component.pixels:
+        x = index % width
+        y = index // width
+        if x > 0 and pixels[index - 1] and support_mask[index - 1]:
+            return True
+        if x < width - 1 and pixels[index + 1] and support_mask[index + 1]:
+            return True
+        if y > 0 and pixels[index - width] and support_mask[index - width]:
+            return True
+        if y < height - 1 and pixels[index + width] and support_mask[index + width]:
+            return True
+    return False
+
+
+def _component_continuous_below(component: Component, previous: LayerRaster) -> bool:
+    width = previous.width
+    height = previous.height
+    pixels = previous.pixels
+    for index in component.pixels:
+        if pixels[index]:
+            return True
+        x = index % width
+        y = index // width
+        if x > 0 and pixels[index - 1]:
+            return True
+        if x < width - 1 and pixels[index + 1]:
+            return True
+        if y > 0 and pixels[index - width]:
+            return True
+        if y < height - 1 and pixels[index + width]:
+            return True
+    return False
+
+
+def _rescue_islands(
+    islands: list[tuple[Component, int]],
+    occupied_layers: list[_OccupiedLayer],
+    occupied_by_index: dict[int, _OccupiedLayer],
+    analysis_config: PrintConfig,
+    config: PrintConfig,
+    support: SupportConfig,
+    surface_normals: "_SurfaceNormalSampler",
+    collision_radius: int,
+    placed_points: "_PlacedPointIndex",
+    exclude_zones: tuple[PaintZone, ...],
+    on_anchor: Callable[[SupportAnchor], None] | None,
+    attempted: set[tuple[int, int, int]],
+) -> tuple[list[SupportAnchor], list[_FailedContact]]:
+    """Route supports onto islands the verification pass found. The island
+    exists because normal planning dropped or failed its supports, so the first
+    rescue point per island bypasses the global spacing check; further points
+    within a large island still thin out normally. Routing is deterministic
+    against the fixed model layers, so candidates already attempted in an
+    earlier pass are skipped instead of failing (and being counted) again.
+    Candidates that cannot route straight are returned for the tree fallback."""
+    width = analysis_config.resolution_x
+    pixel_x = analysis_config.pixel_size_x_mm
+    pixel_y = analysis_config.pixel_size_y_mm
+    layer_height = analysis_config.layer_height_mm
+    empty = LayerRaster(analysis_config.resolution_x, analysis_config.resolution_y)
+    rescued: list[SupportAnchor] = []
+    failed: list[_FailedContact] = []
+    for component, layer_index in islands:
+        occupied = occupied_by_index.get(layer_index)
+        if occupied is None:
+            continue
+        model = occupied.raster
+        below = occupied_by_index.get(layer_index - 1)
+        below_raster = below.raster if below is not None else empty
+        routed_any = False
+        for candidate in _anchor_candidates(component, analysis_config, support):
+            x, y = candidate.x, candidate.y
+            # The island blob can include stamped support pixels; only contact
+            # actual model surface.
+            if not model.pixels[y * width + x]:
+                continue
+            key = (x, y, layer_index)
+            if key in attempted:
+                continue
+            attempted.add(key)
+            out_x, out_y = _scale_point_to_output(x, y, analysis_config, config)
+            if routed_any and placed_points.too_close(out_x, out_y, candidate.spacing_mm):
+                continue
+            contact_point = (
+                (x + 0.5) * pixel_x,
+                (y + 0.5) * pixel_y,
+                (layer_index + 0.5) * layer_height,
+            )
+            if exclude_zones and _in_paint_zones(contact_point, exclude_zones):
+                continue
+            fallback_normal = _estimate_surface_normal(model, below_raster, analysis_config, x, y)
+            normal = surface_normals.normal_at_contact(contact_point, fallback_normal)
+            route = _find_support_route(
+                occupied_layers,
+                analysis_config,
+                support,
+                x,
+                y,
+                layer_index,
+                normal,
+                collision_radius,
+                "rescue",
+            )
+            if route is None:
+                # Spacing 0: an island needs a support even next to others.
+                failed.append(_FailedContact(x, y, layer_index, normal, "rescue", 0.0))
+                continue
+            out_anchor = _scale_anchor_to_output(route, analysis_config, config)
+            placed_points.add(out_anchor.x, out_anchor.y)
+            rescued.append(out_anchor)
+            routed_any = True
+            if on_anchor is not None:
+                on_anchor(out_anchor)
+    return rescued, failed
+
+
+@dataclass
+class _HoleComponent:
+    """An enclosed background region of one layer (a cavity cross-section)."""
+
+    area_px: int
+    cx: float
+    cy: float
+    min_x: int
+    min_y: int
+    max_x: int
+    max_y: int
+
+
+@dataclass
+class _CupChain:
+    start_layer: int
+    mouth: _HoleComponent
+    last: _HoleComponent
+    volume_px_layers: float
+    open_bottom: bool
+
+
+def _enclosed_hole_components(raster: LayerRaster) -> list[_HoleComponent]:
+    """Background regions not reachable from the layer border, found with a
+    span-based union-find (one pass over the rows, no per-pixel flood fill)."""
+    width = raster.width
+    height = raster.height
+    pixels = raster.pixels
+    parent: list[int] = [0]  # id 0 = the border-connected background
+
+    def find(node: int) -> int:
+        root = node
+        while parent[root] != root:
+            root = parent[root]
+        while parent[node] != root:
+            parent[node], node = root, parent[node]
+        return root
+
+    def union(a: int, b: int) -> None:
+        root_a, root_b = find(a), find(b)
+        if root_a != root_b:
+            parent[max(root_a, root_b)] = min(root_a, root_b)
+
+    all_spans: list[tuple[int, int, int, int]] = []  # (y, x0, x1, id)
+    previous_row: list[tuple[int, int, int]] = []
+    for y in range(height):
+        row_start = y * width
+        row_end = row_start + width
+        row_spans: list[tuple[int, int, int]] = []
+        x = 0
+        while x < width:
+            if pixels[row_start + x]:
+                nxt = pixels.find(0, row_start + x, row_end)
+                if nxt == -1:
+                    break
+                x = nxt - row_start
+                continue
+            end = pixels.find(255, row_start + x, row_end)
+            x1 = (end - row_start - 1) if end != -1 else width - 1
+            span_id = len(parent)
+            parent.append(span_id)
+            if x == 0 or x1 == width - 1 or y == 0 or y == height - 1:
+                union(span_id, 0)
+            row_spans.append((x, x1, span_id))
+            all_spans.append((y, x, x1, span_id))
+            x = x1 + 1
+        # Union with overlapping off-spans of the previous row (4-connectivity).
+        prev_index = 0
+        for x0, x1, span_id in row_spans:
+            while prev_index < len(previous_row) and previous_row[prev_index][1] < x0:
+                prev_index += 1
+            scan = prev_index
+            while scan < len(previous_row) and previous_row[scan][0] <= x1:
+                union(span_id, previous_row[scan][2])
+                scan += 1
+        previous_row = row_spans
+
+    stats: dict[int, _HoleComponent] = {}
+    for y, x0, x1, span_id in all_spans:
+        root = find(span_id)
+        if root == 0:
+            continue
+        length = x1 - x0 + 1
+        mid = (x0 + x1) / 2.0
+        entry = stats.get(root)
+        if entry is None:
+            stats[root] = _HoleComponent(length, mid * length, y * length, x0, y, x1, y)
+        else:
+            entry.area_px += length
+            entry.cx += mid * length
+            entry.cy += y * length
+            entry.min_x = min(entry.min_x, x0)
+            entry.max_x = max(entry.max_x, x1)
+            entry.max_y = y
+    holes = []
+    for entry in stats.values():
+        entry.cx /= entry.area_px
+        entry.cy /= entry.area_px
+        holes.append(entry)
+    return holes
+
+
+def _boxes_overlap(a: _HoleComponent, b: _HoleComponent) -> bool:
+    return a.min_x <= b.max_x and b.min_x <= a.max_x and a.min_y <= b.max_y and b.min_y <= a.max_y
+
+
+def _solid_at(occupied: _OccupiedLayer | None, width: int, cx: float, cy: float) -> bool:
+    if occupied is None:
+        return False
+    x = int(round(cx))
+    y = int(round(cy))
+    if x < 0 or y < 0 or x >= width or y >= occupied.raster.height:
+        return False
+    return bool(occupied.raster.pixels[y * width + x])
+
+
+_CUP_SAMPLE_STEP_MM = 1.0
+
+
+def _detect_suction_cups(
+    occupied_by_index: dict[int, _OccupiedLayer],
+    analysis_config: PrintConfig,
+    support: SupportConfig,
+    layer_count: int,
+) -> tuple[SuctionCup, ...]:
+    """Find downward-opening cavities that seal at the top. Cavity
+    cross-sections (enclosed holes) are chained across layers sampled every
+    ~1mm; a chain whose bottom is open (mouth toward the film) and whose hole
+    disappears under solid material is a suction cup. Chains that stay open to
+    the model's top are vented and ignored, as are fully enclosed voids (a
+    different problem: trapped resin, no film interface)."""
+    if not support.cup_detection_enabled or layer_count <= 0:
+        return ()
+    width = analysis_config.resolution_x
+    step_layers = max(1, int(round(_CUP_SAMPLE_STEP_MM / analysis_config.layer_height_mm)))
+    step_mm = step_layers * analysis_config.layer_height_mm
+    min_area_px = support.cup_min_area_mm2 / analysis_config.pixel_area_mm2
+    cups: list[SuctionCup] = []
+    active: list[_CupChain] = []
+
+    def emit(chain: _CupChain, end_layer: int) -> None:
+        if not chain.open_bottom or chain.mouth.area_px < min_area_px:
+            return
+        cups.append(
+            SuctionCup(
+                x_mm=(chain.mouth.cx + 0.5) * analysis_config.pixel_size_x_mm,
+                y_mm=(chain.mouth.cy + 0.5) * analysis_config.pixel_size_y_mm,
+                z_mm=(chain.start_layer + 0.5) * analysis_config.layer_height_mm,
+                mouth_area_mm2=chain.mouth.area_px * analysis_config.pixel_area_mm2,
+                height_mm=max(step_mm, (end_layer - chain.start_layer) * analysis_config.layer_height_mm),
+                volume_mm3=chain.volume_px_layers * analysis_config.pixel_area_mm2 * analysis_config.layer_height_mm,
+            )
+        )
+
+    for sample_layer in range(0, layer_count, step_layers):
+        occupied = occupied_by_index.get(sample_layer)
+        holes = _enclosed_hole_components(occupied.raster) if occupied is not None else []
+        consumed = [False] * len(holes)
+        survivors: list[_CupChain] = []
+        for chain in active:
+            match = None
+            for index, hole in enumerate(holes):
+                if not consumed[index] and _boxes_overlap(chain.last, hole):
+                    match = index
+                    break
+            if match is not None:
+                consumed[match] = True
+                chain.last = holes[match]
+                chain.volume_px_layers += holes[match].area_px * step_layers
+                survivors.append(chain)
+                continue
+            # The hole vanished: capped by solid (a cup) or opened up (vented).
+            if _solid_at(occupied, width, chain.last.cx, chain.last.cy):
+                emit(chain, sample_layer)
+        active = survivors
+        below = occupied_by_index.get(sample_layer - step_layers)
+        for index, hole in enumerate(holes):
+            if consumed[index]:
+                continue
+            # A new cavity: its mouth is open downward unless solid sits under
+            # it (which would make it an enclosed void instead).
+            open_bottom = not _solid_at(below, width, hole.cx, hole.cy)
+            active.append(
+                _CupChain(
+                    start_layer=sample_layer,
+                    mouth=hole,
+                    last=hole,
+                    volume_px_layers=hole.area_px * step_layers,
+                    open_bottom=open_bottom,
+                )
+            )
+    # Chains still alive at the model top are open upward: vented, not cups.
+    return tuple(cups)
+
+
+def _residual_island(component: Component, layer_index: int, analysis_config: PrintConfig) -> ResidualIsland:
+    cx, cy = component.centroid(analysis_config.resolution_x)
+    return ResidualIsland(
+        x_mm=(cx + 0.5) * analysis_config.pixel_size_x_mm,
+        y_mm=(cy + 0.5) * analysis_config.pixel_size_y_mm,
+        z_mm=(layer_index + 0.5) * analysis_config.layer_height_mm,
+        area_mm2=component.area_px * analysis_config.pixel_area_mm2,
+        layer_index=layer_index,
+    )
+
+
 def _find_support_route(
     occupied_layers: list[_OccupiedLayer],
     config: PrintConfig,
@@ -829,14 +1977,13 @@ def _find_support_route(
     top_y: int,
     top_layer: int,
     normal: tuple[float, float, float],
-    body_collision_radius: int,
     collision_radius: int,
     role: str,
 ) -> SupportAnchor | None:
     route = _build_route(config, support, top_x, top_y, top_layer, normal, top_x, top_y, 0, "bed", role)
     joint_x, joint_y = _joint_xy(route)
     if 0 <= joint_x < config.resolution_x and 0 <= joint_y < config.resolution_y:
-        if not _route_collides(occupied_layers, config.resolution_x, config.resolution_y, route, body_collision_radius):
+        if not _route_collides(occupied_layers, config.resolution_x, config.resolution_y, route, collision_radius):
             return route
 
     if support.enforcers_enabled:
@@ -1154,10 +2301,15 @@ def _make_diagonal_brace(
         # lift-height supports on fine layer heights). Slide the rung down as
         # far as the bed interface allows, then flatten its angle to the
         # remaining height — but no shallower than a third of the 45-degree
-        # rise (~18 degrees), so the printed stack of disks stays connected.
+        # rise (~18 degrees), and never so flat that consecutive layers'
+        # stamped disks stop overlapping (at coarse layer heights a flattened
+        # rung can step further per layer than its own diameter, printing as a
+        # row of disconnected dashes).
         start_layer = max(min_start_layer, limit - span_layers)
         available_layers = limit - start_layer
-        min_span_layers = max(1, int(ceil(span_layers / 3)))
+        horizontal_px = sqrt((x1 - x0) ** 2 + (y1 - y0) ** 2)
+        connect_span_layers = int(ceil(horizontal_px / (2.0 * max(1, radius_px))))
+        min_span_layers = max(1, int(ceil(span_layers / 3)), connect_span_layers)
         if available_layers < min_span_layers:
             return None
         span_layers = min(span_layers, available_layers)
@@ -1250,6 +2402,8 @@ def _scale_anchor_to_output(
         normal_x=anchor.normal_x,
         normal_y=anchor.normal_y,
         normal_z=anchor.normal_z,
+        load=anchor.load,
+        junctions=anchor.junctions,
     )
 
 
@@ -1293,12 +2447,32 @@ def _support_center(anchor: SupportAnchor, layer_index: int) -> tuple[int, int]:
     )
 
 
+def _post_radius_px(anchor: SupportAnchor, layer_index: int, plan: SupportPlan) -> int:
+    if not anchor.junctions:
+        return plan.post_radius_px
+    # Trunks taper with the cumulative load above each layer: a child's force
+    # enters at its junction and flows down, so only layers below the junction
+    # carry it (and its moment contribution).
+    tips = 1
+    ex = 0.0
+    ey = 0.0
+    for junction_layer, offset_x, offset_y in anchor.junctions:
+        if junction_layer > layer_index:
+            tips += 1
+            ex += offset_x
+            ey += offset_y
+    if tips <= 1:
+        return plan.post_radius_px
+    scale = _trunk_radius_scale(tips, sqrt(ex * ex + ey * ey), plan.post_radius_mm, plan.tree_stress_factor)
+    return max(1, int(round(plan.post_radius_px * scale)))
+
+
 def _support_radius_at_layer(anchor: SupportAnchor, layer_index: int, plan: SupportPlan) -> int:
     joint_layer = anchor.joint_layer if anchor.joint_layer is not None else max(0, anchor.top_layer - 1)
     if anchor.kind == "enforcer" and layer_index == anchor.base_layer:
         return plan.tip_radius_px
     if layer_index <= joint_layer or anchor.top_layer <= joint_layer:
-        return plan.post_radius_px
+        return _post_radius_px(anchor, layer_index, plan)
 
     t = (layer_index - joint_layer) / max(1, anchor.top_layer - joint_layer)
     if anchor.tip_type == "cylinder":
@@ -1368,18 +2542,30 @@ def _lerp(a: int, b: int, t: float) -> float:
     return a + (b - a) * t
 
 
+def _peel_density_boost(area_mm2: float, support: SupportConfig) -> float:
+    """Spacing divisor for a region needing support. Peel force scales with
+    the region's area and the cured plate's deflection between tips scales
+    with span^4, so large flat regions need superlinearly more tips: at the
+    reference area the tip count doubles."""
+    if not support.peel_density_enabled or area_mm2 <= 0:
+        return 1.0
+    return min(support.peel_max_boost, sqrt(1.0 + area_mm2 / support.peel_area_ref_mm2))
+
+
 def _anchor_candidates(
     component: Component,
     config: PrintConfig,
     support: SupportConfig,
 ) -> list[_AnchorCandidate]:
     cx, cy = component.centroid(config.resolution_x)
-    primary_spacing_mm = support.support_spacing_mm
+    boost = _peel_density_boost(component.area_px * config.pixel_area_mm2, support)
+    spacing_mm = support.support_spacing_mm / boost
+    primary_spacing_mm = spacing_mm
     primary_enabled = support.primary_supports_enabled and support.primary_max_extra_per_island > 0
     if primary_enabled:
         primary_spacing_mm = max(
             support.post_radius_mm * 3.0,
-            support.support_spacing_mm / support.primary_density_multiplier,
+            spacing_mm / support.primary_density_multiplier,
         )
 
     candidates: list[_AnchorCandidate] = []
@@ -1392,7 +2578,7 @@ def _anchor_candidates(
                 return
         candidates.append(_AnchorCandidate(x, y, spacing_mm, role))
 
-    append_candidate(round(cx), round(cy), primary_spacing_mm if primary_enabled else support.support_spacing_mm, "primary")
+    append_candidate(round(cx), round(cy), primary_spacing_mm if primary_enabled else spacing_mm, "primary")
 
     if primary_enabled:
         primary_stride_x = max(1, int(round(primary_spacing_mm / config.pixel_size_x_mm)))
@@ -1416,8 +2602,8 @@ def _anchor_candidates(
         for index in primary_buckets.values():
             append_candidate(index % config.resolution_x, index // config.resolution_x, primary_spacing_mm, "primary")
 
-    stride_x = max(1, int(round(support.support_spacing_mm / config.pixel_size_x_mm)))
-    stride_y = max(1, int(round(support.support_spacing_mm / config.pixel_size_y_mm)))
+    stride_x = max(1, int(round(spacing_mm / config.pixel_size_x_mm)))
+    stride_y = max(1, int(round(spacing_mm / config.pixel_size_y_mm)))
     buckets: dict[tuple[int, int], int] = {}
     for index in component.pixels:
         x = index % config.resolution_x
@@ -1428,7 +2614,7 @@ def _anchor_candidates(
             break
 
     for index in buckets.values():
-        append_candidate(index % config.resolution_x, index // config.resolution_x, support.support_spacing_mm, "secondary")
+        append_candidate(index % config.resolution_x, index // config.resolution_x, spacing_mm, "secondary")
 
     return candidates[: support.max_supports_per_island + support.primary_max_extra_per_island]
 

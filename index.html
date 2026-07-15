@@ -156,9 +156,20 @@
           </div>
           <div class="viewer-status">
             <span id="meshStatus">No mesh loaded</span>
+            <button id="messageHistoryButton" class="status-button" type="button" title="Show all session messages">Messages</button>
             <span id="supportStatus">Supports not generated</span>
           </div>
-          <div id="viewerToast" class="viewer-toast" hidden></div>
+          <div id="viewerToast" class="viewer-toast-stack"></div>
+          <div id="messageHistoryPanel" class="message-history" hidden>
+            <div class="message-history-head">
+              <span>Session messages</span>
+              <span>
+                <button id="messageHistoryClearButton" type="button">Clear</button>
+                <button id="messageHistoryCloseButton" type="button">Close</button>
+              </span>
+            </div>
+            <div id="messageHistoryList" class="message-history-list"></div>
+          </div>
           <div id="loadProgressPanel" class="load-progress-panel" hidden></div>
           <div id="slicePreviewPanel" class="slice-preview-panel" hidden>
             <div id="slicePreviewViewport" class="slice-preview-viewport">
@@ -289,6 +300,7 @@
               <label>Lift mm <input id="modelLift" type="number" step="0.1" value="5"></label>
               <label>Overhang deg <input id="overhangAngle" type="number" step="1" value="45"></label>
               <label>Spacing mm <input id="supportSpacing" type="number" step="0.1" value="3"></label>
+              <label class="check" title="Tighten spacing on large flat regions, which see the highest peel forces"><input id="peelDensityEnabled" type="checkbox" checked> Peel density</label>
               <label class="check"><input id="primarySupportsEnabled" type="checkbox"> Primary extras</label>
               <div id="primarySupportFields" class="grid two nested-fields" hidden>
                 <label>Primary density <input id="primaryDensityMultiplier" type="number" step="0.1" value="2"></label>
@@ -342,11 +354,13 @@
             </summary>
             <div class="grid two">
               <label>Path clearance <input id="collisionClearance" type="number" step="0.01" value="0.08"></label>
-              <label>Base reach <input id="maxBaseReach" type="number" step="1" value="45"></label>
-              <label>Max shaft angle <input id="maxSupportAngle" type="number" step="1" value="35"></label>
-              <label class="check"><input id="enforcersEnabled" type="checkbox"> Enforcers</label>
+              <label class="check" title="Merge nearby supports into shared tree trunks"><input id="treeSupportsEnabled" type="checkbox" checked> Tree trunks</label>
+              <label title="How far a merged shaft may lean from vertical">Max shaft angle <input id="maxSupportAngle" type="number" min="0" max="79" step="1" value="35"></label>
+              <label title="How far a support may travel sideways to reach a trunk">Merge reach <input id="maxBaseReach" type="number" min="1" step="1" value="20"></label>
+              <label class="check"><input id="enforcersEnabled" type="checkbox" checked> Enforcers</label>
               <label>Enforcer reach <input id="enforcerReach" type="number" step="0.5" value="10"></label>
               <label>Enforcer drop <input id="enforcerMinDrop" type="number" step="0.1" value="1"></label>
+              <label class="check" title="Warn about downward-opening cavities that seal at the top and fight the peel with vacuum"><input id="cupDetectionEnabled" type="checkbox" checked> Cup warnings</label>
             </div>
           </details>
 

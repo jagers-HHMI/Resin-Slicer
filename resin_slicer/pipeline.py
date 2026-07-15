@@ -13,7 +13,7 @@ from .formats.goo import write_goo
 from .mesh import Mesh
 from .raster import LayerRaster
 from .slicing import PreparedMesh, prepare_mesh, render_prepared_layer
-from .supports import PaintZone, SupportPlan, apply_supports, attach_raft_masks, plan_supports
+from .supports import PaintZone, SupportPlan, SupportReport, apply_supports, attach_raft_masks, plan_supports_verified
 from .transform import MeshTransform, apply_transform
 
 try:
@@ -50,6 +50,9 @@ class SliceResult:
     material_ml: float
     output_path: Path
     preview_dir: str | None = None
+    # Diagnostics from support planning; None when a precomputed (already
+    # previewed/verified) plan was reused, so nothing new was analysed.
+    support_report: SupportReport | None = None
 
 
 def slice_to_file(
@@ -84,6 +87,7 @@ def slice_to_file(
         progress(f"prepared mesh: {prepared.layer_count} layers")
 
     support_plan = SupportPlan((), 0, 0, 0, 0.0, 0)
+    support_report: SupportReport | None = None
     supports_enabled = support_config.enabled
     if support_config.enabled:
         if precomputed_support_plan is not None:
@@ -95,7 +99,7 @@ def slice_to_file(
         else:
             if progress:
                 progress("planning supports")
-            support_plan = plan_supports(
+            support_plan, support_report = plan_supports_verified(
                 prepared,
                 config,
                 support_config,
@@ -107,6 +111,28 @@ def slice_to_file(
             )
             if progress:
                 progress(f"planned {len(support_plan.anchors)} supports")
+                if support_report.rescue_count:
+                    progress(f"verification added {support_report.rescue_count} rescue supports")
+                if support_report.failed_routes:
+                    if support_report.residual_islands or not support_report.verified:
+                        progress(f"WARNING: {support_report.failed_routes} support points could not be routed")
+                    else:
+                        # Redundant candidates failed but verification confirmed
+                        # every region is still covered by the other supports.
+                        progress(
+                            f"{support_report.failed_routes} candidate points could not be routed; "
+                            "verification confirmed full coverage without them"
+                        )
+                if support_report.residual_islands:
+                    progress(
+                        f"WARNING: {len(support_report.residual_islands)} unsupported island(s) "
+                        "remain in the sliced output"
+                    )
+                if support_report.suction_cups:
+                    progress(
+                        f"WARNING: {len(support_report.suction_cups)} suction cup(s) detected; "
+                        "consider drain holes or tilting"
+                    )
         supports_enabled = _support_plan_has_geometry(support_plan)
         if not supports_enabled and model_lift > 0:
             if progress:
@@ -130,6 +156,7 @@ def slice_to_file(
         material_ml=stats.material_mm3 / 1000.0,
         output_path=output,
         preview_dir=preview_dir,
+        support_report=support_report,
     )
 
 

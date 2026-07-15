@@ -158,10 +158,25 @@ class PrintConfig:
 class SupportConfig:
     enabled: bool = True
     model_lift_mm: float = 5.0
+    # Place support tips at local z-minima of the mesh (the exact points that
+    # print first), in addition to the raster island sweep.
+    mesh_minima_enabled: bool = True
     min_island_area_mm2: float = 0.08
     overhang_angle_deg: float = 45.0
     overhang_margin_mm: float = 0.0
     support_spacing_mm: float = 3.0
+    # Peel-force-aware density: unsupported regions get their spacing divided
+    # by min(peel_max_boost, sqrt(1 + area/peel_area_ref_mm2)). Total peel
+    # force scales with area and plate deflection between tips scales with
+    # span^4, so big flat regions need superlinearly more tips than small ones.
+    peel_density_enabled: bool = True
+    peel_area_ref_mm2: float = 50.0
+    peel_max_boost: float = 2.0
+    # Suction-cup detection: warn about downward-opening cavities that seal at
+    # the top (they fight the peel with vacuum). Cups with a mouth smaller
+    # than cup_min_area_mm2 are ignored.
+    cup_detection_enabled: bool = True
+    cup_min_area_mm2: float = 5.0
     primary_supports_enabled: bool = False
     primary_density_multiplier: float = 2.0
     primary_area_radius_mm: float = 4.0
@@ -179,7 +194,6 @@ class SupportConfig:
     raft_chamfer_width_mm: float = 0.4
     raft_chamfer_angle_deg: float = 45.0
     bed_interface_thickness_mm: float = 0.35
-    raft_layers: int = 4
     brace_enabled: bool = True
     brace_radius_mm: float = 0.18
     brace_height_mm: float = 3.0
@@ -188,9 +202,20 @@ class SupportConfig:
     # 0 keeps the single brace level at brace_height_mm.
     brace_interval_mm: float = 0.0
     collision_clearance_mm: float = 0.08
-    max_base_reach_mm: float = 45.0
+    # Tree supports: nearby shafts lean into a shared trunk instead of each
+    # running its own pillar to the bed. max_support_angle_deg bounds how far a
+    # merged shaft may lean from vertical; max_base_reach_mm bounds the
+    # horizontal distance a contact may travel to reach a trunk.
+    tree_supports_enabled: bool = True
     max_support_angle_deg: float = 35.0
-    enforcers_enabled: bool = False
+    max_base_reach_mm: float = 20.0
+    # Trunk sizing stress budget: the worst-fiber stress a trunk may reach,
+    # as a multiple of a lone default post's axial stress under one tip. Sets
+    # both the per-segment trunk radius (axial + bending terms) and when a
+    # trunk refuses further merges. Cured resin strength leaves roughly 40x
+    # headroom over a single tip's peel stress, so 8 keeps ~5x margin.
+    tree_stress_factor: float = 8.0
+    enforcers_enabled: bool = True
     enforcer_reach_mm: float = 10.0
     enforcer_min_drop_mm: float = 1.0
     max_supports_per_island: int = 48
@@ -221,6 +246,14 @@ class SupportConfig:
             raise ConfigError("bed_interface must be one of: none, feet, raft, skate")
         if not 0 <= self.max_support_angle_deg < 80:
             raise ConfigError("max_support_angle_deg must be between 0 and 80 degrees")
+        if self.tree_stress_factor <= 0:
+            raise ConfigError("tree_stress_factor must be positive")
+        if self.peel_area_ref_mm2 <= 0:
+            raise ConfigError("peel_area_ref_mm2 must be positive")
+        if self.peel_max_boost < 1.0:
+            raise ConfigError("peel_max_boost must be at least 1")
+        if self.cup_min_area_mm2 < 0:
+            raise ConfigError("cup_min_area_mm2 cannot be negative")
         for name in (
             "support_spacing_mm",
             "post_radius_mm",
@@ -248,8 +281,6 @@ class SupportConfig:
             raise ConfigError("bed_interface_thickness_mm must be positive")
         if self.collision_clearance_mm < 0:
             raise ConfigError("collision_clearance_mm cannot be negative")
-        if self.raft_layers < 0:
-            raise ConfigError("raft_layers cannot be negative")
         if self.max_supports_per_island <= 0:
             raise ConfigError("max_supports_per_island must be positive")
         if self.analysis_max_pixels <= 0:
