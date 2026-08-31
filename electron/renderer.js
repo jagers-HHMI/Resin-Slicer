@@ -6781,7 +6781,8 @@ function boundsFor(vertices) {
 class Viewer {
   constructor(canvas) {
     this.canvas = canvas;
-    this.gl = canvas.getContext("webgl", { antialias: true });
+    this.gl = canvas.getContext("webgl", { antialias: true, stencil: true });
+    this.hasStencil = !!this.gl?.getContextAttributes()?.stencil;
     this.program = createProgram(this.gl);
     this.textureProgram = createTextureProgram(this.gl);
     // If the GPU drops the context under memory pressure, keep it restorable
@@ -7563,7 +7564,9 @@ class Viewer {
     gl.enable(gl.BLEND);
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
     gl.clearColor(0.075, 0.09, 0.11, 1);
-    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    gl.clearStencil(0);
+    gl.stencilMask(0xff);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT | gl.STENCIL_BUFFER_BIT);
 
     const aspect = this.canvas.width / Math.max(1, this.canvas.height);
     const halfHeight = Math.max(1, this.distance * Math.tan(this.fov / 2));
@@ -7580,10 +7583,13 @@ class Viewer {
 
     if (this.meshes.nextPlate) {
       this.applyPlateInteractionColors(this.meshes.nextPlate, "add-plate", plateAlpha);
-      if (!deferPlateSurfaces) this.drawBuildPlateSurface(this.meshes.nextPlate, mvp);
-      drawMesh(gl, this.program, this.meshes.nextPlate.plusPad, mvp, this.clipZ);
-      drawMesh(gl, this.program, this.meshes.nextPlate.plusOutline, mvp, this.clipZ);
-      drawMesh(gl, this.program, this.meshes.nextPlate.plus, mvp, this.clipZ);
+      if (!deferPlateSurfaces) this.drawNextPlateSurface(mvp);
+      this.drawStencilControl(
+        this.meshes.nextPlate.plusPad,
+        this.meshes.nextPlate.plusOutline,
+        this.meshes.nextPlate.plus,
+        mvp
+      );
     }
     for (const plate of this.meshes.plates || []) {
       this.applyPlateInteractionColors(plate, "plate", plateAlpha);
@@ -7591,9 +7597,7 @@ class Viewer {
       if (!this.shouldShowPlateActions(plate)) continue;
       this.applyPlateActionColors(plate);
       for (const action of plate.actions || []) {
-        drawMesh(gl, this.program, action.pad, mvp, this.clipZ);
-        drawMesh(gl, this.program, action.outline, mvp, this.clipZ);
-        drawMesh(gl, this.program, action.icon, mvp, this.clipZ);
+        this.drawPlateAction(action, mvp);
       }
     }
     if (this.meshes.supportRaft) {
@@ -7625,6 +7629,83 @@ class Viewer {
     if (this.onFrame) this.onFrame();
   }
 
+  drawPlateAction(action, mvp) {
+    this.drawStencilControl(action.pad, action.outline, action.icon, mvp);
+  }
+
+  drawStencilControl(pad, outline, icon, mvp) {
+    const gl = this.gl;
+    if (!icon || !this.hasStencil) {
+      drawMesh(gl, this.program, pad, mvp, this.clipZ);
+      drawMesh(gl, this.program, outline, mvp, this.clipZ);
+      if (icon) drawMesh(gl, this.program, icon, mvp, this.clipZ);
+      return;
+    }
+
+    gl.enable(gl.STENCIL_TEST);
+    gl.stencilMask(0xff);
+    gl.clearStencil(0);
+    gl.clear(gl.STENCIL_BUFFER_BIT);
+
+    gl.colorMask(false, false, false, false);
+    gl.depthMask(false);
+    gl.stencilFunc(gl.ALWAYS, 1, 0xff);
+    gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+    drawMesh(gl, this.program, icon, mvp, this.clipZ);
+
+    gl.colorMask(true, true, true, true);
+    gl.depthMask(true);
+    gl.stencilMask(0x00);
+    gl.stencilFunc(gl.NOTEQUAL, 1, 0xff);
+    gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+    drawMesh(gl, this.program, pad, mvp, this.clipZ);
+
+    gl.disable(gl.STENCIL_TEST);
+    drawMesh(gl, this.program, outline, mvp, this.clipZ);
+
+    gl.enable(gl.STENCIL_TEST);
+    gl.stencilFunc(gl.EQUAL, 1, 0xff);
+    drawMesh(gl, this.program, icon, mvp, this.clipZ);
+
+    gl.disable(gl.STENCIL_TEST);
+    gl.stencilMask(0xff);
+  }
+
+  drawNextPlateSurface(mvp) {
+    const gl = this.gl;
+    const plate = this.meshes.nextPlate;
+    if (!plate || !this.hasStencil) {
+      if (plate) this.drawBuildPlateSurface(plate, mvp);
+      return;
+    }
+
+    const depthWrite = gl.getParameter(gl.DEPTH_WRITEMASK);
+    const depthTest = gl.isEnabled(gl.DEPTH_TEST);
+    gl.enable(gl.STENCIL_TEST);
+    gl.stencilMask(0xff);
+    gl.clearStencil(0);
+    gl.clear(gl.STENCIL_BUFFER_BIT);
+
+    gl.colorMask(false, false, false, false);
+    gl.depthMask(false);
+    gl.disable(gl.DEPTH_TEST);
+    gl.stencilFunc(gl.ALWAYS, 1, 0xff);
+    gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+    drawMesh(gl, this.program, plate.plusPad, mvp, this.clipZ);
+    drawMesh(gl, this.program, plate.plusOutline, mvp, this.clipZ);
+
+    gl.colorMask(true, true, true, true);
+    gl.depthMask(depthWrite);
+    if (depthTest) gl.enable(gl.DEPTH_TEST);
+    gl.stencilMask(0x00);
+    gl.stencilFunc(gl.NOTEQUAL, 1, 0xff);
+    gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+    this.drawBuildPlateSurface(plate, mvp);
+
+    gl.disable(gl.STENCIL_TEST);
+    gl.stencilMask(0xff);
+  }
+
   draw() {
     this.renderFrame();
     requestAnimationFrame(() => this.draw());
@@ -7645,7 +7726,7 @@ class Viewer {
   drawTransparentBuildPlateSurfaces(mvp) {
     const gl = this.gl;
     gl.depthMask(false);
-    if (this.meshes.nextPlate) this.drawBuildPlateSurface(this.meshes.nextPlate, mvp);
+    if (this.meshes.nextPlate) this.drawNextPlateSurface(mvp);
     for (const plate of this.meshes.plates || []) this.drawBuildPlateSurface(plate, mvp);
     gl.depthMask(true);
   }
@@ -7741,11 +7822,11 @@ class Viewer {
         : hovered
           ? [1.0, 0.86, 0.22, 1]
           : action.outlineBaseColor;
-      action.icon.color = pressed
-        ? [0.68, 1.0, 0.74, 1]
-        : hovered
-          ? [1.0, 0.9, 0.32, 1]
-          : action.iconBaseColor;
+      if (action.icon) {
+        const pressedIcon = action.action === "delete" ? [1.0, 0.74, 0.74, 1] : [0.78, 0.93, 1.0, 1];
+        const hoveredIcon = action.action === "delete" ? [1.0, 0.64, 0.64, 1] : [0.62, 0.86, 1.0, 1];
+        action.icon.color = pressed ? pressedIcon : hovered ? hoveredIcon : action.iconBaseColor;
+      }
     }
   }
 
@@ -7950,20 +8031,29 @@ function roundedRectPath(x0, y0, x1, y1, radius, segments) {
   return points;
 }
 
+const PLATE_PLUS_SURFACE_Z = 0.34;
+
 function makePlatePlusGeometry(bed, origin = { x: 0, y: 0 }) {
-  const size = Math.max(14, Math.min(bed.x, bed.y) * 0.16);
-  const thick = Math.max(3, size * 0.22);
-  const cx = bed.x / 2;
-  const cy = bed.y / 2;
-  return combineGeometry([
-    makeLocalRectGeometry(cx - size / 2, cy - thick / 2, cx + size / 2, cy + thick / 2, bed, origin, 0.78),
-    makeLocalRectGeometry(cx - thick / 2, cy - size / 2, cx + thick / 2, cy + size / 2, bed, origin, 0.98)
-  ]);
+  const vertices = [];
+  const normals = [];
+  const visual = { z: PLATE_PLUS_SURFACE_Z };
+  for (const item of platePlusCutouts(bed)) {
+    pushFlatQuad(
+      vertices,
+      normals,
+      plateVisualPoint(item.x0, item.y0, bed, origin, visual),
+      plateVisualPoint(item.x1, item.y0, bed, origin, visual),
+      plateVisualPoint(item.x1, item.y1, bed, origin, visual),
+      plateVisualPoint(item.x0, item.y1, bed, origin, visual),
+      [0, 0, 1]
+    );
+  }
+  return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
 }
 
 function makePlatePlusPadGeometry(bed, origin = { x: 0, y: 0 }) {
   const rect = platePlusPadRect(bed);
-  return makeLocalRoundedRectGeometry(rect, bed, origin, { z: 0 }, 0.34);
+  return makeLocalRoundedRectGeometry(rect, bed, origin, { z: 0 }, PLATE_PLUS_SURFACE_Z);
 }
 
 function makePlatePlusOutlineGeometry(bed, origin = { x: 0, y: 0 }) {
@@ -7990,18 +8080,20 @@ function makeBuildPlateActionMeshes(gl, plate) {
   return ["add", "delete"].map((action) => {
     const layers = buildPlateActionLayers();
     const rect = layout[action];
-    const padGeometry = makeLocalRoundedRectGeometry(layout[action], plate.bed, plate.origin, plate.visual, layers.pad);
+    const padGeometry = makeLocalRoundedRectGeometry(rect, plate.bed, plate.origin, plate.visual, layers.pad);
     const outlineGeometry = makeLocalRoundedRectBorderGeometry(layout[action], plate.bed, plate.origin, plate.visual, layers.outline);
-    const iconGeometry = makePlateActionSvgIconGeometry(action, layout[action], plate.bed, plate.origin, plate.visual, layers.icon);
+    const iconGeometry = action === "delete"
+      ? makePlateActionTrashIconGeometry(rect, plate.bed, plate.origin, plate.visual, layers.icon)
+      : makePlateActionAddIconGeometry(rect, plate.bed, plate.origin, plate.visual, layers.icon);
     return {
       action,
       bounds: localRectBounds(expandRect(layout[action], layout.outlineWidth || 2), plate.bed, plate.origin, plate.visual, layers.pad, 0.8),
       padBaseColor: action === "delete" ? [0.28, 0.14, 0.15, 1] : [0.16, 0.25, 0.34, 1],
       outlineBaseColor: [0.42, 0.67, 0.95, 1],
-      iconBaseColor: action === "delete" ? [1.0, 0.55, 0.55, 1] : [0.78, 0.9, 1.0, 1],
+      iconBaseColor: action === "delete" ? [1.0, 0.48, 0.48, 1] : [0.50, 0.78, 1.0, 1],
       pad: makeMesh(gl, padGeometry, action === "delete" ? [0.28, 0.14, 0.15, 1] : [0.16, 0.25, 0.34, 1], gl.TRIANGLES),
       outline: makeMesh(gl, outlineGeometry, [0.42, 0.67, 0.95, 1], gl.TRIANGLES),
-      icon: makeMesh(gl, iconGeometry, action === "delete" ? [1.0, 0.55, 0.55, 1] : [0.78, 0.9, 1.0, 1], gl.TRIANGLES)
+      icon: makeMesh(gl, iconGeometry, action === "delete" ? [1.0, 0.48, 0.48, 1] : [0.50, 0.78, 1.0, 1], gl.TRIANGLES)
     };
   });
 }
@@ -8009,9 +8101,20 @@ function makeBuildPlateActionMeshes(gl, plate) {
 function buildPlateActionLayers() {
   return {
     pad: 0.18,
-    outline: 0.21,
-    icon: 0.24
+    outline: 0.24,
+    icon: 0.34
   };
+}
+
+function platePlusCutouts(bed) {
+  const size = Math.max(14, Math.min(bed.x, bed.y) * 0.16);
+  const thick = Math.max(3, size * 0.22);
+  const cx = bed.x / 2;
+  const cy = bed.y / 2;
+  return [
+    { x0: cx - size / 2, y0: cy - thick / 2, x1: cx + size / 2, y1: cy + thick / 2 },
+    { x0: cx - thick / 2, y0: cy - size / 2, x1: cx + thick / 2, y1: cy + size / 2 }
+  ];
 }
 
 function plateActionLayout(bed) {
@@ -8033,132 +8136,81 @@ function plateActionLayout(bed) {
   };
 }
 
-const PLATE_ACTION_ICON_SVGS = {
-  add: {
-    viewBox: [0, 0, 24, 24],
-    path: "M10 4 H14 V10 H20 V14 H14 V20 H10 V14 H4 V10 H10 Z"
-  },
-  delete: {
-    viewBox: [0, 0, 24, 24],
-    path: "M9 4 H15 L16 6 H20 V8 H18 L17 20 H7 L6 8 H4 V6 H8 Z"
-  }
-};
+function plateActionTrashCutouts(rect) {
+  return plateActionTrashRects(rect, 0.825);
+}
 
-function makePlateActionSvgIconGeometry(action, rect, bed, origin, visual, zOffset) {
-  const icon = PLATE_ACTION_ICON_SVGS[action] || PLATE_ACTION_ICON_SVGS.add;
-  const [minX, minY, width, height] = icon.viewBox;
-  const points = parseSimpleSvgPath(icon.path);
+function plateActionAddCutouts(rect) {
   const size = Math.min(rect.x1 - rect.x0, rect.y1 - rect.y0);
-  const iconSize = size * 0.62;
+  const mark = size * 0.5;
+  const thick = Math.max(1.8, size * 0.14);
   const cx = (rect.x0 + rect.x1) / 2;
   const cy = (rect.y0 + rect.y1) / 2;
-  const x0 = cx - iconSize / 2;
-  const y0 = cy - iconSize / 2;
-  const localPoints = points.map((point) => [
-    x0 + ((point[0] - minX) / width) * iconSize,
-    y0 + (1 - (point[1] - minY) / height) * iconSize
-  ]);
-  const triangles = triangulatePolygon2d(localPoints);
+  return [
+    { x0: cx - mark / 2, y0: cy - thick / 2, x1: cx + mark / 2, y1: cy + thick / 2 },
+    { x0: cx - thick / 2, y0: cy - mark / 2, x1: cx + thick / 2, y1: cy + mark / 2 }
+  ];
+}
+
+function makePlateActionTrashIconGeometry(rect, bed, origin, visual, zOffset) {
   const vertices = [];
   const normals = [];
   const localVisual = { ...visual, z: (visual?.z || 0) + zOffset };
-  for (const [a, b, c] of triangles) {
-    pushFlatTriangle(
+  for (const item of plateActionTrashCutouts(rect)) {
+    pushFlatQuad(
       vertices,
       normals,
-      plateVisualPoint(a[0], a[1], bed, origin, localVisual),
-      plateVisualPoint(b[0], b[1], bed, origin, localVisual),
-      plateVisualPoint(c[0], c[1], bed, origin, localVisual),
+      plateVisualPoint(item.x0, item.y0, bed, origin, localVisual),
+      plateVisualPoint(item.x1, item.y0, bed, origin, localVisual),
+      plateVisualPoint(item.x1, item.y1, bed, origin, localVisual),
+      plateVisualPoint(item.x0, item.y1, bed, origin, localVisual),
       [0, 0, 1]
     );
   }
   return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
 }
 
-function parseSimpleSvgPath(path) {
-  const tokens = String(path).match(/[MLHVZ]|-?\d*\.?\d+(?:e[-+]?\d+)?/gi) || [];
-  const points = [];
-  let index = 0;
-  let command = "";
-  let cursor = [0, 0];
-  while (index < tokens.length) {
-    const token = tokens[index++];
-    if (/^[MLHVZ]$/i.test(token)) {
-      command = token.toUpperCase();
-      if (command === "Z") break;
-      continue;
-    }
-    index -= 1;
-    if (command === "M" || command === "L") {
-      cursor = [Number(tokens[index++]), Number(tokens[index++])];
-      points.push(cursor);
-      command = command === "M" ? "L" : command;
-    } else if (command === "H") {
-      cursor = [Number(tokens[index++]), cursor[1]];
-      points.push(cursor);
-    } else if (command === "V") {
-      cursor = [cursor[0], Number(tokens[index++])];
-      points.push(cursor);
-    } else {
-      index += 1;
-    }
+function plateActionTrashRects(rect, scale) {
+  const size = Math.min(rect.x1 - rect.x0, rect.y1 - rect.y0);
+  const iconSize = size * scale;
+  const cx = (rect.x0 + rect.x1) / 2;
+  const cy = (rect.y0 + rect.y1) / 2;
+  const sx = iconSize / 24;
+  const sy = iconSize / 24;
+  const x0 = cx - iconSize / 2;
+  const y0 = cy - iconSize / 2;
+  const rectFromViewBox = (left, top, right, bottom) => ({
+    x0: x0 + left * sx,
+    x1: x0 + right * sx,
+    y0: y0 + (24 - bottom) * sy,
+    y1: y0 + (24 - top) * sy
+  });
+  return [
+    rectFromViewBox(8.2, 4.2, 15.8, 6.1),
+    rectFromViewBox(4.4, 6.2, 19.6, 8.3),
+    rectFromViewBox(6.6, 8.2, 17.4, 20.1),
+    rectFromViewBox(8.2, 10.0, 9.8, 18.5),
+    rectFromViewBox(11.2, 10.0, 12.8, 18.5),
+    rectFromViewBox(14.2, 10.0, 15.8, 18.5)
+  ];
+}
+
+function makePlateActionAddIconGeometry(rect, bed, origin, visual, zOffset) {
+  const vertices = [];
+  const normals = [];
+  const localVisual = { ...visual, z: (visual?.z || 0) + zOffset };
+  for (const item of plateActionAddCutouts(rect)) {
+    pushFlatQuad(
+      vertices,
+      normals,
+      plateVisualPoint(item.x0, item.y0, bed, origin, localVisual),
+      plateVisualPoint(item.x1, item.y0, bed, origin, localVisual),
+      plateVisualPoint(item.x1, item.y1, bed, origin, localVisual),
+      plateVisualPoint(item.x0, item.y1, bed, origin, localVisual),
+      [0, 0, 1]
+    );
   }
-  return points;
-}
-
-function triangulatePolygon2d(points) {
-  if (points.length < 3) return [];
-  const working = polygonArea2d(points) < 0 ? [...points].reverse() : [...points];
-  const triangles = [];
-  let guard = working.length * working.length;
-  while (working.length > 3 && guard-- > 0) {
-    let clipped = false;
-    for (let i = 0; i < working.length; i++) {
-      const previous = working[(i + working.length - 1) % working.length];
-      const current = working[i];
-      const next = working[(i + 1) % working.length];
-      if (!isConvexPolygonCorner(previous, current, next)) continue;
-      if (working.some((point, pointIndex) => (
-        pointIndex !== i
-        && pointIndex !== (i + working.length - 1) % working.length
-        && pointIndex !== (i + 1) % working.length
-        && pointInTriangle2d(point, previous, current, next)
-      ))) continue;
-      triangles.push([previous, current, next]);
-      working.splice(i, 1);
-      clipped = true;
-      break;
-    }
-    if (!clipped) break;
-  }
-  if (working.length === 3) triangles.push([working[0], working[1], working[2]]);
-  return triangles;
-}
-
-function polygonArea2d(points) {
-  let area = 0;
-  for (let i = 0; i < points.length; i++) {
-    const a = points[i];
-    const b = points[(i + 1) % points.length];
-    area += a[0] * b[1] - b[0] * a[1];
-  }
-  return area / 2;
-}
-
-function isConvexPolygonCorner(a, b, c) {
-  return ((b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0])) > 0;
-}
-
-function pointInTriangle2d(point, a, b, c) {
-  const area = Math.abs(cross2d(a, b, c));
-  const a0 = Math.abs(cross2d(point, a, b));
-  const a1 = Math.abs(cross2d(point, b, c));
-  const a2 = Math.abs(cross2d(point, c, a));
-  return Math.abs(area - (a0 + a1 + a2)) < 1e-6;
-}
-
-function cross2d(a, b, c) {
-  return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+  return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
 }
 
 function makeLocalRoundedRectGeometry(rect, bed, origin, visual, zOffset) {
