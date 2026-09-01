@@ -28,23 +28,22 @@ Outputs:
 ## GUI Workflow
 
 1. Open one or more STL/OBJ/STP/STEP files, or drag mesh files into the 3D view.
-2. Choose `GOO` or `CTB`.
-3. For STEP/STP jobs, choose `Tessellated` or `B-rep sections` from `CAD slice mode` in the Job panel. Tessellated mode slices the converted triangle mesh. B-rep sections mode uses OpenCascade CAD sectioning for STEP/STP model exposure layers while retaining tessellation for display and support planning.
-4. Adjust placement/orientation in the 3D viewer and `Placement` section. Multiple loaded meshes are arranged automatically on the build plate.
-5. Generate a support preview.
-6. Slice to the selected output path.
+2. Choose a machine profile and printer-specific resin from the top ribbon.
+3. Choose `GOO` or `CTB` in the `Job` tab.
+4. For STEP/STP jobs, choose `Tessellated` or `B-rep sections` from `CAD slice mode` in the Job tab. Tessellated mode slices the converted triangle mesh. B-rep sections mode uses OpenCascade CAD sectioning for STEP/STP model exposure layers while retaining tessellation for display and support planning.
+5. Adjust placement/orientation in the 3D viewer or the `Placement` tab. Multiple loaded meshes can be placed across multiple build plates.
+6. Generate supports from the `Supports` tab when needed.
+7. Slice the active build plate, or use `Slice All` and `Save All` to process each build plate as its own sliced file.
 
 Layer rendering uses multiple worker threads by default, capped at four workers or the number of layers in the job.
 
-The main buttons stay visible by default. Deeper settings live in collapsible sections:
+The app is organized around three main areas:
 
-- `Placement`: rotation, translation, scale, centering.
-- `Printer`: machine name, resolution, build volume, layer height.
-- `Resin`: exposure, bottom layers, lift/retract distances and speeds, wait time, PWM, density.
-- `Support Basics`: lift, overhang threshold, spacing, primary extra supports, post/tip basics.
-- `Tip And Bed`: tip shape, tip length/angle, feet/raft/skate options.
-- `Support Access`: collision clearance, base reach, shaft angle, enforcers.
-- `Bracing`: cross-support structure.
+- Top ribbon: machine profile, resin selection, `Modify Printer`, `Modify Resin`, and `Settings`.
+- Left sidebar: build plates and parts, grouped by build plate. Build plate groups can be expanded/collapsed, and parts can be moved between plates.
+- Right sidebar: tabbed `Job`, `Placement`, and `Supports` menus. The sidebar can be hidden and reopened from the side tabs.
+
+The 3D view supports multiple build plates, drag-and-drop import, direct model selection, transform widgets, a view cube, and a vertical layer/clipping scrubber. The layer scrubber starts at layer 1 and, after slicing, can display actual sliced layer images on the clipping plane. The slice preview reuses the same layer controls.
 
 ## Profiles
 
@@ -54,7 +53,11 @@ The GUI can import and export:
 - Resin profiles
 - Support settings
 
-Machine profiles can also be imported directly from the UVTools GitHub printer list. Use `Printer` -> `UVTools GitHub`, search for the printer, then import it into the current machine settings.
+Machine profiles can also be imported directly from the UVTools GitHub printer list. Use `Modify Printer` -> `Import Printer`, search for the printer, then import it into the current machine settings. Imported printers can be saved to the local machine profile list.
+
+`Modify Printer` lets you edit, save as new, save current, export, and delete machine profiles. The machine name field offers existing printers while still allowing typed names for new profiles.
+
+`Modify Resin` works the same way for resins attached to the selected printer. The top ribbon resin dropdown only shows resins configured for the active machine profile. Resin and machine preferences are persisted locally so the app reopens with the same selections.
 
 Exports are JSON files using this slicer's schema. Resin import also includes best-effort Chitubox-style field mapping for common names such as `normalExposureTime`, `bottomExposureTime`, `bottomLayerCount`, `liftingDistance`, `liftingSpeed`, `retractSpeed`, and `lightOffDelay`.
 
@@ -70,8 +73,11 @@ Support generation is island driven:
 - `Primary extras` adds denser support candidates around each detected island's primary attachment area.
 - `Enforcers` allow part-to-part supports for regions that cannot get a safe bed support.
 - `Path clearance`, `Base reach`, and `Max shaft angle` control route safety.
+- `Lift mm` raises the part only when support geometry is generated. Unsupported/no-support jobs drop the part to the build plate.
+- `Light`, `Normal`, and `Heavy` support presets can be selected, and the current settings can be saved back to the active preset.
+- Raft/skate interfaces use the projected model footprint with a configurable offset, thickness, and bottom chamfer.
 
-The support preview shows posts, tips, bases, enforcers, and braces before slicing.
+The support preview shows posts, tips, bases, contact spheres, rafts/skates, enforcers, painted support/blocker zones, and diagonal braces before slicing. Previewed support plans are cached and reused for slicing when the model and settings match.
 
 ## File Format Notes
 
@@ -141,6 +147,12 @@ Run tests:
 python -m unittest discover -s tests
 ```
 
+Run the JavaScript syntax/build check:
+
+```powershell
+npm run check
+```
+
 Run the Electron app from source with Vite hot renderer updates:
 
 ```powershell
@@ -148,11 +160,9 @@ npm install
 npm run dev
 ```
 
-`npm install` runs a `postinstall` step (`tools/ensure-electron.js`) that guarantees the
-Electron binary is unpacked, working around environments where Electron's own installer
-downloads the binary but fails to extract it.
+`npm install` runs a `postinstall` step (`tools/ensure-electron.js`) that guarantees the Electron binary is unpacked, working around environments where Electron's own installer downloads the binary but fails to extract it.
 
-The double-click `Launch Resin Slicer.vbs` launcher also starts this development flow. It launches the Vite dev server on `http://127.0.0.1:5178` and then starts Electron with `VITE_DEV_SERVER_URL` pointed at that server.
+The double-click `Launch Resin Slicer.vbs` launcher also starts this development flow without leaving a terminal window visible. It shows the lightweight splash screen first, launches the Vite dev server on `http://127.0.0.1:5178`, and then starts Electron with `VITE_DEV_SERVER_URL` pointed at that server.
 
 Renderer/UI changes hot-update through Vite without closing the Electron window. Electron main-process and preload changes still require restarting the app.
 
