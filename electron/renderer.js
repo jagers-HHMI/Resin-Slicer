@@ -8036,8 +8036,9 @@ const PLATE_PLUS_SURFACE_Z = 0.34;
 function makePlatePlusGeometry(bed, origin = { x: 0, y: 0 }) {
   const vertices = [];
   const normals = [];
-  const visual = { z: PLATE_PLUS_SURFACE_Z };
-  for (const item of platePlusCutouts(bed)) {
+  platePlusCutouts(bed).forEach((item, index) => {
+    // Cross bars overlap at the center; nudge each bar's z slightly so they don't z-fight.
+    const visual = { z: PLATE_PLUS_SURFACE_Z + index * 0.05 };
     pushFlatQuad(
       vertices,
       normals,
@@ -8047,7 +8048,7 @@ function makePlatePlusGeometry(bed, origin = { x: 0, y: 0 }) {
       plateVisualPoint(item.x0, item.y1, bed, origin, visual),
       [0, 0, 1]
     );
-  }
+  });
   return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
 }
 
@@ -8155,8 +8156,9 @@ function plateActionAddCutouts(rect) {
 function makePlateActionTrashIconGeometry(rect, bed, origin, visual, zOffset) {
   const vertices = [];
   const normals = [];
-  const localVisual = { ...visual, z: (visual?.z || 0) + zOffset };
-  for (const item of plateActionTrashCutouts(rect)) {
+  plateActionTrashCutouts(rect).forEach((item, index) => {
+    // The body rect fully overlaps the slat rects; nudge each rect's z so they don't z-fight.
+    const localVisual = { ...visual, z: (visual?.z || 0) + zOffset + index * 0.01 };
     pushFlatQuad(
       vertices,
       normals,
@@ -8166,7 +8168,7 @@ function makePlateActionTrashIconGeometry(rect, bed, origin, visual, zOffset) {
       plateVisualPoint(item.x0, item.y1, bed, origin, localVisual),
       [0, 0, 1]
     );
-  }
+  });
   return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
 }
 
@@ -8198,8 +8200,9 @@ function plateActionTrashRects(rect, scale) {
 function makePlateActionAddIconGeometry(rect, bed, origin, visual, zOffset) {
   const vertices = [];
   const normals = [];
-  const localVisual = { ...visual, z: (visual?.z || 0) + zOffset };
-  for (const item of plateActionAddCutouts(rect)) {
+  plateActionAddCutouts(rect).forEach((item, index) => {
+    // Cross bars overlap at the center; nudge each bar's z slightly so they don't z-fight.
+    const localVisual = { ...visual, z: (visual?.z || 0) + zOffset + index * 0.01 };
     pushFlatQuad(
       vertices,
       normals,
@@ -8209,7 +8212,7 @@ function makePlateActionAddIconGeometry(rect, bed, origin, visual, zOffset) {
       plateVisualPoint(item.x0, item.y1, bed, origin, localVisual),
       [0, 0, 1]
     );
-  }
+  });
   return { vertices: new Float32Array(vertices), normals: new Float32Array(normals) };
 }
 
